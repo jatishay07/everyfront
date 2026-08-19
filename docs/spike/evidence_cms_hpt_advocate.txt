@@ -1,0 +1,65 @@
+location-name: Advocate Christ Medical Center
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information 
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11263/362169147_advocate-christ-medical-center_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Childrens Hospital - Oak Lawn
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11272/362169147_advocate-childrens-hospital-oak-lawn_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Childrens Hospital - Park Ridge
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11262/362169147_advocate-childrens-hospital-park-ridge_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Condell Medical Center
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11264/262525968_advocate-condell-medical-center_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Good Samaritan Hospital
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11265/362169147_advocate-good-samaritan-hospital_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Good Shepherd Hospital
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11266/362169147_advocate-good-shepherd-hospital_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Illinois Masonic Medical Center
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11267/363196629_advocate-illinois-masonic-medical-center_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Lutheran General Hospital
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11268/362169147_advocate-lutheran-general-hospital_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Sherman Hospital
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11269/362167920_advocate-sherman-hospital_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate South Suburban Hospital
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11270/362169147_advocate-south-suburban-hospital_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
+
+location-name: Advocate Trinity Hospital
+source-page-url: https://www.advocatehealth.com/about-us/financial-assistance-for-patients/hospital-pricing-information
+mrf-url: https://sthpiprd.blob.core.windows.net/machine-readable-files/11271/362169147_advocate-trinity-hospital_standardcharges.csv
+contact-name: Standard Charges
+contact-email: StandardCharges@advocatehealth.com
