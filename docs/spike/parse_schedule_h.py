@@ -15,6 +15,7 @@ Source: IRS Form 990 Schedule H, Part V Section B ("Facility Policies and
 Practices"), required of hospital organizations under 26 CFR 1.501(r)-4.
 Schema namespace http://www.irs.gov/efile, return version 2023v5.1.
 """
+
 from __future__ import annotations
 
 import json
@@ -113,8 +114,10 @@ if __name__ == "__main__":
         print(f"\n=== {path}  ({len(facilities)} facilities) ===")
         for f in facilities:
             print(f"  [{f.facility_num}] {f.name}")
-            print(f"      13a free/discounted FPL%: "
-                  f"{f.free_care_max_fpl_pct} / {f.discounted_care_max_fpl_pct}")
+            print(
+                f"      13a free/discounted FPL%: "
+                f"{f.free_care_max_fpl_pct} / {f.discounted_care_max_fpl_pct}"
+            )
             print(f"      16a FAP: {f.fap_url}")
             print(f"      16b app: {f.fap_app_url}")
             if f.quirks:

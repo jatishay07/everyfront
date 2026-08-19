@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tooling
+        run: pip install ruff pytest pytest-cov
+      - name: Lint
+        run: ruff check .
+      - name: Format check
+        run: ruff format --check .
+      - name: Tests
+        # -m "not e2e": the e2e suite needs a live staging project (PROOF WO3)
+        run: pytest -m "not e2e"
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Block secrets and real PHI
+        # This repo is PUBLIC (CLAUDE.md). Rule 0.6: synthetic data only.
+        run: |
+          if git grep -nEI '(BEGIN [A-Z ]*PRIVATE KEY|AIza[0-9A-Za-z_-]{35}|sk_live_|live_[0-9a-f]{32})' -- . ':!.github/workflows/ci.yml'; then
+            echo "::error::possible secret committed"; exit 1
+          fi
+          if git grep -nEI '\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b' -- . ':!.github/workflows/ci.yml'; then
+            echo "::error::possible real SSN committed -- synthetic fixtures only"; exit 1
+          fi
+          echo "clean"

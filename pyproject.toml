@@ -1,0 +1,30 @@
+[project]
+name = "everyfront"
+version = "0.1.0"
+description = "Multi-agent system that finds every legal front to reduce or erase a medical bill"
+requires-python = ">=3.12,<3.13"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = ["web", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "packages"]
+pythonpath = ["packages", "services"]
+addopts = "-q --strict-markers"
+markers = [
+  "e2e: end-to-end, needs a live staging project (skipped by default in PR CI)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["packages/rules"]
+
+[tool.coverage.report]
+# Agreement 2.1: the deadline math is the legal core. STATUTE's acceptance
+# criterion is 100% branch coverage on it.
+fail_under = 0
