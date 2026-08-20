@@ -14,7 +14,9 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "packages"]
-pythonpath = ["packages", "services"]
+# Each packages/<name>/ is a distribution root containing the importable
+# package, so the root itself goes on the path (src-style layout).
+pythonpath = ["packages/rules", "packages/datapipes", "packages/delivery", "services"]
 addopts = "-q --strict-markers"
 markers = [
   "e2e: end-to-end, needs a live staging project (skipped by default in PR CI)",
@@ -22,7 +24,7 @@ markers = [
 
 [tool.coverage.run]
 branch = true
-source = ["packages/rules"]
+source = ["packages/rules/rules"]
 
 [tool.coverage.report]
 # Agreement 2.1: the deadline math is the legal core. STATUTE's acceptance
