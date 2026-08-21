@@ -329,7 +329,8 @@ check_denial_lawfulness(demanded_docs, fap_doc_list) -> DenialCheck  # 1.501(r)-
 | ADK/Agent-Runtime friction | Hello-world not deployed Day 1 | Run ADK agents inside plain Cloud Run service (still ADK = still compliant) |
 | Full UI slips | CANVAS WO1–3 not demo-ready Aug 27 | FORGE cuts WO4+; demo drives via `/demo/inject_bill` + activity feed |
 | Gmail watch flakiness on camera | Any rehearsal failure | Demo fallback path: `/demo/inject_bill` on camera, Gmail shown once pre-recorded… **no — video must be unedited: use inject as primary, show Gmail live only if 3/3 rehearsals pass** |
-| Credit burn | >$75 spent before Aug 27 | Batch API for corpus work, Flash-only, cap Gemma calls |
+| Credit burn | **>$50** spent before Aug 27 | Batch API for corpus work, Flash-only, cap Gemma calls |
+| *(amended 2026-08-21, FORGE)* | — | $75 assumed a **$450** balance ($150 hackathon + $300 trial stacking). Gate (d) found no trial and no stacking, so the real balance is **$150** — against which $75 is half the budget and trips too late to protect the Aug 28 rehearsals and the Aug 29 recording. If we end up on **personal billing** instead of hackathon credit, tighten to **$10 with a hard stop and a check-in**, not a tactic switch. |
 | Vendor test-mode surprises (Phaxio/Lob) | Test send fails Day 4 | Swap to the other vendor for demo; both are behind RELAY's interface |
 
 ---
