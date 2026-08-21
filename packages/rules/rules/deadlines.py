@@ -59,17 +59,50 @@ STATE_FAP_WINDOWS: dict[str, StateFAPRule] = {
     "NY": StateFAPRule(None, "N.Y. Pub. Health Law §2807-k(9-a)"),
     "WA": StateFAPRule(730, "Wash. Rev. Code §70.170.060(5)"),
     "NJ": StateFAPRule(365, "N.J. Admin. Code §10:52-11.8"),
-    # Demo state -- the "dramatic" case: a short clock from the LATEST of
-    # several triggering events, which is easy for a patient to miscount.
-    "IL": StateFAPRule(
-        90,
-        "210 ILCS 89/25(a)",
+    # NOTE: Illinois is deliberately ABSENT from this table. Its 90-day clock
+    # belongs to a separate state program, not to the federal FAP window --
+    # see STATE_UNINSURED_DISCOUNTS below.
+}
+
+
+@dataclass(frozen=True)
+class StateUninsuredDiscount:
+    """A state-created discount right that runs ALONGSIDE the federal FAP.
+
+    This is not a modification of the 26 CFR 1.501(r) window. It is a separate
+    statutory entitlement with its own clock, its own eligibility test, and --
+    critically -- its own scope: state acts of this kind typically bind ALL
+    hospitals in the state, including for-profits that owe no 501(r) duty at all.
+    """
+
+    days: int
+    citation: str
+    max_fpl_pct: int
+    uninsured_only: bool
+    runs_from_latest_of: tuple[str, ...]
+    # Triggering events we have confirmed against the statute text. Anything in
+    # runs_from_latest_of but not here is carried from the playbook and still
+    # needs a primary-source check (agreement §2.2).
+    confirmed_triggers: tuple[str, ...]
+
+
+STATE_UNINSURED_DISCOUNTS: dict[str, StateUninsuredDiscount] = {
+    # Hospital Uninsured Patient Discount Act. Binds every Illinois hospital,
+    # for-profit included -- so an IL patient at a for-profit facility still has
+    # this right even though no 501(r) obligation exists. Window was 60 days as
+    # enacted and was amended to 90.
+    "IL": StateUninsuredDiscount(
+        days=90,
+        citation="210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        max_fpl_pct=300,
+        uninsured_only=True,
         runs_from_latest_of=(
             "discharge_date",
             "service_date",
             "screening_date",
             "public_program_denial_date",
         ),
+        confirmed_triggers=("discharge_date", "service_date"),
     ),
 }
 
@@ -159,7 +192,9 @@ def _latest_of(bill: dict, fields: tuple[str, ...]) -> tuple[date | None, str]:
     return best, best_field
 
 
-def compute_deadlines(bill: dict, state: str, today: date | None = None) -> list[Deadline]:
+def compute_deadlines(
+    bill: dict, state: str, today: date | None = None, *, insured: bool | None = None
+) -> list[Deadline]:
     """Every statutory deadline implied by this bill. Public API, contract §3.5.
 
     `bill` follows the §3.1 `cases/{case_id}.bill` shape. Missing dates yield a
@@ -170,6 +205,11 @@ def compute_deadlines(bill: dict, state: str, today: date | None = None) -> list
         bill: the case's bill sub-document.
         state: two-letter state code, used for charity-care overrides.
         today: injected for testability; defaults to the real current date.
+        insured: coverage status, when known. Keyword-only so the positional
+            signature still matches contract §3.5. Some state programs are
+            uninsured-only; when this is None the deadline is still emitted and
+            flagged, because a missed state clock is unrecoverable and a
+            spurious one is merely noise the Strategist can drop.
 
     Returns:
         Deadlines in the order the fronts should be considered. Debt validation
@@ -259,6 +299,29 @@ def compute_deadlines(bill: dict, state: str, today: date | None = None) -> list
                 "validation_notice_date",
                 "12 CFR 1006.34(b); 15 USC 1692g(a)",
                 VALIDATION_WINDOW_DAYS,
+            )
+        )
+
+    # --- state uninsured-discount programs, PARALLEL to the federal FAP ---
+    # These do not displace the 501(r) window; a patient can hold both rights
+    # at once with different clocks. Emitting only the longer one silently
+    # drops the deadline that actually expires first.
+    discount = STATE_UNINSURED_DISCOUNTS.get(state.strip().upper())
+    if discount is not None and not (discount.uninsured_only and insured is True):
+        basis_d, basis_d_field = _latest_of(bill, discount.runs_from_latest_of)
+        unconfirmed = basis_d_field and basis_d_field not in discount.confirmed_triggers
+        citation = discount.citation
+        if unconfirmed:
+            citation += f" [trigger {basis_d_field!r} unverified against statute text]"
+        out.append(
+            Deadline(
+                "charity_care",
+                f"{state.strip().upper()} uninsured discount application",
+                basis_d + timedelta(days=discount.days) if isinstance(basis_d, date) else None,
+                basis_d,
+                basis_d_field or "discharge_date",
+                citation,
+                discount.days,
             )
         )
 
