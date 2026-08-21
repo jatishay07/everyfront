@@ -44,7 +44,8 @@ Key legal lever encoded in the product: **26 CFR 1.501(r)-4(b)(3)** — a hospit
 - Judging: Innovation & Operational Utility **40%** · Architectural Discipline **30%** · Demo & Production Readiness **30%** · Bonus up to **0.6**: published content 0.2, social w/ #AllThingsAgenticHackathon 0.2, extra Google models (**Gemma**) 0.2
 
 ## 1.4 Tech stack (locked — do not relitigate)
-- **Python 3.12**, Google **ADK** for agents, **Gemini 3.7 Flash** (`gemini-3.7-flash`) via Vertex/GEAP SDK; **Gemma** (via Gemini API, `gemma-3-27b-it`) as the cheap first-pass document classifier
+- **Python 3.12**, Google **ADK** for agents, **Gemini 3.7 Flash** (`gemini-3.7-flash`) via Vertex/GEAP SDK; **Gemma** (via Gemini API, `gemma-4-26b-a4b-it`) as the first-pass document classifier
+  - *AMENDED 2026-08-21 by FORGE, gate (c) verification:* `gemma-3-27b-it` returns HTTP 404 — the Gemma 3 generation is no longer served. Only Gemma 4 is available. `gemini-3.7-flash` is confirmed live and clears the §1.3 "3.5 or newer" bar. See `docs/SPIKE.md`.
 - **Cloud Run** (all services, scale-to-zero) · **Pub/Sub** (event backbone + Gmail push) · **Firestore** (case state) · **GCS** (documents) · **Secret Manager** (keys)
 - **Next.js 14 + Tailwind** dashboard on Cloud Run
 - **Phaxio** (fax, test mode) · **Lob** (certified mail, `test_` keys) · **Gmail API** (watch → Pub/Sub) · **Google Calendar API** · **Google Drive API**
