@@ -8,7 +8,7 @@ Four gates. Gates (a) and (c) are halt-and-redesign gates.
 |---|---|---|
 | (a) Parse real IRS Schedule H XML, extract lines 13a/16a/16b | LEDGER's crown-jewel pipeline is feasible | **PASS** |
 | (b) Reach an MRF via `cms-hpt.txt` for 3 real systems | Cash-price audit front is feasible | **PASS** |
-| (c) Hello-world ADK agent on Cloud Run | The entire runtime is feasible | **BLOCKED** — needs `gcloud auth login` |
+| (c) Hello-world ADK agent on Cloud Run | The entire runtime is feasible | **PARTIAL** — models verified; deploy still blocked on billing |
 | (d) Verify $150 hackathon + $300 trial credit stacking | Budget headroom is real | **BLOCKED** — needs `gcloud auth login` |
 
 Reproduce with `docs/spike/parse_schedule_h.py`. Evidence files are committed alongside.
@@ -142,7 +142,57 @@ is demonstrably overcharged 2× — **a real, defensible demo finding**.
 
 ---
 
-## Gates (c) and (d) — **BLOCKED**
+## Gate (c), model half — **PASS (with one amendment)** · 2026-08-21
+
+Verified live against `generativelanguage.googleapis.com` using a free AI Studio
+key — no billing, no GCP project. Doing this early was worth it: one of the two
+locked model IDs does not exist.
+
+| §1.4 ID | Result | Action |
+|---|---|---|
+| `gemini-3.7-flash` | **live** — returned `bill` on a real classification | none; clears §1.3 |
+| `gemma-3-27b-it` | **HTTP 404 NOT_FOUND** | **amended** to `gemma-4-26b-a4b-it` |
+
+**§1.3 pass/fail disqualifier is cleared.** `gemini-3.7-flash` is served and 3.7
+satisfies "Gemini 3.5 or newer". `gemini-3.6-flash` and `gemini-3.5-flash` also
+respond and are valid fallbacks.
+
+One transient note: `gemini-3.7-flash` returned **HTTP 503 "high demand"** on the
+first attempt and succeeded on retry. Free-tier capacity, not absence — but SWARM
+must implement retry-with-backoff regardless, and this is why 503 must never be
+treated as "model missing".
+
+### Gemma 3 is gone; Gemma 4 works — with two traps
+
+The whole Gemma 3 generation returns 404. Only `gemma-4-26b-a4b-it` and
+`gemma-4-31b-it` are served. Both classify correctly, **5/5** on the §3.1 document
+types (bill, denial_letter, collection_notice, gfe, income_proof).
+
+**Trap 1 — thinking parts.** Gemma 4 returns TWO parts: `{"text": ..., "thought": true}`
+followed by the real answer. Concatenating them yields a bulleted restatement of
+the prompt instead of a label — it looks exactly like the model failing to follow
+instructions, and it cost an hour to diagnose. **Filter parts where `thought` is
+true.** With filtering, accuracy went 0/5 → 5/5 with no prompt change.
+
+```python
+def answer(resp):
+    parts = resp["candidates"][0]["content"]["parts"]
+    return "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
+```
+
+**Trap 2 — thinking cannot be disabled.** `thinkingConfig.thinkingBudget: 0` returns
+HTTP 400 "Thinking budget is not supported for this model." Measured cost is ~312
+thought tokens per classification against ~2.6 answer tokens — roughly 120x the
+output. §1.4 chose Gemma as the *cheap* first pass; it is still a small model, but
+"cheap" now means cheap-per-token, not few-tokens. Factor this into the §6 burn
+ceiling before running the corpus.
+
+**HANDOFF → SWARM (persona 5, WO1):** use the thought-filtering helper above;
+implement 503 retry-with-backoff; budget ~315 tokens per Gemma classification.
+
+---
+
+## Gate (c) deploy half, and gate (d) — **BLOCKED**
 
 `gcloud` is installed (`/opt/homebrew/bin/gcloud`) but has **no active account**, so neither
 the Cloud Run deploy nor the billing console check can run.

@@ -71,9 +71,10 @@ def test_front_names_match_playbook() -> None:
 def test_locked_model_ids_are_declared() -> None:
     """§1.4 is locked. If these change, it is a playbook amendment, not a tweak.
 
-    NOTE: FORGE has not yet confirmed these IDs resolve against a live endpoint
-    -- that is gate (c) of work order 1, blocked on GCP billing. See docs/SPIKE.md.
+    Both IDs were verified live against generativelanguage.googleapis.com on
+    2026-08-21 (gate (c), model half). `gemma-3-27b-it` returned HTTP 404 and
+    was amended to `gemma-4-26b-a4b-it`. See docs/SPIKE.md.
     """
-    for model in ("gemini-3.7-flash", "gemma-3-27b-it"):
+    for model in ("gemini-3.7-flash", "gemma-4-26b-a4b-it"):
         assert model in PLAYBOOK, f"§1.4 model {model!r} missing from playbook"
         assert model in ENV_EXAMPLE, f"§1.4 model {model!r} missing from .env.example"
