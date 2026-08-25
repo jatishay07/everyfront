@@ -323,6 +323,28 @@ class CaseStore:
             with self._lock:
                 self._hospitals[ein] = copy.deepcopy(data)
 
+    def list_hospitals(self) -> list[dict]:
+        """Every seeded `hospitals/{ein}` record (LEDGER's 200-hospital seed).
+
+        Defect #2 (persona 5 WO2): Lookup previously resolved a hospital by
+        EIN only, and a bill rarely prints an EIN -- Reader's extraction
+        schema has a `hospital_ein` field, but real bill text almost never
+        fills it. This backs `agents/lookup.py`'s name-matching fallback,
+        which needs the whole directory (not a single get-by-key) to match
+        against a bill's `provider_name`. 200 records is small enough to read
+        in full and cache in-process (see lookup.py's TTL cache) rather than
+        needing a Firestore text-search index.
+        """
+        if self._client is not None:
+            out = []
+            for snap in self._client.collection("hospitals").stream():
+                d = snap.to_dict()
+                d["ein"] = snap.id
+                out.append(d)
+            return out
+        with self._lock:
+            return [dict(v, ein=k) for k, v in self._hospitals.items()]
+
     # -------------------------------------------------------------- filings
     def create_filing(self, filing: dict, filing_id: str | None = None) -> str:
         filing_id = filing_id or str(uuid.uuid4())
