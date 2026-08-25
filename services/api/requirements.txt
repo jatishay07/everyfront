@@ -1,0 +1,11 @@
+# Pinned to versions verified locally end-to-end (matches services/agent-core's
+# note in its own requirements.txt: a working local venv does not prove a
+# buildable image, per docs/SPIKE.md failure #2).
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+httpx==0.28.1
+
+# Firestore-backed case store (contract §3.1) and the real Pub/Sub publish
+# `/demo/inject_bill` does alongside its synchronous agent-core call.
+google-cloud-firestore==2.29.0
+google-cloud-pubsub==2.39.2

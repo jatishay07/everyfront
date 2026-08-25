@@ -1,28 +1,51 @@
-"""Hello-world ADK agent on Cloud Run -- FORGE work order 1, gate (c).
+"""agent-core: the ADK agent hierarchy + Pub/Sub push subscriber.
 
-This is the SEED for SWARM (persona 5). It exists to prove the runtime, not to
-be the product: one agent, one tool, two endpoints. SWARM replaces the agent
-hierarchy; the serving shape here should survive.
+The bottom of this file is FORGE's original hello-world seed (gate (c)) --
+kept byte-for-byte in its serving shape and trace shape per this work order's
+instructions, since it is a deployed, verified reference for what a correct
+ADK tool-call trace looks like. Everything above `# --- seed`  is SWARM's
+persona-5 work: the real Reader/Lookup/Clock/Auditor/Strategist/Verifier/Filer
+hierarchy in `agent_core/`, wired up here as a Pub/Sub push subscriber plus a
+couple of internal endpoints `services/api` calls synchronously.
 
-Why a plain Cloud Run service rather than a managed agent runtime: §6 names this
-as the ADK-friction fallback, and it keeps the §1.3 requirement satisfied
-(Cloud Run + a Google agent framework) with the fewest moving parts.
+Why both a push subscriber AND a synchronous internal call for the same
+events (see /pubsub/document-added vs /internal/process_document): this repo
+has no upstream intake service yet (services/intake is still RELAY's empty
+stub) so nothing publishes `case.document.added` except this codebase's own
+`/demo/inject_bill`. That endpoint calls the synchronous internal route so a
+live demo recording does not depend on push-delivery latency, while ALSO
+publishing the real Pub/Sub message so the topic is genuinely exercised (and
+visible as evidence in the Cloud Console) for architecture purposes. Once
+RELAY's Gmail intake ships and publishes independently, the push-subscriber
+path is what actually matters and the synchronous route is fine to keep as a
+test/ops escape hatch.
 
-Demonstrates the §2.1 contract in miniature -- the LLM is not allowed to do date
-arithmetic; it must call the tool, which is pure Python from packages/rules.
+Idempotency (contract §2.3): both push endpoints dedupe on the Pub/Sub
+message id via `CaseStore.has_processed_message` / `mark_message_processed`
+before doing any work.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
+import logging
 import os
+import uuid
 from datetime import date, timedelta
 
+from agent_core import pipeline
+from agent_core.store import store
 from fastapi import FastAPI
 from google.adk.agents import Agent
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 from pydantic import BaseModel
+
+logger = logging.getLogger("agent_core.main")
+
+# --- seed (FORGE gate (c)) -- serving shape + trace shape preserved verbatim ---
 
 APP_NAME = "everyfront"
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.7-flash")
@@ -161,3 +184,98 @@ async def _run_once(model: str, question: str, attempt: int) -> dict:
     # The trace is the point, not decoration: §2.1 says the code computes and the
     # LLM narrates, and this is the evidence that it actually happened that way.
     return {"model": model, "attempt": attempt + 1, "answer": answer, "trace": trace}
+
+
+# --- SWARM persona 5: the real agent hierarchy ------------------------------
+
+
+class ProcessDocument(BaseModel):
+    case_id: str
+    doc_id: str
+
+
+class ApproveFiling(BaseModel):
+    case_id: str
+    front: str
+
+
+@app.post("/internal/process_document")
+async def process_document(req: ProcessDocument) -> dict:
+    """Synchronous entry point for `case.document.added` -- see module
+    docstring for why this exists alongside the push-subscriber route below.
+    """
+    return await pipeline.on_document_added(req.case_id, req.doc_id)
+
+
+@app.post("/internal/approve_filing")
+async def approve_filing(req: ApproveFiling) -> dict:
+    """Synchronous entry point services/api's `POST /cases/{id}/approve_filing`
+    calls after recording the human's approval. Runs Verifier; on pass,
+    publishes `filing.requested` and runs Filer. Never files without this
+    call having happened first -- see agent_core/pipeline.py.
+    """
+    return await pipeline.approve_and_request_filing(req.case_id, req.front)
+
+
+def _decode_push_envelope(body: dict) -> tuple[str, dict]:
+    """Pub/Sub push envelope -> (message_id, json payload)."""
+    message = body.get("message") or {}
+    message_id = message.get("messageId") or message.get("message_id") or str(uuid.uuid4())
+    data_b64 = message.get("data", "")
+    try:
+        payload = json.loads(base64.b64decode(data_b64).decode("utf-8")) if data_b64 else {}
+    except (ValueError, json.JSONDecodeError):
+        payload = {}
+    return message_id, payload
+
+
+@app.post("/pubsub/document-added")
+async def pubsub_document_added(body: dict) -> dict:
+    """Push endpoint for the `ef-document-added` subscription (topic
+    `case.document.added`, contract §3.2). Idempotent on redelivery (§2.3).
+    """
+    message_id, payload = _decode_push_envelope(body)
+    if store.has_processed_message(message_id):
+        return {"status": "duplicate, skipped", "message_id": message_id}
+    case_id, doc_id = payload.get("case_id"), payload.get("doc_id")
+    if not case_id or not doc_id:
+        logger.warning("malformed case.document.added push: %s", payload)
+        return {"status": "malformed payload, acked to avoid redelivery storm"}
+    result = await pipeline.on_document_added(case_id, doc_id)
+    store.mark_message_processed(message_id)
+    return {"status": "ok", "result_keys": list(result.keys())}
+
+
+@app.post("/pubsub/filing-requested")
+async def pubsub_filing_requested(body: dict) -> dict:
+    """Push endpoint for the `ef-filing-requested` subscription (topic
+    `filing.requested`, contract §3.2). Idempotent on redelivery (§2.3).
+
+    Note: in this repo, `filing.requested` is only ever published by this same
+    service's own `pipeline.approve_and_request_filing`, which already runs
+    Filer in-process before publishing (see that function's docstring). This
+    route exists so the topic is a real, independently-triggerable path too --
+    e.g. for a future service that requests a re-file without going through
+    `approve_filing` again -- without double-filing on the demo's own path,
+    since the message id this route dedupes on is distinct from any work
+    already completed synchronously.
+    """
+    message_id, payload = _decode_push_envelope(body)
+    if store.has_processed_message(message_id):
+        return {"status": "duplicate, skipped", "message_id": message_id}
+    case_id, front, filing_id = (
+        payload.get("case_id"),
+        payload.get("front"),
+        payload.get("filing_id"),
+    )
+    if not case_id or not front or not filing_id:
+        logger.warning("malformed filing.requested push: %s", payload)
+        return {"status": "malformed payload, acked to avoid redelivery storm"}
+    case = store.get_case(case_id)
+    already_filed = case is not None and any(
+        f.get("front") == front and f.get("status") == "filed" for f in case.get("fronts") or []
+    )
+    if not already_filed:
+        await pipeline.run_filer(case_id, front, filing_id)
+    store.mark_message_processed(message_id)
+    return {"status": "ok"}
