@@ -1,0 +1,258 @@
+"""services/api -- FastAPI implementing contract §3.3 exactly, plus
+`POST /demo/inject_bill` (persona 5, work order 3).
+
+This service is the REST façade the dashboard (CANVAS, persona 6) polls. It
+owns Firestore reads for the API surface and the human-in-the-loop filing
+gate's front door; the actual agent work (Reader..Filer) lives in
+services/agent-core, called here over HTTP for the two actions that need it
+(`/demo/inject_bill`, `approve_filing`) -- see api_core/agent_core_client.py
+for why that call is synchronous as well as this endpoint publishing the real
+Pub/Sub event.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, date, datetime, timedelta
+
+import httpx
+from api_core import config
+from api_core.agent_core_client import approve_filing as agent_core_approve_filing
+from api_core.agent_core_client import process_document as agent_core_process_document
+from api_core.demo_fixtures import available_fixtures, load_fixture
+from api_core.pubsub_client import publish
+from api_core.store import store
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+app = FastAPI(title="Every Front API")
+
+
+@app.get("/")
+def root() -> dict:
+    return {"service": "api", "status": "ok"}
+
+
+@app.get("/health")
+def health() -> dict:
+    """Named /health, not /healthz -- see services/agent-core/main.py's note:
+    Cloud Run's frontend 404s /healthz before it reaches the container."""
+    return {"ok": True}
+
+
+# --- contract §3.3 --------------------------------------------------------
+
+
+@app.get("/cases")
+def list_cases() -> list[dict]:
+    """`GET /cases -> list w/ fronts, deadlines, savings` (contract §3.3)."""
+    return store.list_cases()
+
+
+@app.get("/cases/{case_id}")
+def get_case(case_id: str) -> dict:
+    """`GET /cases/{id} -> full case + documents + events` (contract §3.3)."""
+    case = store.get_case(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"no such case {case_id!r}")
+    case["documents"] = store.list_documents(case_id)
+    case["events"] = store.list_events(case_id)
+    case["filings"] = store.list_filings(case_id)
+    return case
+
+
+class ApproveFilingRequest(BaseModel):
+    front: str
+
+
+@app.post("/cases/{case_id}/approve_filing")
+async def approve_filing(case_id: str, req: ApproveFilingRequest) -> dict:
+    """`POST /cases/{id}/approve_filing {front}` -- the human-in-the-loop gate
+    (contract §3.3; playbook §4 persona 5: "the Strategist may only emit
+    filing.requested AFTER" this call).
+
+    Delegates to agent-core's Strategist/Verifier/Filer over HTTP (see
+    api_core/agent_core_client.py) rather than re-implementing Verifier's
+    checks here -- one gate, one implementation, even though it is called
+    from this service's front door.
+    """
+    case = store.get_case(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"no such case {case_id!r}")
+    try:
+        result = await agent_core_approve_filing(case_id, req.front)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"agent-core unreachable for approve_filing: {exc}"
+        ) from exc
+    if not result.get("ok"):
+        raise HTTPException(status_code=409, detail=result.get("reason", "filing not approved"))
+    return result
+
+
+@app.get("/dashboard/stats")
+def dashboard_stats() -> dict:
+    """`GET /dashboard/stats -> the demo number` (contract §3.4).
+
+    Every key here matches §3.4 exactly -- tests/test_contracts.py (FORGE's
+    drift guard) asserts the playbook's own stat-object keys never move out
+    from under this endpoint.
+    """
+    cases = store.list_cases()
+    today = datetime.now(UTC).date()
+    week_from_now = today + timedelta(days=7)
+
+    open_cases = 0
+    hospital_eins: set[str] = set()
+    deadlines_this_week = 0
+    total_billed_cents = 0
+    charity_eligible = 0
+    ppdr_eligible = 0
+    unlawful_denials_flagged = 0
+    filings_sent = 0
+
+    for case in cases:
+        if case.get("status") != "closed":
+            open_cases += 1
+        ein = (case.get("bill") or {}).get("hospital_ein") or (case.get("hospital") or {}).get(
+            "ein"
+        )
+        if ein:
+            hospital_eins.add(ein)
+        total_billed_cents += (case.get("bill") or {}).get("amount_cents") or 0
+        # denial_flag is {violated, reason, citation} | None (HANDOFF: §3.1
+        # amended to a bare bool on 2026-08-25; this ships the richer object
+        # CANVAS's web/lib/types.ts already expects -- see agent_core.pipeline
+        # for the full reasoning). `violated` is the bool either way.
+        denial_flag = case.get("denial_flag")
+        if isinstance(denial_flag, dict) and denial_flag.get("violated"):
+            unlawful_denials_flagged += 1
+
+        for front in case.get("fronts") or []:
+            due = front.get("deadline")
+            if due:
+                try:
+                    due_date = date.fromisoformat(due[:10])
+                except ValueError:
+                    due_date = None
+                if due_date is not None and today <= due_date <= week_from_now:
+                    deadlines_this_week += 1
+            # rules.fronts.select_fronts only sets applicable=True for
+            # charity_care once screen_eligibility says free/discounted, so
+            # "applicable" already IS "eligible" here -- no separate
+            # eligibility field exists in the §3.1 fronts[] shape.
+            if front.get("front") == "charity_care" and front.get("applicable"):
+                charity_eligible += 1
+            if front.get("front") == "ppdr" and front.get("applicable"):
+                ppdr_eligible += 1
+            if front.get("status") == "filed":
+                filings_sent += 1
+
+    return {
+        "open_cases": open_cases,
+        "hospitals": len(hospital_eins),
+        "deadlines_this_week": deadlines_this_week,
+        "total_billed_cents": total_billed_cents,
+        "charity_eligible": charity_eligible,
+        "ppdr_eligible": ppdr_eligible,
+        "unlawful_denials_flagged": unlawful_denials_flagged,
+        "audit_findings_cents": sum(c.get("audit_findings_cents") or 0 for c in cases),
+        "filings_sent": filings_sent,
+        # The honest headline: this whole caseload ran without a human doing
+        # the work. See BUILD_PLAYBOOK.md §7.
+        "human_hours": 0,
+    }
+
+
+@app.get("/events")
+def list_events(limit: int = 50, agent: str | None = None) -> list[dict]:
+    """`GET /events?limit&agent -> global cross-case event stream` (contract
+    §3.3, added 2026-08-25). The live activity feed's actual backing
+    endpoint -- CANVAS's WO3 "watch the fleet think" screen.
+    """
+    return store.list_all_events(limit=limit, agent=agent)
+
+
+class CreateCaseRequest(BaseModel):
+    patient: dict
+    bill: dict = {}
+
+
+@app.post("/cases")
+def create_case(req: CreateCaseRequest) -> dict:
+    """`POST /cases {patient, bill} -> case_id` (contract §3.3, added
+    2026-08-25) -- the intake flow (CANVAS WO4) creating a case by hand,
+    distinct from the demo's `/demo/inject_bill`. Does not itself kick off
+    analysis: no document is attached yet, so there is nothing for Reader to
+    read. A later document upload (RELAY's signed-URL flow, not yet built)
+    is what would publish `case.document.added` and start the pipeline.
+    """
+    case_id = f"case-{uuid.uuid4().hex[:12]}"
+    store.create_case(case_id, {"patient": req.patient, "bill": req.bill})
+    return {"case_id": case_id}
+
+
+class InjectBillRequest(BaseModel):
+    fixture_name: str
+
+
+@app.post("/demo/inject_bill")
+async def inject_bill(req: InjectBillRequest) -> dict:
+    """`POST /demo/inject_bill {fixture_name}` -- drives the live demo
+    (contract §3.3; playbook §4 persona 5 acceptance: inject a fixture and
+    watch the pipeline run). Accepts both PROOF's real corpus
+    (`case_01_uninsured_gfe_ca` .. `case_08_lawful_denial_ca`) and this
+    service's own built-in fallbacks (`maria_uninsured_ca`, ...) -- see
+    api_core.demo_fixtures's docstring.
+
+    A fixture can carry more than one document (bill + GFE + income proof,
+    etc.); each is added and run through agent-core's pipeline IN ORDER so
+    the final case state reflects everything Reader has seen -- e.g.
+    Verifier's income-consistency check needs the income_proof document to
+    already be classified by the time a human calls approve_filing.
+    """
+    fixture = load_fixture(req.fixture_name)
+    if fixture is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no fixture {req.fixture_name!r}; available: {available_fixtures()}",
+        )
+
+    case_id = f"demo-{req.fixture_name}-{uuid.uuid4().hex[:8]}"
+    hospital = fixture.get("hospital")
+    if hospital and store.get_hospital(hospital["ein"]) is None:
+        # Don't clobber LEDGER's real 200-hospital Firestore seed (WO1) for an
+        # EIN it already has -- only fill in the gap for a hospital this
+        # deployment doesn't know about yet.
+        store.put_hospital(hospital["ein"], {k: v for k, v in hospital.items() if k != "ein"})
+
+    store.create_case(case_id, {"patient": fixture["patient"], "bill": fixture["bill"]})
+
+    doc_ids = []
+    pipeline_results = []
+    for doc in fixture["documents"]:
+        doc_id = store.add_document(case_id, {**doc, "gcs_uri": None})
+        doc_ids.append(doc_id)
+
+        # Real Pub/Sub publish -- genuinely exercises the topic (contract
+        # §3.2) and is visible as evidence in the Cloud Console, even though
+        # this endpoint does not wait on push delivery for the demo to
+        # complete (see api_core/agent_core_client.py's docstring for why).
+        publish(config.TOPIC_CASE_DOCUMENT_ADDED, {"case_id": case_id, "doc_id": doc_id})
+
+        try:
+            pipeline_results.append(await agent_core_process_document(case_id, doc_id))
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"agent-core unreachable for inject_bill: {exc}"
+            ) from exc
+
+    return {"case_id": case_id, "doc_ids": doc_ids, "pipeline": pipeline_results}
+
+
+@app.get("/hospitals/{ein}")
+def get_hospital(ein: str) -> dict:
+    hospital = store.get_hospital(ein)
+    if hospital is None:
+        raise HTTPException(status_code=404, detail=f"no such hospital {ein!r}")
+    return hospital

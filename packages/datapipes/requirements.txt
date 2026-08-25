@@ -1,0 +1,5 @@
+# packages/datapipes -- LEDGER (persona 2). See docs/SPIKE.md for why each is here.
+requests==2.34.2
+ijson==3.5.1
+google-cloud-firestore==2.29.0
+google-cloud-storage==3.13.1
