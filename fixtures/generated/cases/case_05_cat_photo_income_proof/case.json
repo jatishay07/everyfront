@@ -1,0 +1,112 @@
+{
+  "bill": {
+    "amount_cents": 103000,
+    "collector_name": null,
+    "first_statement_date": "2026-07-28",
+    "gfe_amount_cents": null,
+    "hospital_ein": "94-0562680",
+    "in_collections": false,
+    "provider_name": "Sutter Bay Hospitals",
+    "service_date": "2026-07-01",
+    "validation_notice_date": null
+  },
+  "case_id": "case_05_cat_photo_income_proof",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    },
+    {
+      "doc_id": "income_proof",
+      "file": "documents/income_proof.png",
+      "type": "income_proof"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 6500,
+    "audit_findings_reference_model": [
+      {
+        "amount_cents": 6500,
+        "code": "85025",
+        "description": "COMPLETE BLOOD COUNT, AUTOMATED",
+        "kind": "exact_duplicate",
+        "note": "Same CBC billed twice."
+      }
+    ],
+    "deadlines": [
+      {
+        "basis_date": "2026-07-28",
+        "basis_field": "first_statement_date",
+        "citation": "Cal. Health & Safety Code \u00a7127405(e)(3)",
+        "days": null,
+        "days_remaining_as_of_2026_08_25": null,
+        "due": null,
+        "front": "charity_care",
+        "name": "Charity care application"
+      },
+      {
+        "basis_date": "2026-07-28",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-6(c)(3)(i)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 92,
+        "due": "2026-11-25",
+        "front": "charity_care",
+        "name": "Extraordinary collection actions barred until"
+      },
+      {
+        "basis_date": "2026-07-28",
+        "basis_field": "first_statement_date",
+        "citation": "45 CFR 149.620(c)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 92,
+        "due": "2026-11-25",
+        "front": "ppdr",
+        "name": "Patient-provider dispute resolution"
+      }
+    ],
+    "denial_check_reference_model": null,
+    "eligibility": {
+      "citations": [
+        "Cal. Health & Safety Code \u00a7127405",
+        "26 CFR 1.501(r)-4(b)(2)"
+      ],
+      "determination": "free",
+      "discounted_threshold_pct": 400,
+      "fpl_pct": 106.0606,
+      "free_threshold_pct": 400,
+      "notes": [
+        "hospital does not offer discounted care (Schedule H reports 0)",
+        "discounted-care threshold raised to the CA statutory floor",
+        "CA sets one 400% FPL floor covering both tiers."
+      ]
+    },
+    "fronts_reference_model": [
+      {
+        "applicable": true,
+        "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "front": "charity_care",
+        "reason": "Screened free against Sutter Bay Hospitals's FAP."
+      },
+      {
+        "applicable": true,
+        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "front": "audit",
+        "reason": "Itemized bill present -- billing audit always runs."
+      }
+    ]
+  },
+  "notes": "The math would clear free-tier eligibility (~106.5% FPL under Sutter's real 400% line) if the proof were valid -- the point of this case is entirely that it is not.",
+  "patient": {
+    "annual_income": 3500000,
+    "household_size": 4,
+    "insured": false,
+    "name": "Sam Whitaker",
+    "state": "CA"
+  },
+  "proves": "The Verifier's 'is this document even an income proof' check (persona 5 WO1) -- the uploaded file is a synthetic cartoon cat drawing, not a pay stub or tax document. Filing must block on this with a human-readable reason rather than silently screening on no income evidence at all.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Cat photo uploaded as income proof, California"
+}

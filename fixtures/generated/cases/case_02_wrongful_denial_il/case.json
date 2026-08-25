@@ -1,0 +1,124 @@
+{
+  "bill": {
+    "amount_cents": 294500,
+    "collector_name": null,
+    "first_statement_date": "2026-01-05",
+    "gfe_amount_cents": null,
+    "hospital_ein": "36-2169147",
+    "in_collections": false,
+    "provider_name": "Advocate Christ Medical Center",
+    "service_date": "2025-12-20",
+    "validation_notice_date": null
+  },
+  "case_id": "case_02_wrongful_denial_il",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    },
+    {
+      "doc_id": "denial_letter",
+      "file": "documents/denial_letter.pdf",
+      "type": "denial_letter"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 21500,
+    "audit_findings_reference_model": [
+      {
+        "amount_cents": 18000,
+        "code": "96365",
+        "description": "IV INFUSION, INITIAL HOUR",
+        "kind": "exact_duplicate",
+        "note": "Identical infusion line billed twice."
+      },
+      {
+        "amount_cents": 3500,
+        "code": "36415",
+        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
+        "kind": "ptp_unbundling",
+        "note": "Same pattern as case 1 -- 36415 alongside same-day E/M 99285."
+      }
+    ],
+    "deadlines": [
+      {
+        "basis_date": "2026-01-05",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-4(b)(1)(iv)",
+        "days": 240,
+        "days_remaining_as_of_2026_08_25": 8,
+        "due": "2026-09-02",
+        "front": "charity_care",
+        "name": "Charity care application"
+      },
+      {
+        "basis_date": "2026-01-05",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-6(c)(3)(i)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": -112,
+        "due": "2026-05-05",
+        "front": "charity_care",
+        "name": "Extraordinary collection actions barred until"
+      },
+      {
+        "basis_date": "2026-01-05",
+        "basis_field": "first_statement_date",
+        "citation": "45 CFR 149.620(c)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": -112,
+        "due": "2026-05-05",
+        "front": "ppdr",
+        "name": "Patient-provider dispute resolution"
+      }
+    ],
+    "denial_check_reference_model": {
+      "citation": "26 CFR 1.501(r)-4(b)(3)",
+      "undisclosed_docs": [
+        "notarized_affidavit_of_indigency",
+        "three_years_federal_tax_returns"
+      ],
+      "unlawful": true
+    },
+    "eligibility": {
+      "citations": [
+        "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        "26 CFR 1.501(r)-4(b)(2)"
+      ],
+      "determination": "free",
+      "discounted_threshold_pct": 600,
+      "fpl_pct": 184.8429,
+      "free_threshold_pct": 250,
+      "notes": [
+        "Uninsured patients at or below 300% FPL. Rural/critical-access facilities carry a higher ceiling; not yet encoded -- see TODO."
+      ]
+    },
+    "fronts_reference_model": [
+      {
+        "applicable": true,
+        "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "front": "charity_care",
+        "reason": "Screened free against Advocate Christ Medical Center's FAP."
+      },
+      {
+        "applicable": true,
+        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "front": "audit",
+        "reason": "Itemized bill present -- billing audit always runs."
+      }
+    ]
+  },
+  "notes": "As of currentDate 2026-08-25 the federal 240-day window (due 2026-09-02) is inside its final ~8 days -- a red-chip, close-to-\u22647-day deadline for the demo. Income sits at ~184.8% FPL, under Advocate's real filed 250% free-care line -- the denial was wrong on the merits AND on the documentation.",
+  "patient": {
+    "annual_income": 4000000,
+    "household_size": 2,
+    "insured": true,
+    "name": "Priya Nandakumar",
+    "state": "IL"
+  },
+  "proves": "The federal 240-day FAP window running down (deadline drama) plus 26 CFR 1.501(r)-4(b)(3): the hospital demanded documents its own published FAP does not list, AND the patient's income is objectively under the free-care threshold -- a clean unlawful-denial flag. Patient is insured, so IL's 90-day uninsured-only state discount correctly does NOT fire here.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Insured patient, wrongfully denied charity care, Illinois"
+}

@@ -1,0 +1,48 @@
+{
+  "bill": {
+    "amount_cents": null,
+    "collector_name": null,
+    "first_statement_date": null,
+    "gfe_amount_cents": null,
+    "hospital_ein": null,
+    "in_collections": false,
+    "provider_name": "unknown (patient says 'a Sutter hospital')",
+    "service_date": null,
+    "validation_notice_date": null
+  },
+  "case_id": "case_06_unparseable_bill",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 0,
+    "audit_findings_reference_model": [],
+    "deadlines": [],
+    "denial_check_reference_model": null,
+    "eligibility": null,
+    "fronts_reference_model": [
+      {
+        "applicable": false,
+        "citation": "",
+        "front": "audit",
+        "reason": "No itemized line items were extractable from this document."
+      }
+    ]
+  },
+  "notes": "This fixture's document is deliberately not a valid PDF (a truncated byte stream inside a plausible-looking header). Any extractor must fail closed: no hospital_ein, no amount, no dates invented from nothing.",
+  "patient": {
+    "annual_income": 2600000,
+    "household_size": 2,
+    "insured": false,
+    "name": "Casey Nguyen",
+    "state": "CA"
+  },
+  "proves": "Graceful degradation: the uploaded file is not a valid PDF at all. The Reader must not crash, and must not invent a hospital, an amount, or a date it cannot actually read -- exactly the same 'never guess, return None' discipline as packages/rules/rules/deadlines.py's missing-date handling, just one layer up at extraction time.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Corrupted / unreadable bill upload, California"
+}

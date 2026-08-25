@@ -1,0 +1,130 @@
+{
+  "bill": {
+    "amount_cents": 262500,
+    "collector_name": null,
+    "first_statement_date": "2026-06-05",
+    "gfe_amount_cents": 192500,
+    "hospital_ein": "94-0562680",
+    "in_collections": false,
+    "provider_name": "Sutter Bay Hospitals",
+    "service_date": "2026-05-01",
+    "validation_notice_date": null
+  },
+  "case_id": "case_01_uninsured_gfe_ca",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    },
+    {
+      "doc_id": "gfe",
+      "file": "documents/gfe.pdf",
+      "type": "gfe"
+    },
+    {
+      "doc_id": "income_proof",
+      "file": "documents/income_proof.pdf",
+      "type": "income_proof"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 24500,
+    "audit_findings_reference_model": [
+      {
+        "amount_cents": 21000,
+        "code": "80053",
+        "description": "COMPREHENSIVE METABOLIC PANEL",
+        "kind": "exact_duplicate",
+        "note": "Identical code, units, and charge billed twice in the same encounter."
+      },
+      {
+        "amount_cents": 3500,
+        "code": "36415",
+        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
+        "kind": "ptp_unbundling",
+        "note": "36415 billed alongside same-encounter E/M 99284 with no modifier -- a commonly bundled NCCI column-2 code. Verify against LEDGER's live NCCI PTP table (packages/datapipes, WO3, not yet built) before filing."
+      }
+    ],
+    "deadlines": [
+      {
+        "basis_date": "2026-06-05",
+        "basis_field": "first_statement_date",
+        "citation": "Cal. Health & Safety Code \u00a7127405(e)(3)",
+        "days": null,
+        "days_remaining_as_of_2026_08_25": null,
+        "due": null,
+        "front": "charity_care",
+        "name": "Charity care application"
+      },
+      {
+        "basis_date": "2026-06-05",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-6(c)(3)(i)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 39,
+        "due": "2026-10-03",
+        "front": "charity_care",
+        "name": "Extraordinary collection actions barred until"
+      },
+      {
+        "basis_date": "2026-06-05",
+        "basis_field": "first_statement_date",
+        "citation": "45 CFR 149.620(c)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 39,
+        "due": "2026-10-03",
+        "front": "ppdr",
+        "name": "Patient-provider dispute resolution"
+      }
+    ],
+    "denial_check_reference_model": null,
+    "eligibility": {
+      "citations": [
+        "Cal. Health & Safety Code \u00a7127405",
+        "26 CFR 1.501(r)-4(b)(2)"
+      ],
+      "determination": "free",
+      "discounted_threshold_pct": 400,
+      "fpl_pct": 117.1303,
+      "free_threshold_pct": 400,
+      "notes": [
+        "hospital does not offer discounted care (Schedule H reports 0)",
+        "discounted-care threshold raised to the CA statutory floor",
+        "CA sets one 400% FPL floor covering both tiers."
+      ]
+    },
+    "fronts_reference_model": [
+      {
+        "applicable": true,
+        "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "front": "charity_care",
+        "reason": "Screened free against Sutter Bay Hospitals's FAP."
+      },
+      {
+        "applicable": true,
+        "citation": "45 CFR 149.620(c)",
+        "front": "ppdr",
+        "reason": "Bill exceeds GFE by $700.00, over the $400 floor."
+      },
+      {
+        "applicable": true,
+        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "front": "audit",
+        "reason": "Itemized bill present -- billing audit always runs."
+      }
+    ]
+  },
+  "notes": "GFE set $700 under the final bill -- comfortably clears the 45 CFR 149.620(b) $400 'substantially in excess' floor.",
+  "patient": {
+    "annual_income": 3200000,
+    "household_size": 3,
+    "insured": false,
+    "name": "Jordan Alvarez",
+    "state": "CA"
+  },
+  "proves": "PPDR (bill exceeds GFE by >= $400) stacked with charity-care free-tier eligibility, in the state with NO charity-care deadline (Cal. HSC \u00a7127405(e)(3)) -- the demo's 'safe' case.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Uninsured self-pay, Good Faith Estimate blown, California"
+}
