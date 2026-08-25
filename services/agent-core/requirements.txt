@@ -1,0 +1,8 @@
+# Pinned to the versions verified locally end-to-end (see docs/SPIKE.md gate c).
+#
+# Do NOT pin fastapi below google-adk's floor: adk 2.7.1 requires fastapi>=0.133,
+# and pinning 0.115.6 made Cloud Build fail with ResolutionImpossible while the
+# local venv passed -- it already had a compatible fastapi resolved.
+google-adk==2.7.1
+fastapi==0.141.1
+uvicorn[standard]==0.52.4

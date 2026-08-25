@@ -8,7 +8,7 @@ Four gates. Gates (a) and (c) are halt-and-redesign gates.
 |---|---|---|
 | (a) Parse real IRS Schedule H XML, extract lines 13a/16a/16b | LEDGER's crown-jewel pipeline is feasible | **PASS** |
 | (b) Reach an MRF via `cms-hpt.txt` for 3 real systems | Cash-price audit front is feasible | **PASS** |
-| (c) Hello-world ADK agent on Cloud Run | The entire runtime is feasible | **PARTIAL** — models verified; deploy still blocked on billing |
+| (c) Hello-world ADK agent on Cloud Run | The entire runtime is feasible | **PASS** — live at ef-agent-core, Gemini 3.7 via Vertex |
 | (d) Verify $150 hackathon + $300 trial credit stacking | Budget headroom is real | **BLOCKED** — needs `gcloud auth login` |
 
 Reproduce with `docs/spike/parse_schedule_h.py`. Evidence files are committed alongside.
@@ -192,7 +192,66 @@ implement 503 retry-with-backoff; budget ~315 tokens per Gemma classification.
 
 ---
 
-## Gate (c) deploy half, and gate (d) — **BLOCKED**
+## Gate (c), deploy half — **PASS** · 2026-08-25
+
+**Live:** `https://ef-agent-core-756591166292.us-central1.run.app`
+
+```
+POST /ask -> tool_call   compute_fap_deadline({'first_statement_date': '2026-03-01'})
+             tool_result {'due': '2026-10-27', 'citation': '26 CFR 1.501(r)-4(b)(1)(iv)'}
+             answer      "October 27, 2026 ... under 26 CFR 1.501(r)-4(b)(1)(iv)"
+             model       gemini-3.7-flash   6.9s cold
+```
+
+§1.3 is satisfied: Cloud Run + Pub/Sub + Firestore provisioned, ADK agent
+framework, Gemini 3.7 via Vertex. §2.1 holds in production -- the model called
+the tool rather than doing the arithmetic, and the trace proves it.
+
+### Four failures on the way, all now fixed in the scripts
+
+1. **Pub/Sub org-policy race.** First `setup.sh` run died creating topics:
+   `gcp.resourceLocations` "does not allow message storage in any GCP region".
+   The project has no org parent and the effective policy reads `allValues: ALLOW`
+   -- it was the initialization race the error text itself warns about. **Re-running
+   fixed it**, which is the whole argument for idempotency: the recovery was
+   `./infra/setup.sh` again, not a manual repair.
+
+2. **Dependency conflict invisible locally.** `requirements.txt` pinned
+   `fastapi==0.115.6`; google-adk 2.7.1 requires `fastapi>=0.133`. Cloud Build
+   failed with `ResolutionImpossible` while the local venv passed -- it had already
+   resolved a compatible fastapi. **A working local venv does not prove a
+   buildable image.** Now pinned to the locally-verified set.
+
+3. **`/healthz` is intercepted by the Cloud Run frontend.** It returns Google's
+   own 404 before the request reaches the container, even though FastAPI
+   registers the route and it appears in `/openapi.json`. Renamed to `/health`,
+   which works. Worth knowing before wiring liveness probes.
+
+4. **Vertex serves Gemini 3.x only from `location=global`.** The most dangerous
+   one. `us-central1` returns 404 for `gemini-3.7-flash` and `gemini-3.5-flash`
+   and serves nothing newer than **2.5-flash** -- which is BELOW the §1.3
+   "Gemini 3.5 or newer" bar. A regional default would have silently disqualified
+   the submission while appearing to work. `deploy.sh` now pins
+   `VERTEX_LOCATION=global` while Cloud Run stays regional.
+
+**HANDOFF -> SWARM:** authenticate via Vertex + the service account, never an API
+key in the container. `GOOGLE_GENAI_USE_VERTEXAI=TRUE`,
+`GOOGLE_CLOUD_LOCATION=global`.
+
+---
+
+## Gate (d) — **PARTIAL**
+
+The $150 hackathon credit arrived; there is **no $300 trial and no stacking**, so
+the real balance is $150 rather than the $450 §6 assumed. Tripwire amended to $50.
+
+`setup.sh` could not create the budget alert (`billing.budgets.create` denied on
+this account) and says so rather than failing silently -- **set the $50/$100/$150
+alerts in the console manually.**
+
+---
+
+## Superseded
 
 `gcloud` is installed (`/opt/homebrew/bin/gcloud`) but has **no active account**, so neither
 the Cloud Run deploy nor the billing console check can run.
