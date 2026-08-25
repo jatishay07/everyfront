@@ -93,9 +93,14 @@ def root() -> dict:
     return {"service": "agent-core", "model": MODEL, "status": "ok"}
 
 
-@app.get("/healthz")
+@app.get("/health")
 def healthz() -> dict:
     """Liveness only -- deliberately does NOT call the model.
+
+    Named /health, not /healthz: the Cloud Run frontend returns its own 404 for
+    /healthz before the request reaches the container, even though FastAPI
+    registers the route (it shows up in /openapi.json). Verified on the deployed
+    service, 2026-08-25.
 
     A health check that hits Gemini would flap on the 503s above and, worse,
     bill us for every probe.

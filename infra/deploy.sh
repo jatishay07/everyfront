@@ -13,6 +13,13 @@ PROJECT_ID="${PROJECT_ID:?set PROJECT_ID}"
 REGION="${REGION:-us-central1}"
 TARGET="${1:-all}"
 
+# Vertex serves Gemini 3.x ONLY from the `global` endpoint. Probed 2026-08-25:
+# us-central1 returns 404 for gemini-3.7-flash / 3.5-flash and serves nothing
+# newer than 2.5-flash -- which is BELOW the §1.3 "Gemini 3.5 or newer" bar and
+# would silently disqualify the submission. Cloud Run stays regional; only the
+# model endpoint is global.
+VERTEX_LOCATION="${VERTEX_LOCATION:-global}"
+
 log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '    \033[32mok\033[0m   %s\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
@@ -61,7 +68,7 @@ deploy_one() {
     --memory=1Gi \
     --timeout=300 \
     --allow-unauthenticated \
-    --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION}" \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=TRUE" \
     --quiet >/dev/null
   url="$(gcloud run services describe "ef-${svc}" --region="$REGION" --format='value(status.url)')"
   ok "$svc -> $url"
