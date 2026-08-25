@@ -247,6 +247,70 @@ def test_approve_filing_runs_filer_when_verifier_passes(monkeypatch):
     assert any(e["action"] == "filing_requested" for e in events)
 
 
+def test_approve_filing_reverts_front_to_open_when_filer_raises(monkeypatch):
+    """BUG found live (persona 5 WO6 task 1): a deploy-time defect (agent-core's
+    container was missing RELAY's pypdf/reportlab dependency) made every
+    Filer call raise -- and the front was left stuck at "filing" forever,
+    since nothing reverted it. Every retry after the underlying bug was fixed
+    then failed anyway with "front ... is not open (status=filing)". The
+    front must revert to "open" on a Filer failure so the case stays
+    retryable, and the failure must still surface (not be swallowed as if it
+    succeeded)."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "open"})
+
+    monkeypatch.setattr(
+        verifier,
+        "run",
+        lambda case_id, case, front: async_fake_turn(
+            {"case_id": case_id, "front": front, "passed": True, "issues": []}, "clear to file"
+        ),
+    )
+
+    async def _boom(case_id, case, front, filing_id=None):
+        raise ModuleNotFoundError("No module named 'pypdf'")
+
+    monkeypatch.setattr(filer, "run", _boom)
+
+    raised = False
+    try:
+        asyncio.run(pipeline.approve_and_request_filing("c1", "ppdr"))
+    except ModuleNotFoundError:
+        raised = True
+    assert raised  # the failure is not swallowed
+
+    case = s.get_case("c1")
+    assert case["fronts"][0]["status"] == "open"  # reverted, not stuck at "filing"
+
+    events = s.list_events("c1")
+    assert any(e["agent"] == "filer" and e["action"] == "file_failed" for e in events)
+
+    # And the front is retryable now that it is back to open.
+    monkeypatch.setattr(
+        filer,
+        "run",
+        lambda case_id, case, front, filing_id=None: async_fake_turn(
+            {
+                "case_id": case_id,
+                "front": front,
+                "filing_id": filing_id,
+                "channel": "fax",
+                "vendor_id": "SIMULATED-FAX-abc",
+                "status": "sent",
+                "simulated": True,
+                "source": {},
+            },
+            "filed via fax",
+        ),
+    )
+    result = asyncio.run(pipeline.approve_and_request_filing("c1", "ppdr"))
+    assert result["ok"] is True
+    assert s.get_case("c1")["fronts"][0]["status"] == "filed"
+
+
 def test_approve_filing_rejects_front_not_applicable(monkeypatch):
     s = make_memory_store()
     _patch_store(monkeypatch, s)

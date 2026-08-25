@@ -441,7 +441,29 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
         config.TOPIC_FILING_REQUESTED, {"case_id": case_id, "front": front, "filing_id": filing_id}
     )
 
-    filer_result = await run_filer(case_id, front, filing_id)
+    # BUG (persona 5 WO6 task 1, found live 2026-08-25): a Filer failure
+    # (e.g. the missing-pypdf deploy defect this same task fixed) used to
+    # leave the front stuck in "filing" forever -- `matched["status"]` was
+    # set above and never reverted, so every retry after a transient/
+    # deploy-time failure hit "front ... is not open (status=filing)" even
+    # once the underlying problem was fixed. Mirror the Verifier-reject path
+    # just above: revert to "open" and log the failure, then let the
+    # exception still propagate (a filing that did not happen must not be
+    # reported as if it succeeded), so the case is left retryable rather than
+    # wedged.
+    try:
+        filer_result = await run_filer(case_id, front, filing_id)
+    except Exception as exc:  # noqa: BLE001 -- revert state, log, then re-raise honestly
+        matched["status"] = "open"
+        store.upsert_front(case_id, matched)
+        _log(
+            case_id,
+            "filer",
+            "file_failed",
+            f"filing {front!r} failed before completion ({type(exc).__name__}: {exc}); "
+            "front reverted to open for retry",
+        )
+        raise
     return {"ok": True, "front": matched, "filer": filer_result}
 
 
