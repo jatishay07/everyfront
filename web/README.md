@@ -45,12 +45,43 @@ lib/store.ts       — in-memory mutable store (approve/inject/manual-intake
 lib/api.ts         — THE SWAP POINT. Every screen imports only from here.
 ```
 
-Set `NEXT_PUBLIC_API_BASE_URL` to a real `services/api` deployment and every
-function in `lib/api.ts` switches from the in-memory mock to real `fetch`
-calls against §3.3 — nothing else in `web/` changes. Unset (the default),
-everything runs against `lib/store.ts`, which is seeded from
-`lib/mock-data.ts` and mutated in place by "Approve & file", the intake form,
-and the inject-fixture buttons.
+Set `API_BASE_URL` (a plain server env var — see below) to a real
+`services/api` deployment and every function in `lib/api.ts` switches from
+the in-memory mock to real `fetch` calls against §3.3 — nothing else in
+`web/` changes. Unset (the default), everything runs against `lib/store.ts`,
+which is seeded from `lib/mock-data.ts` and mutated in place by "Approve &
+file", the intake form, and the inject-fixture buttons.
+
+### Runtime, not build-time — and why
+
+`API_BASE_URL` is intentionally **not** `NEXT_PUBLIC_API_BASE_URL`. Next.js
+inlines `NEXT_PUBLIC_*` vars into the client bundle at `next build` time,
+which is exactly wrong for two reasons discovered wiring this up against the
+real API:
+
+1. **Cloud Run repointing.** `gcloud run services update ef-web
+   --set-env-vars=API_BASE_URL=...` rolls a new revision of the *same image*
+   in seconds. A build-time var would mean rebuilding the container to
+   switch backends, or to fall back to mock mid-demo if the API goes down
+   (§6 risk register treats that as a live risk).
+2. **CORS.** `https://ef-api-756591166292.us-central1.run.app` sends no
+   `Access-Control-Allow-Origin` header (verified: an OPTIONS preflight to
+   `/cases` gets a bare 405, no CORS headers at all). A client-side
+   `fetch()` straight at that origin from the deployed `web` origin would be
+   blocked by the browser, full stop — this isn't a nice-to-have.
+
+Both are solved by two server-side Route Handlers that read `API_BASE_URL`
+fresh on every request:
+
+```
+app/api/config/route.ts         — { usingMock: boolean }, read once by lib/api.ts
+app/api/proxy/[...path]/route.ts — forwards GET/POST to API_BASE_URL, server-to-server
+```
+
+The browser only ever calls same-origin `/api/config` and `/api/proxy/*`.
+`lib/api.ts`'s `usingMock()` caches that one config fetch for the page's
+lifetime; every data function does `if (await usingMock()) { …mock… } else {
+…realFetch…(which hits /api/proxy)…}`.
 
 ### Why the mock corpus is not arbitrary
 
@@ -93,42 +124,63 @@ npm run build && npm start   # production build, listens on $PORT
 PROJECT_ID=everyfront-hack-2026 ./infra/deploy.sh web
 ```
 
-Pass `--build-arg NEXT_PUBLIC_API_BASE_URL=https://ef-api-xxxx.a.run.app` at
-build time once `services/api` has a stable URL (Next.js inlines
-`NEXT_PUBLIC_*` vars at build time, not runtime).
+Set the runtime env var on the Cloud Run service once it's up (see the
+"Runtime, not build-time" section above) — no build-arg, no rebuild:
 
-## HANDOFF items for FORGE / SWARM
+```
+gcloud run services update ef-web --region=us-central1 \
+  --set-env-vars=API_BASE_URL=https://ef-api-756591166292.us-central1.run.app
+```
 
-1. **No `GET /events` (global activity feed) in §3.3.** `getActivityFeed()`
-   in `lib/api.ts` currently falls back to fetching every case then
-   flattening `events[]` client-side once a real API is live — correct but
-   O(cases), and it'll get slow well before this project needs it to.
-   Proposing a dedicated `GET /events?since=` endpoint.
-2. **No manual-intake endpoint in §3.3.** Only the Gmail watch and
-   `POST /demo/inject_bill` create cases in the contract. The Intake screen's
-   form (`lib/store.ts`'s `createCaseFromIntake`) is a reasonable real
-   product need — an advocate keying in a case by hand — and only works in
-   mock mode today; `lib/api.ts`'s `createCase()` returns an honest error
-   against a real backend rather than pretending to work. Proposing
-   `POST /cases` for this.
-3. **`events[].agent` enum.** §3.1 lists `reader|lookup|clock|auditor|
-   strategist|filer`; §4 persona 5 WO1 also names a **Verifier** agent (the
-   income-doc / cat-photo checks). `lib/types.ts`'s `AgentName` includes
-   `"verifier"` so the UI has somewhere to render its events — propose
-   adding it to the literal §3.1 enum too.
-4. **`Case.denial_flag`.** Not in §3.1, but without it the "1 unlawful denial
-   flagged" stat (§3.4) has nowhere to read from. Shaped to match
-   `check_denial_lawfulness`'s `DenialCheck` (`packages/rules/rules/
-   denial.py`): `{violated, reason, citation}`.
+## HANDOFF items for FORGE / SWARM / ATLAS
+
+Status as of pointing `web/` at the live API
+(`https://ef-api-756591166292.us-central1.run.app`), all verified via curl:
+
+1. **`GET /events` is live-broken.** §3.3 added this exact endpoint for the
+   global activity feed (previously HANDOFF item 1 here) — but
+   `curl {API}/events` and `curl {API}/events?limit=10` both return a bare
+   `500 Internal Server Error` with no JSON body. `getActivityFeed()` in
+   `lib/api.ts` now tries the real endpoint first and silently falls back to
+   the previous per-case-flatten approach on failure, so the feed keeps
+   working either way — but the dedicated endpoint should get fixed; right
+   now it's dead code from the client's perspective.
+2. **No CORS on `services/api`.** No `Access-Control-Allow-Origin` on any
+   response, and an OPTIONS preflight to `/cases` returns a bare 405.
+   Harmless for this PR — `app/api/proxy/[...path]/route.ts` makes the real
+   call server-to-server, which isn't subject to CORS — but worth knowing if
+   any other consumer ever wants to call the API directly from a browser.
+3. **`POST /cases` and manual intake — resolved.** Previously a HANDOFF item
+   here; §3.3 now has it and it works as documented
+   (`curl -X POST {API}/cases -d '{"patient":{...},"bill":{...}}'` →
+   `{"case_id": "..."}`). `lib/api.ts`'s `createCase()` now calls it for
+   real.
+4. **`events[].agent` "verifier" and `Case.denial_flag` — resolved, but
+   worth reconciling the playbook text.** Both were HANDOFF items here;
+   SWARM's `services/agent-core/agent_core/pipeline.py` independently
+   reached the same shapes CANVAS's `lib/types.ts` already used
+   (`denial_flag: {violated, reason, citation} | null`, richer than §3.1's
+   amended `bool`, with a matching comment explaining why) — no code change
+   needed on either side, they already agree. Still worth a §3.1 text update
+   so a reader doesn't hit the same "wait, which is it" moment twice.
+5. **Minor undocumented/looser live shapes**, all handled defensively in
+   `lib/types.ts` rather than blocking on a contract fix: `Bill.hospital_ccn`
+   is missing on some cases and `""` on others (never rendered, so harmless);
+   `Bill.has_itemized_bill` and `CaseDocument.raw_text` appear on every live
+   response but aren't in §3.1 (the latter is now shown in the document
+   gallery — it's the actual synthetic bill text, a nice demo touch);
+   `Hospital.ccn` and `CaseDocument.gcs_uri` come back `null` rather than the
+   `string` §3.1 implies.
+6. **`infra/deploy.sh` doesn't wire `ef-web`'s `API_BASE_URL`.** It already
+   resolves `ef-agent-core`'s URL for `api`'s `AGENT_CORE_URL`
+   (`deploy_one()`'s `extra_env` block) — the same pattern (resolve
+   `ef-api`'s URL, set it as `web`'s `API_BASE_URL`) would make
+   `./infra/deploy.sh web` wire itself to the live API with no manual
+   `gcloud run services update` step after. Not made here since `infra/` is
+   outside `web/`'s owned paths (§0.2) — proposing it for ATLAS.
 
 ## What's not done (by design, not oversight)
 
-- Lighthouse wasn't run in this sandbox (no headless Chrome available at
-  build time here) — the build already leans toward a good score: system
-  font stack (no external font fetch blocking FCP), `output: "standalone"`
-  for a small server bundle, ~110 kB first-load JS on every route, semantic
-  HTML, and no unoptimized images. Worth an actual run against a deployed
-  URL before the demo.
 - Document upload does not hit a real GCS signed URL yet (no `services/api`
   endpoint for it in §3.3) — `IntakeForm.tsx` simulates the upload/Verifier
   pass client-side and says so in the UI copy, rather than silently faking a
