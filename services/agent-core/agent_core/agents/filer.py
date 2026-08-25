@@ -1,12 +1,18 @@
 """Filer: renders and sends one front's filing, records vendor proof.
 
 Playbook §4 persona 5, WO1: "renders via RELAY, sends, records proof, appends
-events." RELAY's PDF-fill engine and vendor clients (packages/delivery) are
-still an empty stub as of this work order, so `_render_stub_pdf` below stands
-in for RELAY's coordinate-map PDF fill -- it produces real bytes and a real
-filing record so the human-in-the-loop demo path is complete end-to-end, but
-it is NOT a filled form. See delivery_bridge.py for the same honesty pattern
-on the send side (SIMULATED vendor ids, clearly marked).
+events."
+
+REWIRED 2026-08-25 (FORGE, integration): this used to render `_render_stub_pdf`
+-- five lines of plain text labelled as a placeholder -- because RELAY's
+packages/delivery was an empty stub when SWARM wrote it. RELAY has since shipped
+the real thing: five filled forms including the ACTUAL CMS PPDR initiation form
+and two hospitals' own FAP applications. It now renders those.
+
+That distinction is the product. "We computed that you qualify" is advice;
+"here is your hospital's own application, filled in, sent" is the Taskmaster
+claim in §1.1. The placeholder made the demo path complete while looking
+complete -- which is exactly why it needed finding rather than trusting.
 
 Filer only ever runs from `pipeline.approve_and_request_filing`, which will
 not call it unless (a) `POST /cases/{id}/approve_filing` has been called and
@@ -44,31 +50,38 @@ CHANNEL_BY_FRONT = {
 PPDR_FAX_NUMBER = "888-610-4092"
 
 
-def _render_stub_pdf(case: dict, front: str) -> bytes:
-    lines = [
-        "SYNTHETIC FILING -- DEMO ONLY",
-        f"case_id={case.get('case_id')}",
-        f"front={front}",
-        f"hospital={(case.get('hospital') or {}).get('name', 'unknown')}",
-        "This is a SWARM placeholder PDF -- RELAY's real PDF-fill engine "
-        "(packages/delivery) had not shipped a coordinate map when this was written.",
-    ]
-    return ("\n".join(lines)).encode("utf-8")
-
-
 async def run(case_id: str, case: dict, front: str, filing_id: str | None = None) -> dict:
     filing_id = filing_id or str(uuid.uuid4())
-    channel = CHANNEL_BY_FRONT.get(front, "mail")
-    pdf_bytes = _render_stub_pdf(case, front)
+    channel = delivery_bridge.channel_for_front(front)
 
-    if channel == "fax":
-        vendor_result = delivery_bridge.send_fax(filing_id, pdf_bytes, PPDR_FAX_NUMBER)
-    else:
-        to_address = {
+    # Render RELAY's real form for this front. A failure here must NOT be
+    # swallowed into a placeholder: a filing that silently is not the real form
+    # is worse than a filing that failed, because only one of them gets noticed.
+    pdf_bytes, form_id = delivery_bridge.render_filing_pdf(
+        front,
+        case,
+        {
+            "filing_id": filing_id,
+            "hospital_address": (case.get("hospital") or {}).get("address"),
+        },
+    )
+
+    destination = (
+        PPDR_FAX_NUMBER
+        if channel == "fax"
+        else {
             "name": (case.get("hospital") or {}).get("name", "unknown hospital"),
             "test_mode": True,
         }
-        vendor_result = delivery_bridge.send_mail(filing_id, pdf_bytes, to_address)
+    )
+    vendor_result = delivery_bridge.deliver(
+        filing_id=filing_id,
+        case_id=case_id,
+        front=front,
+        pdf=pdf_bytes,
+        destination=destination,
+        channel=channel,
+    )
 
     filing = {
         "case_id": case_id,
@@ -76,8 +89,12 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         "channel": channel,
         "vendor_id": vendor_result.get("vendor_id"),
         "status": vendor_result.get("status", "sent"),
+        "form_id": form_id,
+        "pdf_bytes": len(pdf_bytes),
         "proof": {
-            k: v for k, v in vendor_result.items() if k in ("vendor_id", "tracking", "simulated")
+            k: v
+            for k, v in vendor_result.items()
+            if k in ("vendor_id", "tracking", "simulated", "vendor")
         },
     }
     store.create_filing(filing, filing_id=filing_id)
@@ -90,7 +107,8 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         "vendor_id": vendor_result.get("vendor_id"),
         "status": filing["status"],
         "simulated": bool(vendor_result.get("simulated")),
-        "source": delivery_bridge.bridge_sources(),
+        "form_id": form_id,
+        "pdf_bytes": len(pdf_bytes),
     }
     tool = common.make_fact_tool(
         "get_filer_result",
