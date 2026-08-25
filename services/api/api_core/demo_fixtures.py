@@ -33,11 +33,38 @@ BUILD_PLAYBOOK.md rule 0.6: never a real name, SSN, or real patient bill.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_FIXTURES_DIR = _REPO_ROOT / "fixtures"
+
+def _find_fixtures_dir() -> Path:
+    """Locate fixtures/ without assuming how deep we are in a directory tree.
+
+    The original `Path(__file__).resolve().parents[3]` counted upward from the
+    repo layout -- services/api/api_core/ -> repo root. Cloud Run flattens the
+    service to /app, which has only three parents, so the container died on
+    IndexError at import time before uvicorn could bind its port. It worked
+    perfectly on the dev machine, which is exactly what made it dangerous.
+
+    Search upward for a real fixtures/ directory instead, and let deployment
+    override the answer outright. Nothing here depends on tree depth.
+    """
+    override = os.environ.get("EVERYFRONT_FIXTURES_DIR")
+    if override:
+        return Path(override)
+    here = Path(__file__).resolve()
+    for candidate in (here, *here.parents):
+        fixtures = candidate / "fixtures"
+        if (fixtures / "generated" / "cases").is_dir():
+            return fixtures
+    # Fall back to a sibling fixtures/ (how deploy.sh stages it into the
+    # container) even when the generated cases have not been built yet, so the
+    # failure surfaces as an empty fixture list rather than an import crash.
+    return Path(__file__).resolve().parents[1] / "fixtures"
+
+
+_FIXTURES_DIR = _find_fixtures_dir()
 _CASES_DIR = _FIXTURES_DIR / "generated" / "cases"
 _HOSPITALS_JSON = _FIXTURES_DIR / "generated" / "hospitals.json"
 

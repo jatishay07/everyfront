@@ -53,26 +53,52 @@ async def on_document_added(case_id: str, doc_id: str) -> dict:
 
     # Merge extracted bill-shaped fields into the case's bill, and note
     # whether we now have an itemized bill for select_fronts' fallback.
+    #
+    # TWO RULES, both learned the hard way on the first live run:
+    #
+    # 1. Only BILL-SHAPED documents contribute bill fields. An income proof or
+    #    a cat photo has nothing to say about the amount owed, and letting it
+    #    speak means the last document processed decides the case.
+    # 2. The extractor returns 0 and "" for fields it did not find, NOT None.
+    #    Filtering on `is not None` therefore let those sentinels through, and
+    #    they overwrote real values: a $2,625 bill with a $1,925 estimate became
+    #    amount=0, gfe=0, first_statement_date="". Every downstream number went
+    #    to zero -- PPDR eligibility, the deadlines, the savings banner -- while
+    #    each individual document's extraction remained perfectly correct. The
+    #    per-document facts and the case disagreed, which is the worst shape a
+    #    bug can take here: nothing errored, the numbers were just wrong.
+    BILL_BEARING_LABELS = {"bill", "itemized_bill", "gfe", "collection_notice"}
+    _STR_FIELDS = (
+        "provider_name",
+        "hospital_ein",
+        "hospital_ccn",
+        "service_date",
+        "first_statement_date",
+        "collector_name",
+        "validation_notice_date",
+    )
+    _INT_FIELDS = ("amount_cents", "gfe_amount_cents")
+    _BOOL_FIELDS = ("in_collections",)
+
     extraction = rf["extraction"] or {}
-    if isinstance(extraction, dict) and "_extraction_error" not in extraction:
-        bill_fields = {
-            k: v
-            for k, v in extraction.items()
-            if k
-            in (
-                "provider_name",
-                "hospital_ein",
-                "hospital_ccn",
-                "amount_cents",
-                "service_date",
-                "first_statement_date",
-                "gfe_amount_cents",
-                "in_collections",
-                "collector_name",
-                "validation_notice_date",
-            )
-            and v is not None
-        }
+    if (
+        isinstance(extraction, dict)
+        and "_extraction_error" not in extraction
+        and rf["label"] in BILL_BEARING_LABELS
+    ):
+        bill_fields: dict = {}
+        for k in _STR_FIELDS:
+            v = extraction.get(k)
+            if isinstance(v, str) and v.strip():
+                bill_fields[k] = v.strip()
+        for k in _INT_FIELDS:
+            v = extraction.get(k)
+            if isinstance(v, int) and not isinstance(v, bool) and v > 0:
+                bill_fields[k] = v
+        for k in _BOOL_FIELDS:
+            v = extraction.get(k)
+            if isinstance(v, bool):
+                bill_fields[k] = v
         if rf["label"] == "itemized_bill":
             bill_fields["has_itemized_bill"] = True
         if bill_fields:
