@@ -44,11 +44,18 @@ export interface Patient {
   annual_income_cents: number;
   insured: boolean;
   state: string;
+  /** Legacy pre-amendment field name, still echoed by the live API alongside
+   *  `annual_income_cents` (verified via curl 2026-08-25). Never read this —
+   *  it's the exact ambiguous-units field the §3.1 amendment replaced. */
+  annual_income?: number;
 }
 
 export interface Bill {
   hospital_ein: string;
-  hospital_ccn: string;
+  /** Live API omits this key on some cases and returns `""` on others
+   *  (verified via curl) — never relied on by the UI, so kept optional
+   *  rather than required. */
+  hospital_ccn?: string | null;
   provider_name: string;
   amount_cents: number;
   service_date: string;
@@ -57,6 +64,10 @@ export interface Bill {
   in_collections: boolean;
   collector_name: string | null;
   validation_notice_date: string | null;
+  /** Undocumented in §3.1 but present on every live response (verified via
+   *  curl) — the Reader agent's "was there an itemized bill" signal that
+   *  feeds the audit front's applicability. */
+  has_itemized_bill?: boolean;
 }
 
 export interface DenialFlag {
@@ -93,11 +104,18 @@ export type DocumentType =
 export interface CaseDocument {
   doc_id: string;
   type: DocumentType;
-  gcs_uri: string;
+  /** `null` on every live document so far (verified via curl) — documents
+   *  created by the demo-injection pipeline carry their text inline via
+   *  `raw_text` instead of a GCS object. */
+  gcs_uri: string | null;
   uploaded_at: string;
   extracted: Record<string, unknown>;
   verified: boolean | null;
   verification_notes: string;
+  /** Not in §3.1, but present on every live document (verified via curl) —
+   *  the Reader agent's source text, prefixed "SYNTHETIC -- DEMO ONLY." on
+   *  every fixture. Worth showing: it's the PROOF corpus's watermark. */
+  raw_text?: string;
 }
 
 export type AgentName =
@@ -135,7 +153,9 @@ export interface Filing {
 export interface Hospital {
   ein: string;
   name: string;
-  ccn: string;
+  /** `null` on every live hospital seen so far (verified via curl) — LEDGER's
+   *  Schedule H seed doesn't populate CCN. */
+  ccn: string | null;
   state: string;
   fap_url: string | null;
   fap_app_url: string | null;
@@ -145,6 +165,10 @@ export interface Hospital {
   source: string;
   tax_year: number;
   mrf_url: string | null;
+  /** Not in §3.1, but present on some live hospitals (verified via curl) —
+   *  the FAP-required-document list Auditor needs for the denial-lawfulness
+   *  check (services/agent-core/agent_core/agents/auditor.py). */
+  fap_required_documents?: string[];
 }
 
 export interface CaseDetail extends CaseSummary {

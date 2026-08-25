@@ -1,11 +1,39 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { createCase, injectBill } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { createCase, injectBill, listFixtures, usingMock } from "@/lib/api";
 import { HOSPITALS } from "@/lib/mock-data";
 
 const STATES = ["CA", "IL", "FL", "NY", "WA", "NJ", "TX"];
+
+/**
+ * Real, live-resolvable hospitals (verified via `curl {API}/hospitals/{ein}`)
+ * — used for the manual-intake dropdown once the live API is in play, since
+ * `lib/mock-data.ts`'s HOSPITALS carry made-up EINs that don't exist in
+ * LEDGER's real 200-hospital Firestore seed. There's no "list hospitals"
+ * endpoint in §3.3 to fetch this dynamically, so it's a small curated set
+ * rather than an invented one — both are hospitals PROOF's fixtures already
+ * use, covering both demo states (§2.6).
+ */
+const LIVE_HOSPITALS = [
+  { ein: "94-0562680", name: "Sutter Bay Hospitals", state: "CA" },
+  { ein: "36-2169147", name: "Advocate Christ Medical Center", state: "IL" },
+];
+
+/** Friendly labels for PROOF's fixture corpus (fixtures/cases_data.py). */
+const FIXTURE_LABELS: Record<string, string> = {
+  case_01_uninsured_gfe_ca: "Uninsured + GFE overage (CA)",
+  case_02_wrongful_denial_il: "Wrongful denial (IL) — deadline drama",
+  case_03_in_collections_ca: "In collections (CA) — validation first",
+  case_04_forprofit_il: "For-profit hospital (IL) — no 501(r) duty",
+  case_05_cat_photo_income_proof: "Cat-photo income proof (Verifier fail)",
+  case_06_unparseable_bill: "Unparseable bill (graceful degradation)",
+  case_07_il_concurrent_clocks: "Concurrent deadlines (IL)",
+  case_08_lawful_denial_ca: "Lawful denial (CA)",
+  maria_uninsured_ca: "Maria (uninsured, CA)",
+  unparseable_bill: "Unparseable bill (degradation demo)",
+};
 
 export function IntakeForm() {
   const router = useRouter();
@@ -29,6 +57,30 @@ export function IntakeForm() {
   const [submitting, setSubmitting] = useState(false);
   const [injecting, setInjecting] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Mock mode's hospital dropdown is the illustrative 6-hospital mock-data
+  // set; against the live API only the small curated LIVE_HOSPITALS set
+  // resolves via GET /hospitals/{ein} (see its comment above), so swap the
+  // options — and the default selection — once we know which backend is live.
+  const [hospitalOptions, setHospitalOptions] = useState<
+    { ein: string; name: string; state: string }[]
+  >(HOSPITALS);
+  const [fixtures, setFixtures] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    usingMock().then((mock) => {
+      if (cancelled || mock) return;
+      setHospitalOptions(LIVE_HOSPITALS);
+      setHospitalEin(LIVE_HOSPITALS[0].ein);
+    });
+    listFixtures().then((f) => {
+      if (!cancelled) setFixtures(f);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function handleFileChange(file: File | null) {
     if (!file) {
@@ -102,22 +154,25 @@ export function IntakeForm() {
           drops a fixture into the pipeline as if it had just been emailed to the intake inbox.
         </p>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => handleInject("maria_uninsured_ca")}
-            disabled={injecting !== null}
-            className="rounded-lg border border-signal-blue/40 bg-signal-blue/10 px-3 py-2 text-sm font-medium text-blue-200 hover:bg-signal-blue/20 disabled:opacity-60"
-          >
-            {injecting === "maria_uninsured_ca" ? "Injecting…" : "Inject: Maria (uninsured, CA)"}
-          </button>
-          <button
-            type="button"
-            onClick={() => handleInject("unparseable_bill")}
-            disabled={injecting !== null}
-            className="rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm font-medium text-ink-300 hover:bg-ink-800 disabled:opacity-60"
-          >
-            {injecting === "unparseable_bill" ? "Injecting…" : "Inject: unparseable bill (degradation demo)"}
-          </button>
+          {fixtures.length === 0 ? (
+            <span className="text-sm text-ink-500">Loading fixture list…</span>
+          ) : (
+            fixtures.map((f, i) => (
+              <button
+                key={f}
+                type="button"
+                onClick={() => handleInject(f)}
+                disabled={injecting !== null}
+                className={`rounded-lg border px-3 py-2 text-sm font-medium disabled:opacity-60 ${
+                  i === 0
+                    ? "border-signal-blue/40 bg-signal-blue/10 text-blue-200 hover:bg-signal-blue/20"
+                    : "border-ink-700 bg-ink-900 text-ink-300 hover:bg-ink-800"
+                }`}
+              >
+                {injecting === f ? "Injecting…" : `Inject: ${FIXTURE_LABELS[f] ?? f}`}
+              </button>
+            ))
+          )}
         </div>
       </section>
 
@@ -162,7 +217,7 @@ export function IntakeForm() {
             </Field>
             <Field label="Hospital">
               <select value={hospitalEin} onChange={(e) => setHospitalEin(e.target.value)} className="input">
-                {HOSPITALS.map((h) => (
+                {hospitalOptions.map((h) => (
                   <option key={h.ein} value={h.ein}>
                     {h.name} ({h.state})
                   </option>

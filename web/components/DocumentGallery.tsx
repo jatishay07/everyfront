@@ -42,9 +42,18 @@ export function DocumentGallery({ documents }: { documents: CaseDocument[] }) {
               </span>
             )}
           </div>
-          <span className="truncate font-mono text-[11px] text-ink-500" title={d.gcs_uri}>
-            {d.gcs_uri}
-          </span>
+          {d.gcs_uri ? (
+            <span className="truncate font-mono text-[11px] text-ink-500" title={d.gcs_uri}>
+              {d.gcs_uri}
+            </span>
+          ) : d.raw_text ? (
+            <p
+              className="line-clamp-3 rounded-md bg-ink-950/60 px-2 py-1.5 font-mono text-[11px] leading-snug text-ink-500"
+              title={d.raw_text}
+            >
+              {d.raw_text}
+            </p>
+          ) : null}
           <span className="text-xs text-ink-500">Uploaded {formatDateTime(d.uploaded_at)}</span>
           {d.verification_notes && (
             <p className="rounded-md border border-signal-red/25 bg-signal-red/5 px-2.5 py-2 text-xs leading-relaxed text-red-200">

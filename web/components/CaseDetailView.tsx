@@ -22,6 +22,18 @@ const STATUS_LABEL: Record<string, string> = {
   closed: "Closed",
 };
 
+/**
+ * Every nested read below is defensive (`?.`, `?? []`, `?? 0`) even though
+ * `lib/types.ts` types `bill`/`patient`/`fronts`/`events`/`documents`/
+ * `filings` as always present per §3.1. The live API serves at least one
+ * case (a `swarm-smoke-test` stub) missing most of them, and a case is also
+ * genuinely partial for real for the first ~2.5 minutes while it's mid-
+ * pipeline (task brief: "fronts and events arriving progressively rather
+ * than all at once") — this crashed the Command Center's case list into
+ * Next.js's error boundary in production before being hardened there (see
+ * CaseList.tsx's comment and the PR description), so the same defensiveness
+ * applies here.
+ */
 export function CaseDetailView({ caseId }: { caseId: string }) {
   const { data: c, initialLoading, refresh } = usePolling(() => getCase(caseId), POLL_MS, [caseId]);
 
@@ -53,10 +65,13 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
         </Link>
         <div className="mt-2 flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold tracking-tight text-ink-100">{c.patient.name}</h1>
+            <h1 className="text-xl font-semibold tracking-tight text-ink-100">
+              {c.patient?.name || "Unnamed patient"}
+            </h1>
             <p className="mt-1 text-sm text-ink-400">
-              {c.hospital_name} · {c.patient.state} · {c.hospital_nonprofit ? "Nonprofit" : "For-profit"} ·{" "}
-              {c.patient.insured ? "Insured" : "Uninsured"}
+              {c.hospital_name || "Hospital not yet resolved"} · {c.patient?.state ?? "—"} ·{" "}
+              {c.hospital_nonprofit ? "Nonprofit" : "For-profit"} ·{" "}
+              {c.patient?.insured ? "Insured" : "Uninsured"}
             </p>
           </div>
           <span className="inline-flex items-center rounded-full border border-ink-700 bg-ink-900 px-3 py-1.5 text-sm font-medium text-ink-200">
@@ -87,17 +102,17 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
       )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <SummaryStat label="Billed" value={formatUSD(c.bill.amount_cents)} />
-        <SummaryStat label="Savings found" value={formatUSD(c.savings_found_cents)} accent="green" />
-        <SummaryStat label="Audit findings" value={formatUSD(c.audit_findings_cents)} accent="amber" />
-        <SummaryStat label="Filings sent" value={String(c.filings.length)} />
+        <SummaryStat label="Billed" value={formatUSD(c.bill?.amount_cents ?? 0)} />
+        <SummaryStat label="Savings found" value={formatUSD(c.savings_found_cents ?? 0)} accent="green" />
+        <SummaryStat label="Audit findings" value={formatUSD(c.audit_findings_cents ?? 0)} accent="amber" />
+        <SummaryStat label="Filings sent" value={String(c.filings?.length ?? 0)} />
       </div>
 
       <section>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-400">
           Deadline ladder
         </h2>
-        <DeadlineLadder fronts={c.fronts} />
+        <DeadlineLadder fronts={c.fronts ?? []} />
       </section>
 
       <div className="grid gap-8 lg:grid-cols-2">
@@ -105,7 +120,7 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-400">
             Fronts
           </h2>
-          <FrontsPanel caseId={c.case_id} fronts={c.fronts} onApproved={refresh} />
+          <FrontsPanel caseId={c.case_id} fronts={c.fronts ?? []} onApproved={refresh} />
         </section>
 
         <section>
@@ -113,7 +128,7 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
             Timeline
           </h2>
           <div className="max-h-[560px] overflow-y-auto rounded-xl border border-ink-800 bg-ink-900/30 p-4 scrollbar-thin">
-            <EventTimeline events={c.events} />
+            <EventTimeline events={c.events ?? []} />
           </div>
         </section>
       </div>
@@ -122,7 +137,7 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-400">
           Documents
         </h2>
-        <DocumentGallery documents={c.documents} />
+        <DocumentGallery documents={c.documents ?? []} />
       </section>
     </div>
   );
