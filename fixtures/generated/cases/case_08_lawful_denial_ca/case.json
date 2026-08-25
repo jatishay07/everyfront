@@ -6,6 +6,26 @@
     "gfe_amount_cents": null,
     "hospital_ein": "94-6174066",
     "in_collections": false,
+    "line_items": [
+      {
+        "charge_cents": 110000,
+        "code": "99283",
+        "description": "EMERGENCY DEPT VISIT, MODERATE COMPLEXITY",
+        "units": 1
+      },
+      {
+        "charge_cents": 14000,
+        "code": "80048",
+        "description": "BASIC METABOLIC PANEL",
+        "units": 1
+      },
+      {
+        "charge_cents": 14000,
+        "code": "80048",
+        "description": "BASIC METABOLIC PANEL",
+        "units": 1
+      }
+    ],
     "provider_name": "Stanford Health Care",
     "service_date": "2026-03-15",
     "validation_notice_date": null

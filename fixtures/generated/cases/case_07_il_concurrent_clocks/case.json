@@ -7,6 +7,44 @@
     "gfe_amount_cents": 260000,
     "hospital_ein": "36-2169147",
     "in_collections": false,
+    "line_items": [
+      {
+        "charge_cents": 260000,
+        "code": "99285",
+        "description": "EMERGENCY DEPT VISIT, HIGH COMPLEXITY",
+        "units": 1
+      },
+      {
+        "charge_cents": 14000,
+        "code": "86787",
+        "description": "AB, VARICELLA ZOSTER IGG",
+        "units": 1
+      },
+      {
+        "charge_cents": 9500,
+        "code": "71046",
+        "description": "CHEST X-RAY, 2 VIEWS",
+        "units": 3
+      },
+      {
+        "charge_cents": 22000,
+        "code": "80053",
+        "description": "COMPREHENSIVE METABOLIC PANEL",
+        "units": 1
+      },
+      {
+        "charge_cents": 22000,
+        "code": "80053",
+        "description": "COMPREHENSIVE METABOLIC PANEL",
+        "units": 1
+      },
+      {
+        "charge_cents": 3500,
+        "code": "36415",
+        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
+        "units": 1
+      }
+    ],
     "provider_name": "Advocate Christ Medical Center",
     "service_date": "2026-07-09",
     "validation_notice_date": null

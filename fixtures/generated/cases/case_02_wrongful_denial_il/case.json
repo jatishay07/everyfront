@@ -6,6 +6,38 @@
     "gfe_amount_cents": null,
     "hospital_ein": "36-2169147",
     "in_collections": false,
+    "line_items": [
+      {
+        "charge_cents": 240000,
+        "code": "99285",
+        "description": "EMERGENCY DEPT VISIT, HIGH COMPLEXITY",
+        "units": 1
+      },
+      {
+        "charge_cents": 18000,
+        "code": "96365",
+        "description": "IV INFUSION, INITIAL HOUR",
+        "units": 1
+      },
+      {
+        "charge_cents": 18000,
+        "code": "96365",
+        "description": "IV INFUSION, INITIAL HOUR",
+        "units": 1
+      },
+      {
+        "charge_cents": 15000,
+        "code": "80048",
+        "description": "BASIC METABOLIC PANEL",
+        "units": 1
+      },
+      {
+        "charge_cents": 3500,
+        "code": "36415",
+        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
+        "units": 1
+      }
+    ],
     "provider_name": "Advocate Christ Medical Center",
     "service_date": "2025-12-20",
     "validation_notice_date": null

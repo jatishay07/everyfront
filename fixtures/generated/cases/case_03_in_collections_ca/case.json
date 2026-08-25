@@ -6,6 +6,32 @@
     "gfe_amount_cents": null,
     "hospital_ein": "94-6174066",
     "in_collections": true,
+    "line_items": [
+      {
+        "charge_cents": 98000,
+        "code": "99283",
+        "description": "EMERGENCY DEPT VISIT, MODERATE COMPLEXITY",
+        "units": 1
+      },
+      {
+        "charge_cents": 15000,
+        "code": "73610",
+        "description": "X-RAY, ANKLE, 3+ VIEWS",
+        "units": 1
+      },
+      {
+        "charge_cents": 15000,
+        "code": "73610",
+        "description": "X-RAY, ANKLE, 3+ VIEWS",
+        "units": 1
+      },
+      {
+        "charge_cents": 9500,
+        "code": "29405",
+        "description": "APPLICATION OF SHORT LEG SPLINT",
+        "units": 1
+      }
+    ],
     "provider_name": "Stanford Health Care",
     "service_date": "2026-02-20",
     "validation_notice_date": "2026-08-05"

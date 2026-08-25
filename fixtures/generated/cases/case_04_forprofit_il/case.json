@@ -7,6 +7,26 @@
     "gfe_amount_cents": null,
     "hospital_ein": "00-0000001",
     "in_collections": false,
+    "line_items": [
+      {
+        "charge_cents": 65000,
+        "code": "99282",
+        "description": "EMERGENCY DEPT VISIT, LOW COMPLEXITY",
+        "units": 1
+      },
+      {
+        "charge_cents": 15000,
+        "code": "80048",
+        "description": "BASIC METABOLIC PANEL",
+        "units": 1
+      },
+      {
+        "charge_cents": 15000,
+        "code": "80048",
+        "description": "BASIC METABOLIC PANEL",
+        "units": 1
+      }
+    ],
     "provider_name": "Prairie Crossing Medical Center (FOR-PROFIT) \u2014 SYNTHETIC FIXTURE",
     "service_date": "2026-05-30",
     "validation_notice_date": null

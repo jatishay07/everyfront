@@ -6,6 +6,38 @@
     "gfe_amount_cents": 192500,
     "hospital_ein": "94-0562680",
     "in_collections": false,
+    "line_items": [
+      {
+        "charge_cents": 185000,
+        "code": "99284",
+        "description": "EMERGENCY DEPT VISIT, HIGH COMPLEXITY",
+        "units": 1
+      },
+      {
+        "charge_cents": 32000,
+        "code": "71046",
+        "description": "CHEST X-RAY, 2 VIEWS",
+        "units": 1
+      },
+      {
+        "charge_cents": 21000,
+        "code": "80053",
+        "description": "COMPREHENSIVE METABOLIC PANEL",
+        "units": 1
+      },
+      {
+        "charge_cents": 21000,
+        "code": "80053",
+        "description": "COMPREHENSIVE METABOLIC PANEL",
+        "units": 1
+      },
+      {
+        "charge_cents": 3500,
+        "code": "36415",
+        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
+        "units": 1
+      }
+    ],
     "provider_name": "Sutter Bay Hospitals",
     "service_date": "2026-05-01",
     "validation_notice_date": null

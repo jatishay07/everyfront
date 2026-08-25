@@ -83,6 +83,27 @@ def build_case_json(case: CaseFixture, hospitals: dict[str, Hospital]) -> dict:
     gfe_specs = [d for d in case.documents if d.render == "gfe_pdf"]
     gfe_delta = gfe_specs[0].kwargs["gfe_delta_cents"] if gfe_specs else None
     bill["gfe_amount_cents"] = amount_cents - gfe_delta if gfe_delta and amount_cents else None
+    # HANDOFF -> SWARM: `line_items` is not in §3.1's `bill` shape (like
+    # `discharge_date`, it's an allowed extra key -- see
+    # tests/test_fixture_corpus.py's CONTRACT_BILL_KEYS). It was entirely
+    # absent from the committed case.json until this pass, which is exactly
+    # why `/demo/inject_bill` (services/api/api_core/demo_fixtures.py) had
+    # nothing to render into the itemized-bill document text, so the Reader
+    # never had a code/unit/charge to extract and `audit_line_items` always
+    # ran over an empty list -- audit_findings_cents was 0 on every live
+    # case verified against this PR (see PR description). Field names match
+    # services/agent-core/agent_core/agents/reader.py's EXTRACTION_SCHEMA
+    # (`code`, `description`, `units`, `charge_cents`) so a consumer can wire
+    # this straight into that shape without a translation layer.
+    bill["line_items"] = [
+        {
+            "code": li.code,
+            "description": li.description,
+            "units": li.units,
+            "charge_cents": li.unit_charge_cents,
+        }
+        for li in case.line_items
+    ]
 
     deadlines = []
     has_service_date = isinstance(bill.get("service_date"), date)
