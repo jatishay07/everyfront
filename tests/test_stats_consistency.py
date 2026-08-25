@@ -73,7 +73,7 @@ def _recompute_stats() -> dict:
             stats["ppdr_eligible"] += 1
 
         denial = data["expected"]["denial_check_reference_model"]
-        if denial and denial["unlawful"]:
+        if denial and denial["violation"]:
             stats["unlawful_denials_flagged"] += 1
 
         stats["audit_findings_cents"] += data["expected"]["audit_findings_cents_total"]
@@ -118,7 +118,7 @@ class TestStatsAddUp:
     def test_audit_findings_is_the_literal_sum_of_seeded_findings(self):
         stats = json.loads((GENERATED / "expected_stats.json").read_text())
         total = sum(
-            f["amount_cents"]
+            f["potential_savings_cents"] or 0
             for c in CASES
             for f in _load(c.case_id)["expected"]["audit_findings_reference_model"]
         )

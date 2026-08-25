@@ -53,11 +53,17 @@
     "audit_findings_cents_total": 15000,
     "audit_findings_reference_model": [
       {
-        "amount_cents": 15000,
-        "code": "73610",
-        "description": "X-RAY, ANKLE, 3+ VIEWS",
-        "kind": "exact_duplicate",
-        "note": "Same ankle X-ray billed twice."
+        "citation": "42 USC 1395b-7(b) (itemized statement); duplicate billing is not separately regulated",
+        "codes": [
+          "73610"
+        ],
+        "description": "2 identical lines for 73610 (1 unit(s) each) -- likely duplicate billing",
+        "kind": "duplicate",
+        "lines": [
+          1,
+          2
+        ],
+        "potential_savings_cents": 15000
       }
     ],
     "deadlines": [
@@ -120,20 +126,30 @@
       {
         "applicable": true,
         "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
+        "deadline": "2026-09-04",
         "front": "debt_validation",
-        "reason": "in_collections with an open validation window -- sequences before every other front."
+        "reason": "account is in collections and within 30 days of the validation notice -- a timely written dispute forces verification and pauses collection"
       },
       {
         "applicable": true,
         "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "deadline": null,
         "front": "charity_care",
-        "reason": "Screened free against Stanford Health Care's FAP."
+        "reason": "Income is 112.782% of the federal poverty level. At or below the 400% threshold for free care. Basis: Cal. Health & Safety Code \u00a7127405(a)(1)(A), (d)(1); 26 CFR 1.501(r)-4(b)(2) Sequenced after debt validation (12 CFR 1006.34(b); 15 USC 1692g(a)), which must be resolved first -- a pending validation dispute pauses collection activity."
+      },
+      {
+        "applicable": false,
+        "citation": "45 CFR 149.620(a)(2)(ii)",
+        "deadline": null,
+        "front": "ppdr",
+        "reason": "no Good Faith Estimate on file to compare against the bill"
       },
       {
         "applicable": true,
         "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "deadline": null,
         "front": "audit",
-        "reason": "Itemized bill present -- billing audit always runs."
+        "reason": "itemized bill on file; a billing audit is always performed Sequenced after debt validation (12 CFR 1006.34(b); 15 USC 1692g(a)), which must be resolved first -- a pending validation dispute pauses collection activity."
       }
     ]
   },

@@ -408,7 +408,7 @@ def main() -> None:
             stats["charity_eligible"] += 1
         if any(f["front"] == "ppdr" and f["applicable"] for f in exp["fronts_reference_model"]):
             stats["ppdr_eligible"] += 1
-        if exp["denial_check_reference_model"] and exp["denial_check_reference_model"]["unlawful"]:
+        if exp["denial_check_reference_model"] and exp["denial_check_reference_model"]["violation"]:
             stats["unlawful_denials_flagged"] += 1
         stats["audit_findings_cents"] += exp["audit_findings_cents_total"]
         for d in exp["deadlines"]:
