@@ -36,6 +36,20 @@ Traps this module handles (all confirmed against real files, 2026-08-25):
 6. **~1/3 of published MRFs are unusable** (GAO). `fetch_cms_hpt` and
    `fetch_cash_prices` return `None`/`[]` on any parse failure, timeout, or
    unexpected schema -- they never raise out of a batch run.
+7. **A JSON MRF can carry a leading UTF-8 BOM.** Confirmed live 2026-08-25 on
+   Stanford Health Care's real MRF (gate (b), 154 MB): a byte-order mark
+   before the opening `{` makes ijson's C backend raise on the first token.
+   That exception IS caught by trap (6)'s safety net, so this used to fail
+   completely silently -- `_BomStrippingStream` strips it before ijson ever
+   sees the stream.
+8. **The same code can appear on more than one CSV row at different prices.**
+   Confirmed live on Advocate's real MRF: CPT 86787 bills both "AB,
+   VARICELLA ZOSTER IGG" ($70.00 cash) and "...IGM" ($72.50 cash) as
+   separate rows under the identical code. `_parse_csv_mrf` now stops
+   matching a code once its first row is found, so the answer is the first
+   occurrence in file order -- deterministic, and consistent with
+   docs/SPIKE.md gate (b)'s recorded $140.00/$70.00 figure for this exact
+   code. (The JSON path already had this guard.)
 """
 
 from __future__ import annotations
@@ -160,7 +174,16 @@ def _parse_csv_mrf(resp: requests.Response, codes: set[str]) -> list[CashPrice]:
         if len(row) <= code_col:
             continue
         code = row[code_col].strip()
-        if code not in codes:
+        if code not in codes or code in found:
+            # trap (8): a hospital can bill the SAME code under different
+            # descriptions at different price points (confirmed live,
+            # Advocate's real MRF: 86787 appears both as "AB, VARICELLA
+            # ZOSTER IGG" at $70.00 cash and "...IGM" at $72.50). Without
+            # this check every matching row got appended and the LAST one
+            # in file order silently won -- contradicting this function's
+            # own "first match wins" docstring and, concretely, diverging
+            # from the exact $140/$70 figure docs/SPIKE.md gate (b)
+            # recorded for this code from the same file.
             continue
         cash_raw = row[cash_col].strip() if len(row) > cash_col else ""
         if not cash_raw:
@@ -184,8 +207,41 @@ def _parse_csv_mrf(resp: requests.Response, codes: set[str]) -> list[CashPrice]:
     return out
 
 
+class _BomStrippingStream:
+    """Wraps a file-like object and drops a leading UTF-8 BOM (`EF BB BF`).
+
+    Trap (7), found live 2026-08-25 running LEDGER's WO6 audit fix: Stanford
+    Health Care's real MRF (docs/SPIKE.md gate (b), 154 MB JSON, confirmed
+    live) is emitted with a UTF-8 byte-order mark before the opening `{`.
+    ijson's C backend (`yajl2_c`) treats that as a lexical error and raises
+    `ijson.common.IncompleteJSONError` on the very first token -- which
+    `fetch_cash_prices`'s own `except ijson.JSONError` catches (it IS a
+    JSONError subclass), so the failure was never loud: it just silently
+    returned `[]` for a hospital whose MRF gate (b) had already proven
+    reachable and parseable. A BOM is legal UTF-8 and not unusual coming out
+    of Windows-authored tooling, so this is likely to recur for other
+    hospitals, not a one-off.
+
+    `requests`' streaming reader can call `.read(0)` as a priming probe
+    before ever reading real bytes (confirmed empirically), so the BOM check
+    must trigger on the first *non-empty* chunk, not the first call.
+    """
+
+    def __init__(self, raw) -> None:
+        self._raw = raw
+        self._checked = False
+
+    def read(self, n: int = -1) -> bytes:
+        chunk = self._raw.read(n)
+        if not self._checked and chunk:
+            self._checked = True
+            if chunk[:3] == b"\xef\xbb\xbf":
+                chunk = chunk[3:]
+        return chunk
+
+
 def _parse_json_mrf(resp: requests.Response, codes: set[str]) -> list[CashPrice]:
-    """Stream a CMS-standard JSON-schema MRF with ijson. See trap (3)/(4).
+    """Stream a CMS-standard JSON-schema MRF with ijson. See trap (3)/(4)/(7).
 
     Same early-exit as the CSV path: these files run to hundreds of MB (one
     real Cedars-Sinai MRF checked during development was ~880 MB), and
@@ -195,7 +251,8 @@ def _parse_json_mrf(resp: requests.Response, codes: set[str]) -> list[CashPrice]
     out: list[CashPrice] = []
     found: set[str] = set()
     resp.raw.decode_content = True
-    for scanned, item in enumerate(ijson.items(resp.raw, "standard_charge_information.item")):
+    stream = _BomStrippingStream(resp.raw)
+    for scanned, item in enumerate(ijson.items(stream, "standard_charge_information.item")):
         if found >= codes or scanned >= _MAX_ROWS_SCANNED:
             break
         code_infos = item.get("code_information") or []
