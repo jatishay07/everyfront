@@ -12,3 +12,8 @@ google-cloud-pubsub==2.39.2
 google-api-python-client==2.199.0
 google-auth==2.57.0
 google-auth-oauthlib==1.4.1
+# WO7: text_extract.py pulls raw text out of a PDF attachment at fetch time,
+# so `case.document.added` carries `raw_text` for agent-core's Reader instead
+# of nothing (see that module's docstring). Version pinned to match
+# packages/delivery/requirements.txt, which already depends on it.
+pypdf==6.16.2
