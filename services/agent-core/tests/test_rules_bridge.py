@@ -20,7 +20,12 @@ from agent_core import rules_bridge
 
 def test_bridge_sources_names_every_bridged_function():
     sources = rules_bridge.bridge_sources()
-    assert set(sources) == {"select_fronts", "audit_line_items", "check_denial_lawfulness"}
+    assert set(sources) == {
+        "select_fronts",
+        "audit_line_items",
+        "check_denial_lawfulness",
+        "total_savings_cents",
+    }
     for source in sources.values():
         # Either STATUTE's real function landed, or we're honestly on the
         # fallback -- never silent about which.

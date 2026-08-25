@@ -13,3 +13,11 @@ uvicorn[standard]==0.52.4
 # agent_core/pubsub_client.py) so local dev and CI never need real credentials.
 google-cloud-firestore==2.29.0
 google-cloud-pubsub==2.39.2
+
+# LEDGER WO6: `infra/deploy.sh`'s `pkgs_for agent-core` now bundles
+# packages/datapipes (mrf_cache's live MRF fetch, ncci_cache's bundled NCCI
+# snapshot) -- both `datapipes.mrf` and `datapipes.ncci` import these
+# unconditionally at module load, same pinned versions as
+# packages/datapipes/requirements.txt.
+requests==2.34.2
+ijson==3.5.1

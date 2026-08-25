@@ -20,11 +20,37 @@ entirely on the resolved hospital already carrying an `mrf_url` (Lookup, this
 same pipeline run, earlier) and on `packages/datapipes` being importable in
 this process; either being absent degrades to skipping the cash-price check,
 never to inventing one.
+
+WO6 (LEDGER): two more fixes, both confirmed live against `demo/inject_bill`
+before this change (see the PR description for the transcript):
+
+1. **NCCI was never wired at all.** This module built a `cash_price_lookup`
+   but simply never built (or passed) a `ptp_lookup` / `mue_lookup` --
+   `audit_line_items` therefore always skipped both NCCI checks, regardless
+   of whether LEDGER's PTP/MUE table existed or matched. Now sourced from
+   `agent_core.ncci_cache`, which opens LEDGER's bundled sqlite snapshot
+   once per process (no network, no per-hospital anything -- see that
+   module's docstring).
+2. **A live MRF fetch is not the only way to get a cash price, and shouldn't
+   be the primary one.** `mrf_cache`'s 4s-bounded fetch is real but adds
+   request latency and depends on `packages/datapipes` being bundled into
+   this service's container. LEDGER's seed pipeline can pre-fetch a
+   hospital's cash prices once, offline, straight from the same MRF, and
+   write them onto the hospital's own Firestore record (`cash_prices:
+   {code: cents}` -- see `packages/datapipes/datapipes/seed_cash_prices.py`).
+   `_cash_price_lookup` below now prefers that pre-cache (instant, already
+   in memory on `hospital` from Lookup) and only falls back to the live
+   bounded fetch for codes the pre-cache doesn't cover.
+3. `total_findings_cents` is now `rules.audit.total_savings_cents`, not a
+   naive sum -- see that function's docstring for why summing every
+   finding's `potential_savings_cents` would double-count overlapping
+   theories about the same line (this work order's #3: "a judge doing
+   arithmetic on screen must not catch a discrepancy").
 """
 
 from __future__ import annotations
 
-from .. import config, mrf_cache, rules_bridge
+from .. import config, mrf_cache, ncci_cache, rules_bridge
 from ..store import store
 from . import common
 
@@ -71,31 +97,80 @@ def _denial_check(case_id: str, case: dict) -> dict:
     }
 
 
+async def _cash_price_lookup(hospital: dict, codes: list[str]):
+    """Build a `(code) -> cents | None` cash-price lookup + a human-readable
+    source string for the event log, preferring LEDGER's seed-time pre-cache
+    (`hospital["cash_prices"]`, instant, no network) over a live bounded MRF
+    fetch, which now only covers codes the pre-cache doesn't have.
+    """
+    pre_cached: dict = hospital.get("cash_prices") or {}
+    missing = [c for c in codes if c not in pre_cached]
+
+    live_table: dict = {}
+    live_note: str | None = None
+    if missing:
+        live_lookup = await mrf_cache.cash_price_lookup_for(hospital.get("mrf_url"), missing)
+        if live_lookup is not None:
+            live_table = {c: live_lookup(c) for c in missing}
+            live_table = {c: v for c, v in live_table.items() if v is not None}
+            if live_table:
+                live_note = (
+                    f"live MRF fetch for {len(live_table)} code(s) ({hospital.get('mrf_url')})"  # noqa: E501
+                )
+        elif not mrf_cache.available():
+            live_note = f"live fetch skipped -- packages/datapipes not importable: {mrf_cache.unavailable_reason()}"  # noqa: E501
+        elif not hospital.get("mrf_url"):
+            live_note = None  # nothing to report: no mrf_url and no pre-cache is just "no data"
+        else:
+            live_note = "live MRF fetch found no further matches, timed out, or failed"
+
+    combined = {**pre_cached, **live_table}
+    notes = []
+    if pre_cached:
+        notes.append(f"pre-cached at seed time ({len(pre_cached)} code(s))")
+    if live_note:
+        notes.append(live_note)
+    source = (
+        "; ".join(notes)
+        if notes
+        else "skipped -- no cash price data available (no pre-cache, no mrf_url)"
+    )  # noqa: E501
+
+    if not combined:
+        return None, source
+    return (lambda code: combined.get(code)), source
+
+
 async def _facts(case_id: str, case: dict) -> dict:
     items = _all_line_items(case_id)
+    hospital = case.get("hospital") or {}
     cash_price_lookup = None
-    mrf_source = "no items to audit"
+    cash_price_source = "no items to audit"
     if items:
-        hospital = case.get("hospital") or {}
         codes = sorted({item.get("code") for item in items if item.get("code")})
-        cash_price_lookup = await mrf_cache.cash_price_lookup_for(hospital.get("mrf_url"), codes)
-        if cash_price_lookup is not None:
-            mrf_source = f"live MRF fetch ({hospital.get('mrf_url')})"
-        elif not mrf_cache.available():
-            mrf_source = (
-                f"skipped -- packages/datapipes not importable: {mrf_cache.unavailable_reason()}"  # noqa: E501
-            )
-        elif not hospital.get("mrf_url"):
-            mrf_source = "skipped -- resolved hospital has no mrf_url on file"
-        else:
-            mrf_source = "skipped -- MRF fetch found no matching cash price, timed out, or failed"
+        cash_price_lookup, cash_price_source = await _cash_price_lookup(hospital, codes)
+
+    ptp_lookup = ncci_cache.ptp_lookup()
+    mue_lookup = ncci_cache.mue_lookup()
+    if ptp_lookup is not None or mue_lookup is not None:
+        ncci_source = "bundled NCCI snapshot (datapipes.ncci, no network)"
+    else:
+        ncci_source = (
+            f"skipped -- {ncci_cache.unavailable_reason() or 'bundled NCCI snapshot unavailable'}"  # noqa: E501
+        )
+
     findings = (
-        rules_bridge.audit_line_items(items, cash_price_lookup=cash_price_lookup) if items else []
+        rules_bridge.audit_line_items(
+            items,
+            ptp_lookup=ptp_lookup,
+            mue_lookup=mue_lookup,
+            cash_price_lookup=cash_price_lookup,
+        )
+        if items
+        else []
     )
     denial = _denial_check(case_id, case)
-    total_findings_cents = sum(
-        f.potential_savings_cents or 0 for f in findings if f.potential_savings_cents
-    )
+    total_findings_cents = rules_bridge.total_savings_cents(findings)
     return {
         "case_id": case_id,
         "findings": [
@@ -111,7 +186,8 @@ async def _facts(case_id: str, case: dict) -> dict:
         ],
         "total_findings_cents": total_findings_cents,
         "denial_check": denial,
-        "cash_price_source": mrf_source,
+        "cash_price_source": cash_price_source,
+        "ncci_source": ncci_source,
         "source": rules_bridge.bridge_sources(),
     }
 
