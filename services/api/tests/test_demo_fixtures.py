@@ -52,6 +52,32 @@ def test_proof_corpus_cat_photo_case_describes_image_not_income(monkeypatch=None
     assert "cat" in income_doc["raw_text"].lower()
 
 
+def test_proof_corpus_itemized_bill_carries_real_line_items():
+    """Defect #1: the synthesized bill text used to omit line items entirely
+    (case.json's own `bill` dict has no `line_items` field -- only the real
+    rendered PDF does), so Reader had nothing to extract and every audit
+    finding was silently unreachable. Real PDF text extraction fixes this at
+    the source: the seeded duplicate-billing line (80053 billed twice) must
+    be visible in the raw text handed to Reader.
+    """
+    fixture = demo_fixtures.load_fixture("case_01_uninsured_gfe_ca")
+    if fixture is None:
+        return
+    bill_doc = next(d for d in fixture["documents"] if d["type"] == "itemized_bill")
+    assert bill_doc["raw_text"].count("80053") == 2  # the seeded exact-duplicate line
+    assert "36415" in bill_doc["raw_text"]  # the seeded PTP-unbundling line
+
+
+def test_extract_pdf_text_returns_none_for_a_non_pdf_or_corrupt_file(tmp_path):
+    not_a_pdf = tmp_path / "not_really.pdf"
+    not_a_pdf.write_bytes(b"this is not a pdf file at all")
+    assert demo_fixtures._extract_pdf_text(not_a_pdf) is None
+
+
+def test_extract_pdf_text_returns_none_for_a_missing_file(tmp_path):
+    assert demo_fixtures._extract_pdf_text(tmp_path / "does_not_exist.pdf") is None
+
+
 def test_proof_corpus_unparseable_bill_is_not_real_bill_text():
     fixture = demo_fixtures.load_fixture("case_06_unparseable_bill")
     if fixture is None:

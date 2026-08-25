@@ -17,14 +17,29 @@ Every consumer gets the same normalized shape:
      "hospital": {ein, ...} | None,          # seed if not already present
      "documents": [{"type": str, "raw_text": str}, ...]}
 
-PROOF's case.json references real PDF/PNG files (`documents/*.file`) rather
-than extracted text -- this service has no OCR/PDF-text step (that is
-RELAY's `packages/delivery` PDF engine, or a future intake-side extraction
-step), so `_synthesize_raw_text` reconstructs a plausible text rendering of
-each document FROM THE SAME FIELDS ALREADY IN case.json (never inventing a
-new fact) so Reader's real Gemma/Gemini calls have something to classify and
-extract. HANDOFF -> RELAY/PROOF: once real PDF-text extraction exists
-upstream, this synthesis step is a straightforward deletion.
+PROOF's case.json references real, rendered PDF/PNG files (`documents/*.file`)
+-- reportlab-drawn bills with real line items, real NCCI-violation-shaped
+duplicate lines, real denial-letter demanded-document text, and so on (see
+`fixtures/cases_data.py`). `_extract_pdf_text` below reads that real text with
+pypdf (the same library RELAY's PDF-fill engine depends on -- see
+`packages/delivery/requirements.txt`) FIRST; `_synthesize_raw_text` is now
+strictly the fallback for when that fails (a non-PDF file, e.g. the
+cat-photo PNG, or PROOF's deliberately-corrupted `case_06_unparseable_bill`
+fixture, whose bill.pdf pypdf genuinely cannot parse -- which is exactly the
+"degrade gracefully" behavior that fixture exists to exercise) or when a
+fixture carries no `file` at all (`BUILTIN_FIXTURES`).
+
+DEFECT FIX (persona 5 WO2, 2026-08-25): `_synthesize_raw_text`'s itemized-bill
+reconstruction never included line items at all -- case.json's own `bill`
+dict has no `line_items` field (that detail exists only in
+`fixtures/cases_data.py`'s `CaseFixture.line_items`, used to RENDER the PDF,
+not serialized into case.json). Reader's Gemini extraction schema already
+asks for `line_items` (see `services/agent-core/agent_core/agents/reader.py`)
+-- it simply had nothing to extract them from, so `audit_line_items()` always
+ran against an empty list and `savings_found_cents` was always 0. Reading the
+real rendered PDF (which does contain every line item, seeded duplicates
+included) fixes this at the actual source instead of teaching the synthesis
+path to reinvent a second, parallel copy of PROOF's fixture data.
 
 Every patient here is fictional. Watermarked SYNTHETIC -- DEMO per
 BUILD_PLAYBOOK.md rule 0.6: never a real name, SSN, or real patient bill.
@@ -33,9 +48,14 @@ BUILD_PLAYBOOK.md rule 0.6: never a real name, SSN, or real patient bill.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+import pypdf
+
+logger = logging.getLogger("api_core.demo_fixtures")
 
 
 def _find_fixtures_dir() -> Path:
@@ -176,6 +196,22 @@ def _synthesize_raw_text(case_id: str, doc: dict, case: dict) -> str:
     return f"SYNTHETIC -- DEMO ONLY. Document of type {doc_type!r} for {name} at {provider}."
 
 
+def _extract_pdf_text(path: Path) -> str | None:
+    """Real text from a rendered fixture PDF via pypdf. Returns None (never
+    raises) on any read/parse failure or empty result -- e.g. a non-PDF file,
+    or PROOF's deliberately-corrupted `case_06_unparseable_bill/documents/
+    bill.pdf` -- so callers fall back to `_synthesize_raw_text` exactly as
+    they did before this existed.
+    """
+    try:
+        reader = pypdf.PdfReader(str(path))
+        text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+    except Exception:  # noqa: BLE001 -- any parse failure means "use the synthesis fallback"
+        logger.info("could not extract real PDF text from %s; using synthesized text", path)
+        return None
+    return text or None
+
+
 def _load_hospitals() -> dict[str, dict]:
     if not _HOSPITALS_JSON.is_file():
         return {}
@@ -210,10 +246,15 @@ def _load_proof_case(case_id: str) -> dict[str, Any] | None:
             if fap_docs:
                 hospital["fap_required_documents"] = list(fap_docs)
 
-    documents = [
-        {"type": doc.get("type"), "raw_text": _synthesize_raw_text(case_id, doc, case)}
-        for doc in case.get("documents") or []
-    ]
+    documents = []
+    for doc in case.get("documents") or []:
+        raw_text = None
+        file_rel = doc.get("file")
+        if file_rel and str(file_rel).lower().endswith(".pdf"):
+            raw_text = _extract_pdf_text(_CASES_DIR / case_id / file_rel)
+        if not raw_text:
+            raw_text = _synthesize_raw_text(case_id, doc, case)
+        documents.append({"type": doc.get("type"), "raw_text": raw_text})
 
     return {"patient": patient, "bill": bill, "hospital": hospital, "documents": documents}
 
@@ -359,6 +400,93 @@ BUILTIN_FIXTURES: dict[str, dict[str, Any]] = {
                     "This is an attempt to collect a debt of $3,200.00 originally owed "
                     "to Sutter Bay Hospitals. You have the right to dispute this debt in "
                     "writing within 30 days. Validation notice date: 2026-08-10.\n"
+                ),
+            }
+        ],
+    },
+    # Defect #2 regression fixture (persona 5 WO2): deliberately carries NO
+    # hospital_ein anywhere -- not on the bill, not pre-seeded via `hospital`
+    # below (None, so `/demo/inject_bill` does not self-seed one either), and
+    # the bill's own text never prints an EIN (realistic: "a bill rarely
+    # prints an EIN", per the work order). The ONLY way this case's hospital
+    # can resolve is Lookup matching `provider_name` against LEDGER's already-
+    # seeded `hospitals/94-0562680` record ("Sutter Bay Hospitals") by name.
+    # If that path ever regresses back to EIN-only lookup, this fixture is the
+    # one that goes back to "could not be resolved."
+    "kim_no_ein_on_bill": {
+        "patient": {
+            "name": "SYNTHETIC -- DEMO -- Kim Alverson",
+            "household_size": 2,
+            "annual_income_cents": 20_000_00,
+            "insured": False,
+            "state": "CA",
+        },
+        "bill": {
+            "provider_name": "Sutter Bay Hospitals",
+            "amount_cents": 1_800_00,
+            "service_date": "2026-04-02",
+            "first_statement_date": "2026-05-01",
+            "in_collections": False,
+        },
+        "hospital": None,
+        "documents": [
+            {
+                "type": "itemized_bill",
+                "raw_text": (
+                    "SYNTHETIC -- DEMO ONLY. Sutter Bay Hospitals, patient statement.\n"
+                    "Patient: Kim Alverson. Uninsured / self-pay.\n"
+                    "Service date: 2026-04-02. First statement date: 2026-05-01.\n"
+                    "Total amount now due: $1,800.00.\n"
+                    "Financial assistance is available -- see our published FAP.\n"
+                ),
+            }
+        ],
+    },
+    # Defect #4 regression fixture (persona 5 WO2): a denial letter against a
+    # hospital record that carries NO `fap_required_documents` -- the real
+    # shape of every hospital LEDGER's actual pipeline seeds (contract §3.1's
+    # `hospitals/{ein}` has no such field; only two of PROOF's hand-built
+    # fixtures inject one). `check_denial_lawfulness` runs but reports
+    # `insufficient_data`. Before this fix, `denial_flag` stayed at the
+    # store's bare `None` default in exactly this situation -- i.e. for
+    # every real (non-fixture) denial case, not just for "no denial letter at
+    # all." This fixture proves it now resolves to a definite
+    # `{"violated": False, ...}` object instead.
+    "morgan_denial_no_fap_list_known": {
+        "patient": {
+            "name": "SYNTHETIC -- DEMO -- Morgan Reyes",
+            "household_size": 2,
+            "annual_income_cents": 30_000_00,
+            "insured": True,
+            "state": "CA",
+        },
+        "bill": {
+            # Stanford, not Advocate: case_02/case_08 inject `fap_required_
+            # documents` onto Advocate's Firestore record (36-2169147) the
+            # first time either of THOSE fixtures runs, and it persists for
+            # every later case against that EIN in the same environment --
+            # which would silently make this fixture stop exercising
+            # insufficient_data after the first `case_02` demo run. Stanford
+            # is never a denial-fixture hospital, so its record never
+            # acquires that field.
+            "provider_name": "Stanford Health Care",
+            "amount_cents": 2_400_00,
+            "service_date": "2026-01-05",
+            "first_statement_date": "2026-01-20",
+            "in_collections": False,
+        },
+        "hospital": None,  # resolve purely against LEDGER's real seed, no fap_required_documents
+        "documents": [
+            {
+                "type": "denial_letter",
+                "raw_text": (
+                    "SYNTHETIC -- DEMO ONLY. Stanford Health Care, financial "
+                    "assistance denial notice.\n"
+                    "Patient: Morgan Reyes.\n"
+                    "Your application for financial assistance has been DENIED because "
+                    "you did not submit: completed application form; proof of income "
+                    "last 30 days.\n"
+                    "Discharge date: 2026-01-05.\n"
                 ),
             }
         ],

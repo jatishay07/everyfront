@@ -9,3 +9,10 @@ httpx==0.28.1
 # `/demo/inject_bill` does alongside its synchronous agent-core call.
 google-cloud-firestore==2.29.0
 google-cloud-pubsub==2.39.2
+
+# Defect #1 (persona 5 WO2): real PDF text extraction for `/demo/inject_bill`'s
+# fixture documents (api_core/demo_fixtures.py), instead of a synthesized
+# reconstruction that never had line items to give Reader in the first place.
+# Same library RELAY's PDF-fill engine already depends on
+# (packages/delivery/requirements.txt) -- pinned to that same verified version.
+pypdf==6.16.2
