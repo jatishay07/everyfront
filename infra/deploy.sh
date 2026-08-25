@@ -126,6 +126,20 @@ deploy_one() {
   # localhost, which is correct locally and useless in Cloud Run. Resolve the
   # real URL at deploy time rather than hardcoding it anywhere.
   extra_env=""
+  if [ "$svc" = "web" ]; then
+    # The dashboard proxies to the API server-side (services/api sends no CORS
+    # headers, so a direct browser fetch from the web origin is blocked). The
+    # URL is read at REQUEST time, not baked at build time, so the API can be
+    # repointed with `gcloud run services update` and no rebuild.
+    api_url="$(gcloud run services describe ef-api --region="$REGION" \
+      --format='value(status.url)' 2>/dev/null || true)"
+    if [ -n "$api_url" ]; then
+      extra_env=",API_BASE_URL=${api_url}"
+      ok "wired API_BASE_URL -> $api_url"
+    else
+      printf '    \033[33mwarn\033[0m ef-api not deployed yet; web will fall back to mock data\n'
+    fi
+  fi
   if [ "$svc" = "api" ]; then
     agent_url="$(gcloud run services describe ef-agent-core --region="$REGION" \
       --format='value(status.url)' 2>/dev/null || true)"
