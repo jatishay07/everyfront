@@ -264,3 +264,262 @@ def test_approve_filing_rejects_already_filed_front(monkeypatch):
     s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "filed"})
     result = asyncio.run(pipeline.approve_and_request_filing("c1", "ppdr"))
     assert result["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Defect #1: savings_found_cents must be real, auditable, and never invented.
+# ---------------------------------------------------------------------------
+
+
+def test_charity_erasure_is_the_full_bill_when_free_tier_applies():
+    case = {
+        "patient": {"annual_income_cents": 24_000_00, "household_size": 3, "state": "CA"},
+        "bill": {"amount_cents": 6_400_00},
+        "hospital": {"nonprofit": True, "free_care_max_fpl_pct": 400},
+    }
+    cents, explain = pipeline._charity_care_erasure_cents(case)
+    assert cents == 6_400_00
+    assert "400" in explain
+
+
+def test_charity_erasure_is_zero_for_discounted_not_free():
+    case = {
+        # ~370% FPL for household of 2 -- above Advocate's real 250% free
+        # threshold but at/below its 600% discounted threshold: "discounted",
+        # not "free", so no single dollar figure is defensible (26 CFR
+        # 1.501(r) leaves the discount percentage to the hospital's own
+        # sliding scale, which this system does not model).
+        "patient": {"annual_income_cents": 80_000_00, "household_size": 2, "state": "IL"},
+        "bill": {"amount_cents": 1_000_00},
+        "hospital": {
+            "nonprofit": True,
+            "free_care_max_fpl_pct": 250,
+            "discounted_care_max_fpl_pct": 600,
+        },
+    }
+    cents, explain = pipeline._charity_care_erasure_cents(case)
+    assert cents == 0
+    assert "discounted" in explain
+
+
+def test_charity_erasure_is_zero_for_for_profit_hospital():
+    case = {
+        "patient": {"annual_income_cents": 1_00, "household_size": 1, "state": "IL"},
+        "bill": {"amount_cents": 100_00},
+        "hospital": {"nonprofit": False},
+    }
+    cents, explain = pipeline._charity_care_erasure_cents(case)
+    assert cents == 0
+    assert "for-profit" in explain
+
+
+def test_charity_erasure_is_zero_with_insufficient_patient_data():
+    case = {"patient": {}, "bill": {"amount_cents": 100_00}, "hospital": {"nonprofit": True}}
+    cents, _explain = pipeline._charity_care_erasure_cents(case)
+    assert cents == 0
+
+
+def _patch_agents_for_cascade(monkeypatch, *, hospital, findings_total_cents, denial_check):
+    monkeypatch.setattr(
+        lookup,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "resolved": hospital is not None,
+                "hospital": hospital,
+                "ein": (hospital or {}).get("ein"),
+                "citations": [],
+                "note": "resolved" if hospital else "not found",
+            },
+            "hospital note",
+        ),
+    )
+    monkeypatch.setattr(
+        clock, "run", lambda case_id, case: async_fake_turn({"case_id": case_id, "deadlines": []})
+    )
+    monkeypatch.setattr(
+        auditor,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "case_id": case_id,
+                "findings": [],
+                "total_findings_cents": findings_total_cents,
+                "denial_check": denial_check,
+                "source": {},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        strategist,
+        "run",
+        lambda case_id, case: async_fake_turn({"case_id": case_id, "fronts": [], "source": "test"}),
+    )
+
+
+def test_denial_flag_is_never_left_none_when_the_check_actually_ran(monkeypatch):
+    """Defect #4: outside PROOF's two hand-seeded denial fixtures, every real
+    hospital record has no `fap_required_documents` -- the denial check runs
+    but `insufficient_data` is True. That must still produce a definite
+    `denial_flag` object (violated=False), never leave it at the store's bare
+    `None` default."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_cascade(
+        monkeypatch,
+        hospital={"ein": "1", "name": "Test", "nonprofit": True},
+        findings_total_cents=0,
+        denial_check={
+            "ran": True,
+            "insufficient_data": True,
+            "violation": False,
+            "detail": "Cannot assess denial lawfulness: no FAP documentation list is on file.",
+            "citation": "26 CFR 1.501(r)-4(b)(3)",
+        },
+    )
+    s.create_case("c1", {"patient": {}, "bill": {}})
+    case = s.get_case("c1")
+    asyncio.run(pipeline._run_cascade("c1", case))
+
+    updated = s.get_case("c1")
+    assert updated["denial_flag"] is not None
+    assert updated["denial_flag"]["violated"] is False
+
+
+def test_denial_flag_stays_none_when_no_denial_letter_at_all(monkeypatch):
+    """A case with nothing to check is a legitimate 'not applicable' null
+    state, distinct from 'checked and found no violation.'"""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_cascade(
+        monkeypatch,
+        hospital=None,
+        findings_total_cents=0,
+        denial_check={"ran": False, "reason": "no denial_letter document on file"},
+    )
+    s.create_case("c1", {"patient": {}, "bill": {}})
+    case = s.get_case("c1")
+    asyncio.run(pipeline._run_cascade("c1", case))
+
+    assert s.get_case("c1")["denial_flag"] is None
+
+
+def test_savings_combines_audit_and_charity_erasure_without_double_counting(monkeypatch):
+    """A granted free-tier charity-care determination erases the WHOLE bill,
+    which already contains whatever the audit found -- so the reported
+    savings is the max of the two, never their sum (never more than the
+    bill itself)."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    hospital = {
+        "ein": "94-0562680",
+        "name": "Sutter",
+        "nonprofit": True,
+        "free_care_max_fpl_pct": 400,
+    }
+    _patch_agents_for_cascade(
+        monkeypatch,
+        hospital=hospital,
+        findings_total_cents=245_00,  # smaller than the full bill
+        denial_check={"ran": False, "reason": "no denial_letter document on file"},
+    )
+    s.create_case(
+        "c1",
+        {
+            "patient": {"annual_income_cents": 24_000_00, "household_size": 3, "state": "CA"},
+            "bill": {"amount_cents": 2_625_00},
+        },
+    )
+    case = s.get_case("c1")
+    asyncio.run(pipeline._run_cascade("c1", case))
+
+    updated = s.get_case("c1")
+    assert updated["savings_found_cents"] == 2_625_00  # the bill, not 2_625_00 + 245_00
+    assert updated["audit_findings_cents"] == 245_00  # the audit component alone is untouched
+
+    events = s.list_events("c1")
+    assert any(e["action"] == "savings_summary" for e in events)
+
+
+def test_savings_is_audit_only_when_charity_care_does_not_apply(monkeypatch):
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_cascade(
+        monkeypatch,
+        hospital={"ein": "1", "name": "Test", "nonprofit": False},
+        findings_total_cents=210_00,
+        denial_check={"ran": False, "reason": "no denial_letter document on file"},
+    )
+    s.create_case("c1", {"patient": {}, "bill": {"amount_cents": 900_00}})
+    case = s.get_case("c1")
+    asyncio.run(pipeline._run_cascade("c1", case))
+
+    assert s.get_case("c1")["savings_found_cents"] == 210_00
+
+
+# ---------------------------------------------------------------------------
+# Defect #3: batch document processing runs Reader concurrently and the
+# Lookup->Clock/Auditor->Strategist cascade exactly once, not once per doc.
+# ---------------------------------------------------------------------------
+
+
+def test_process_case_documents_runs_readers_concurrently_and_cascade_once(monkeypatch):
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+
+    reader_calls = []
+
+    async def fake_reader_run(case_id, doc_id, text, hint=None):
+        reader_calls.append(doc_id)
+        return {
+            "fact": {
+                "case_id": case_id,
+                "doc_id": doc_id,
+                "label": "bill",
+                "extraction": {"amount_cents": 100_00},
+                "citations": [],
+            },
+            "answer": "ok",
+            "trace": [],
+            "model": "test",
+            "error": None,
+        }
+
+    monkeypatch.setattr(reader, "run", fake_reader_run)
+
+    cascade_calls = []
+    orig_run_cascade = pipeline._run_cascade
+
+    async def counting_cascade(case_id, case):
+        cascade_calls.append(case_id)
+        return await orig_run_cascade(case_id, case)
+
+    monkeypatch.setattr(pipeline, "_run_cascade", counting_cascade)
+    _patch_agents_for_cascade(
+        monkeypatch,
+        hospital=None,
+        findings_total_cents=0,
+        denial_check={"ran": False, "reason": "no denial_letter document on file"},
+    )
+
+    s.create_case("c1", {"patient": {}, "bill": {}})
+    doc_ids = [s.add_document("c1", {"raw_text": "doc", "type": "bill"}) for _ in range(3)]
+
+    result = asyncio.run(pipeline.process_case_documents("c1", doc_ids))
+
+    assert sorted(reader_calls) == sorted(doc_ids)  # every document was read
+    assert len(cascade_calls) == 1  # exactly one cascade for all three documents
+    assert "readers" in result
+    assert set(result["readers"]) == set(doc_ids)
+
+
+def test_process_case_documents_missing_case_is_handled(monkeypatch):
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    result = asyncio.run(pipeline.process_case_documents("nope", ["d1"]))
+    assert "error" in result

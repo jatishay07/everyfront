@@ -37,7 +37,12 @@ EXTRACTION_SCHEMA: dict = {
         "provider_name": {"type": "string"},
         "hospital_ein": {"type": "string"},
         "hospital_ccn": {"type": "string"},
-        "amount_cents": {"type": "integer"},
+        "amount_cents": {
+            "type": "integer",
+            "description": "The single TOTAL amount due, e.g. a line reading 'TOTAL: $2,625.00' "
+            "-> 262500. This is separate from, and in addition to, every individual line_items "
+            "row -- always extract both when the document has a line-item table.",
+        },
         "service_date": {"type": "string", "description": "ISO-8601 date"},
         "first_statement_date": {"type": "string", "description": "ISO-8601 date"},
         "gfe_amount_cents": {"type": "integer"},
@@ -46,13 +51,22 @@ EXTRACTION_SCHEMA: dict = {
         "validation_notice_date": {"type": "string", "description": "ISO-8601 date"},
         "line_items": {
             "type": "array",
+            "description": "Every row of an itemized statement's billing table -- one entry per "
+            "CODE/DESCRIPTION/UNITS/CHARGE row, IN THE SAME ORDER they appear, including exact "
+            "duplicate rows (a code that is billed twice must appear as two separate entries "
+            "here, not merged into one with units=2 -- duplicate-line detection depends on "
+            "seeing both original rows). Never skip rows and never summarize; if the document "
+            "has no such table, omit this field entirely.",
             "items": {
                 "type": "object",
                 "properties": {
-                    "code": {"type": "string"},
+                    "code": {"type": "string", "description": "The billing code, e.g. '99284'."},
                     "description": {"type": "string"},
                     "units": {"type": "integer"},
-                    "charge_cents": {"type": "integer"},
+                    "charge_cents": {
+                        "type": "integer",
+                        "description": "This row's own charge, e.g. '$1,850.00' -> 185000.",
+                    },
                 },
             },
         },
@@ -72,10 +86,16 @@ EXTRACTION_SCHEMA: dict = {
 }
 
 EXTRACTION_INSTRUCTION = (
-    "Extract every field you can find from this medical-billing document into "
-    "the JSON schema. Use null/omit fields you cannot find. Dates must be "
-    "ISO-8601 (YYYY-MM-DD). Money fields are integer cents. If this document is "
-    "clearly not a real income document (e.g. a photo of a pet, a screenshot "
+    "Extract EVERY field you can find from this medical-billing document into the JSON schema -- "
+    "do not stop after the first field or two that identify the document; a partial extraction "
+    "that only names the hospital is as unhelpful to the patient as no extraction at all. If the "
+    "document contains an itemized billing table (columns like CODE, DESCRIPTION, UNITS, CHARGE), "
+    "you MUST populate line_items with one entry per row, in order, including exact duplicate "
+    "rows verbatim -- AND separately extract the aggregate fields (amount_cents, service_date, "
+    "first_statement_date, provider_name, hospital_ein) that appear elsewhere on the same "
+    "document; extracting the table does not excuse skipping those. Use null/omit fields you "
+    "genuinely cannot find. Dates must be ISO-8601 (YYYY-MM-DD). Money fields are integer cents. "
+    "If this document is clearly not a real income document (e.g. a photo of a pet, a screenshot "
     "unrelated to income), set is_income_proof to false."
 )
 

@@ -27,6 +27,22 @@ async def process_document(case_id: str, doc_id: str) -> dict:
         return resp.json()
 
 
+async def process_documents(case_id: str, doc_ids: list[str]) -> dict:
+    """Batch variant: agent-core runs Reader for every doc_id concurrently and
+    the Lookup/Clock/Auditor/Strategist cascade exactly once (defect #3 --
+    see agent_core.pipeline.process_case_documents), instead of one full
+    cascade per document. Used by `/demo/inject_bill`, which already has
+    every document for the fixture up front.
+    """
+    async with httpx.AsyncClient(timeout=config.AGENT_CORE_TIMEOUT_S) as client:
+        resp = await client.post(
+            f"{config.AGENT_CORE_URL}/internal/process_documents",
+            json={"case_id": case_id, "doc_ids": doc_ids},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
 async def approve_filing(case_id: str, front: str) -> dict:
     async with httpx.AsyncClient(timeout=config.AGENT_CORE_TIMEOUT_S) as client:
         resp = await client.post(

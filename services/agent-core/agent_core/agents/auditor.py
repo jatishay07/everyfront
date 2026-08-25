@@ -3,19 +3,28 @@
 
 Playbook §4 persona 5, WO1 + the "Denial Triage" feature in §1.2: cross-checks
 demanded documents against the hospital's published FAP list under 26 CFR
-1.501(r)-4(b)(3). That check needs the hospital's actual FAP document list,
-which LEDGER has not shipped yet (packages/datapipes is an empty stub, and
-`hospitals/{ein}` records in this repo carry no `fap_required_documents`
-field). Rather than guess at a list and risk a false "unlawful denial"
-finding -- the single most reputationally expensive kind of bug this product
-can ship -- the Auditor honestly reports the check as unavailable when that
-data is missing, instead of running it against an empty list (which would
-flag every demanded document as unlisted).
+1.501(r)-4(b)(3). That check needs the hospital's actual FAP document list;
+`hospitals/{ein}` records generally carry no `fap_required_documents` field
+(only two of PROOF's demo fixtures inject one -- see `_denial_check` below).
+Rather than guess at a list and risk a false "unlawful denial" finding -- the
+single most reputationally expensive kind of bug this product can ship -- the
+Auditor honestly reports the check as unavailable when that data is missing,
+instead of running it against an empty list (which would flag every demanded
+document as unlisted).
+
+Defect #1 (persona 5 WO2): `total_findings_cents` now includes a real
+cash-price-delta check, not just exact-duplicate lines. `_facts` is async
+because building the `cash_price_lookup` STATUTE's `audit_line_items` accepts
+means a bounded, cached MRF fetch (see `agent_core.mrf_cache`) -- gated
+entirely on the resolved hospital already carrying an `mrf_url` (Lookup, this
+same pipeline run, earlier) and on `packages/datapipes` being importable in
+this process; either being absent degrades to skipping the cash-price check,
+never to inventing one.
 """
 
 from __future__ import annotations
 
-from .. import config, rules_bridge
+from .. import config, mrf_cache, rules_bridge
 from ..store import store
 from . import common
 
@@ -62,9 +71,27 @@ def _denial_check(case_id: str, case: dict) -> dict:
     }
 
 
-def _facts(case_id: str, case: dict) -> dict:
+async def _facts(case_id: str, case: dict) -> dict:
     items = _all_line_items(case_id)
-    findings = rules_bridge.audit_line_items(items) if items else []
+    cash_price_lookup = None
+    mrf_source = "no items to audit"
+    if items:
+        hospital = case.get("hospital") or {}
+        codes = sorted({item.get("code") for item in items if item.get("code")})
+        cash_price_lookup = await mrf_cache.cash_price_lookup_for(hospital.get("mrf_url"), codes)
+        if cash_price_lookup is not None:
+            mrf_source = f"live MRF fetch ({hospital.get('mrf_url')})"
+        elif not mrf_cache.available():
+            mrf_source = (
+                f"skipped -- packages/datapipes not importable: {mrf_cache.unavailable_reason()}"  # noqa: E501
+            )
+        elif not hospital.get("mrf_url"):
+            mrf_source = "skipped -- resolved hospital has no mrf_url on file"
+        else:
+            mrf_source = "skipped -- MRF fetch found no matching cash price, timed out, or failed"
+    findings = (
+        rules_bridge.audit_line_items(items, cash_price_lookup=cash_price_lookup) if items else []
+    )
     denial = _denial_check(case_id, case)
     total_findings_cents = sum(
         f.potential_savings_cents or 0 for f in findings if f.potential_savings_cents
@@ -84,12 +111,13 @@ def _facts(case_id: str, case: dict) -> dict:
         ],
         "total_findings_cents": total_findings_cents,
         "denial_check": denial,
+        "cash_price_source": mrf_source,
         "source": rules_bridge.bridge_sources(),
     }
 
 
 async def run(case_id: str, case: dict) -> dict:
-    fact = _facts(case_id, case)
+    fact = await _facts(case_id, case)
     tool = common.make_fact_tool(
         "get_auditor_result",
         "Return billing audit findings and the denial-lawfulness check for this case.",
