@@ -109,10 +109,19 @@ class TestCorpusShape:
         bill = _load(case_id)["bill"]
         # discharge_date is an allowed extra key (IL's "latest of" trigger
         # needs it; deadlines.py reads it directly from the bill dict).
+        # line_items is also allowed -- not in §3.1 as written, but needed
+        # so a real bill's itemized detail survives into the contract shape
+        # at all (see fixtures/build.py's HANDOFF note re: audit_findings_cents
+        # always being 0 against the live pipeline without it).
         assert set(bill) >= CONTRACT_BILL_KEYS
-        assert set(bill) <= CONTRACT_BILL_KEYS | {"discharge_date"}
+        assert set(bill) <= CONTRACT_BILL_KEYS | {"discharge_date", "line_items"}
         if bill["hospital_ein"] is not None:
             assert EIN_RE.match(bill["hospital_ein"]), bill["hospital_ein"]
+        assert isinstance(bill["line_items"], list)
+        for li in bill["line_items"]:
+            assert set(li) == {"code", "description", "units", "charge_cents"}
+            assert isinstance(li["units"], int) and li["units"] >= 1
+            assert isinstance(li["charge_cents"], int) and li["charge_cents"] >= 0
 
     def test_every_hospital_matches_contract_3_1(self):
         for ein, h in HOSPITALS.items():

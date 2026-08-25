@@ -6,6 +6,7 @@
     "gfe_amount_cents": null,
     "hospital_ein": null,
     "in_collections": false,
+    "line_items": [],
     "provider_name": "unknown (patient says 'a Sutter hospital')",
     "service_date": null,
     "validation_notice_date": null

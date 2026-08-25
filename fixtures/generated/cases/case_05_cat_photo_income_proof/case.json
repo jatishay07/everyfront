@@ -6,6 +6,26 @@
     "gfe_amount_cents": null,
     "hospital_ein": "94-0562680",
     "in_collections": false,
+    "line_items": [
+      {
+        "charge_cents": 90000,
+        "code": "99283",
+        "description": "EMERGENCY DEPT VISIT, MODERATE COMPLEXITY",
+        "units": 1
+      },
+      {
+        "charge_cents": 6500,
+        "code": "85025",
+        "description": "COMPLETE BLOOD COUNT, AUTOMATED",
+        "units": 1
+      },
+      {
+        "charge_cents": 6500,
+        "code": "85025",
+        "description": "COMPLETE BLOOD COUNT, AUTOMATED",
+        "units": 1
+      }
+    ],
     "provider_name": "Sutter Bay Hospitals",
     "service_date": "2026-07-01",
     "validation_notice_date": null
