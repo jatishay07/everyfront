@@ -22,6 +22,13 @@ criterion of "under 4 minutes of watchable action":
 fixture's own precomputed `expected` block standing in for what a live run
 would report -- useful for rehearsing narration timing without a deployment,
 and what tests/test_demo_harness.py exercises in CI.
+
+Verified live against the deployed API on 2026-08-25: step 1's POST is fully
+SYNCHRONOUS -- the whole pipeline runs inside that one request/response, and
+the case is already at strategy_ready by the time it returns (~130s observed
+for this 3-document fixture). Step 2's poll is kept as a defensive fallback
+(the response already carries everything needed to log step 2's summary
+immediately), not because it is expected to loop.
 """
 
 from __future__ import annotations
@@ -44,6 +51,19 @@ BUDGET_S = 4 * 60
 ANALYSIS_TIMEOUT_S = 180  # persona 5 WO1 acceptance: "within 3 minutes"
 FILING_TIMEOUT_S = 60
 POLL_INTERVAL_S = 5
+
+# Verified live against the deployed API (2026-08-25, see this PR's HANDOFF):
+# POST /demo/inject_bill is fully SYNCHRONOUS -- it blocks until the whole
+# reader/lookup/clock/auditor/strategist pipeline has run over every document
+# and only then returns, already at status=strategy_ready. Observed wall time
+# for the 3-document happy-path fixture was ~130s. httpx.Client's *default*
+# 30.0s timeout (still used for the cheap polling GETs below) would abort
+# that POST outright -- this needs its own, much longer budget. Configurable
+# via env rather than a bare constant: SWARM is actively optimizing pipeline
+# latency in parallel, so this must neither assume today's ~2.5min-per-case
+# slowness forever nor bake in a number that starts failing the moment it
+# speeds up in either direction.
+INJECT_TIMEOUT_S = float(os.environ.get("EVERYFRONT_INJECT_TIMEOUT_S", "360"))
 
 
 def _log(t0: float, msg: str) -> None:
@@ -93,13 +113,17 @@ def real_run() -> int:
     case = json.loads(CASE_JSON.read_text())
     fixture_name = case["case_id"]
     t0 = time.monotonic()
+    # Base 30s timeout for the cheap polling GETs below; the inject POST
+    # itself overrides this per-call (see INJECT_TIMEOUT_S's docstring).
     client = httpx.Client(base_url=api_url, timeout=30.0)
 
-    _log(t0, f"injecting fixture {fixture_name!r}...")
-    resp = client.post("/demo/inject_bill", json={"fixture_name": fixture_name})
+    _log(t0, f"injecting fixture {fixture_name!r} (synchronous -- may take a while)...")
+    resp = client.post(
+        "/demo/inject_bill", json={"fixture_name": fixture_name}, timeout=INJECT_TIMEOUT_S
+    )
     resp.raise_for_status()
     case_id = resp.json()["case_id"]
-    _log(t0, f"case {case_id} created")
+    _log(t0, f"case {case_id} created (inject call returned after the full pipeline ran)")
 
     deadline = time.monotonic() + ANALYSIS_TIMEOUT_S
     data = None
