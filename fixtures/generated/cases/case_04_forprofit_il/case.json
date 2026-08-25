@@ -1,0 +1,118 @@
+{
+  "bill": {
+    "amount_cents": 95000,
+    "collector_name": null,
+    "discharge_date": "2026-06-01",
+    "first_statement_date": "2026-06-20",
+    "gfe_amount_cents": null,
+    "hospital_ein": "00-0000001",
+    "in_collections": false,
+    "provider_name": "Prairie Crossing Medical Center (FOR-PROFIT) \u2014 SYNTHETIC FIXTURE",
+    "service_date": "2026-05-30",
+    "validation_notice_date": null
+  },
+  "case_id": "case_04_forprofit_il",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 15000,
+    "audit_findings_reference_model": [
+      {
+        "amount_cents": 15000,
+        "code": "80048",
+        "description": "BASIC METABOLIC PANEL",
+        "kind": "exact_duplicate",
+        "note": "Same metabolic panel billed twice."
+      }
+    ],
+    "deadlines": [
+      {
+        "basis_date": "2026-06-20",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-4(b)(1)(iv)",
+        "days": 240,
+        "days_remaining_as_of_2026_08_25": 174,
+        "due": "2027-02-15",
+        "front": "charity_care",
+        "name": "Charity care application"
+      },
+      {
+        "basis_date": "2026-06-20",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-6(c)(3)(i)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 54,
+        "due": "2026-10-18",
+        "front": "charity_care",
+        "name": "Extraordinary collection actions barred until"
+      },
+      {
+        "basis_date": "2026-06-20",
+        "basis_field": "first_statement_date",
+        "citation": "45 CFR 149.620(c)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 54,
+        "due": "2026-10-18",
+        "front": "ppdr",
+        "name": "Patient-provider dispute resolution"
+      },
+      {
+        "basis_date": "2026-06-01",
+        "basis_field": "discharge_date",
+        "citation": "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        "days": 90,
+        "days_remaining_as_of_2026_08_25": 5,
+        "due": "2026-08-30",
+        "front": "charity_care",
+        "name": "IL uninsured discount application"
+      }
+    ],
+    "denial_check_reference_model": null,
+    "eligibility": {
+      "citations": [
+        "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)"
+      ],
+      "determination": "discounted",
+      "discounted_threshold_pct": 300,
+      "fpl_pct": 231.0536,
+      "free_threshold_pct": null,
+      "notes": [
+        "hospital reports no free care threshold",
+        "hospital reports no discounted care threshold",
+        "discounted-care threshold raised to the IL statutory floor",
+        "Uninsured patients at or below 300% FPL. Rural/critical-access facilities carry a higher ceiling; not yet encoded -- see TODO."
+      ]
+    },
+    "fronts_reference_model": [
+      {
+        "applicable": false,
+        "citation": "26 CFR 1.501(r)-1(a)",
+        "front": "charity_care",
+        "reason": "Prairie Crossing Medical Center (FOR-PROFIT) \u2014 SYNTHETIC FIXTURE is for-profit -- no 26 CFR 1.501(r) financial-assistance obligation exists."
+      },
+      {
+        "applicable": true,
+        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "front": "audit",
+        "reason": "Itemized bill present -- billing audit always runs."
+      }
+    ]
+  },
+  "notes": "Income is ~231% of FPL for a household of 2 -- at or under the IL statutory 300% discount floor (210 ILCS 89/10; eligibility.py STATE_FLOORS['IL'] applies to for-profits), so screen_eligibility correctly returns 'discounted' via the state floor alone even though hospital.nonprofit is False and the hospital publishes no threshold of its own. discharge_date is included because IL's state discount clock runs from the latest of discharge/service/screening/public-program-denial, not from the billing statement.",
+  "patient": {
+    "annual_income": 5000000,
+    "household_size": 2,
+    "insured": false,
+    "name": "Marcus Whitfield",
+    "state": "IL"
+  },
+  "proves": "Honesty over blanket relief: this hospital owes NO 26 CFR 1.501(r) duty (for-profit, no Schedule H, no FAP) -- the system must say so plainly rather than inventing a charity-care front. It should still surface the Illinois 210 ILCS 89/10 uninsured discount, which binds every IL hospital regardless of tax status.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Uninsured patient at a for-profit hospital, Illinois"
+}

@@ -1,0 +1,20 @@
+# PROOF (persona 7) -- extra dependencies for fixtures/ and tests/.
+#
+# HANDOFF -> FORGE: .github/workflows/ci.yml's "Install tooling" step only
+# installs `ruff pytest pytest-cov` (root-owned file, out of PROOF's owned
+# paths per BUILD_PLAYBOOK.md §1.5/§0.2). Without these, tests/test_bill_pdfs.py
+# and tests/test_fixture_corpus.py `pytest.importorskip` themselves out in CI
+# instead of actually running. Please add:
+#     pip install -r fixtures/requirements.txt
+# alongside the existing tooling install line. Locally: this repo's own
+# .venv already has these installed (see PR description).
+
+reportlab==5.0.1
+pypdf==6.16.2
+Pillow==12.3.0
+
+# Only imported (and only pytest.importorskip'd) by the nightly e2e suite
+# (tests/test_e2e_happy_path.py), which needs a live staging Firestore.
+# Harmless to install in the PR-CI job too -- it is simply unused there.
+google-cloud-firestore>=2.19,<3
+httpx>=0.28,<1

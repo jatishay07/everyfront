@@ -1,0 +1,54 @@
+{
+  "00-0000001": {
+    "ccn": null,
+    "discounted_care_max_fpl_pct": null,
+    "fap_app_url": null,
+    "fap_url": null,
+    "free_care_max_fpl_pct": null,
+    "mrf_url": null,
+    "name": "Prairie Crossing Medical Center (FOR-PROFIT) \u2014 SYNTHETIC FIXTURE",
+    "nonprofit": false,
+    "source": "synthetic_fixture",
+    "state": "IL",
+    "tax_year": null
+  },
+  "36-2169147": {
+    "ccn": null,
+    "discounted_care_max_fpl_pct": 600,
+    "fap_app_url": "https://www.advocatehealth.com/financialassistance",
+    "fap_url": "https://www.advocatehealth.com/financialassistance",
+    "free_care_max_fpl_pct": 250,
+    "mrf_url": "https://sthpiprd.blob.core.windows.net/machine-readable-files/11263/362169147_advocate-christ-medical-center_standardcharges.csv",
+    "name": "Advocate Christ Medical Center",
+    "nonprofit": true,
+    "source": "schedule_h",
+    "state": "IL",
+    "tax_year": 2023
+  },
+  "94-0562680": {
+    "ccn": null,
+    "discounted_care_max_fpl_pct": 0,
+    "fap_app_url": null,
+    "fap_url": null,
+    "free_care_max_fpl_pct": 400,
+    "mrf_url": null,
+    "name": "Sutter Bay Hospitals",
+    "nonprofit": true,
+    "source": "schedule_h",
+    "state": "CA",
+    "tax_year": 2023
+  },
+  "94-6174066": {
+    "ccn": null,
+    "discounted_care_max_fpl_pct": 400,
+    "fap_app_url": null,
+    "fap_url": null,
+    "free_care_max_fpl_pct": 400,
+    "mrf_url": null,
+    "name": "Stanford Health Care",
+    "nonprofit": true,
+    "source": "estimated_ca_statutory_floor",
+    "state": "CA",
+    "tax_year": null
+  }
+}

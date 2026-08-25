@@ -1,0 +1,114 @@
+{
+  "bill": {
+    "amount_cents": 138000,
+    "collector_name": null,
+    "first_statement_date": "2026-04-01",
+    "gfe_amount_cents": null,
+    "hospital_ein": "94-6174066",
+    "in_collections": false,
+    "provider_name": "Stanford Health Care",
+    "service_date": "2026-03-15",
+    "validation_notice_date": null
+  },
+  "case_id": "case_08_lawful_denial_ca",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    },
+    {
+      "doc_id": "denial_letter",
+      "file": "documents/denial_letter.pdf",
+      "type": "denial_letter"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 14000,
+    "audit_findings_reference_model": [
+      {
+        "amount_cents": 14000,
+        "code": "80048",
+        "description": "BASIC METABOLIC PANEL",
+        "kind": "exact_duplicate",
+        "note": "Same metabolic panel billed twice."
+      }
+    ],
+    "deadlines": [
+      {
+        "basis_date": "2026-04-01",
+        "basis_field": "first_statement_date",
+        "citation": "Cal. Health & Safety Code \u00a7127405(e)(3)",
+        "days": null,
+        "days_remaining_as_of_2026_08_25": null,
+        "due": null,
+        "front": "charity_care",
+        "name": "Charity care application"
+      },
+      {
+        "basis_date": "2026-04-01",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-6(c)(3)(i)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": -26,
+        "due": "2026-07-30",
+        "front": "charity_care",
+        "name": "Extraordinary collection actions barred until"
+      },
+      {
+        "basis_date": "2026-04-01",
+        "basis_field": "first_statement_date",
+        "citation": "45 CFR 149.620(c)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": -26,
+        "due": "2026-07-30",
+        "front": "ppdr",
+        "name": "Patient-provider dispute resolution"
+      }
+    ],
+    "denial_check_reference_model": {
+      "citation": "26 CFR 1.501(r)-4(b)(3)",
+      "undisclosed_docs": [],
+      "unlawful": false
+    },
+    "eligibility": {
+      "citations": [
+        "Cal. Health & Safety Code \u00a7127405",
+        "26 CFR 1.501(r)-4(b)(2)"
+      ],
+      "determination": "ineligible",
+      "discounted_threshold_pct": 400,
+      "fpl_pct": 438.5965,
+      "free_threshold_pct": 400,
+      "notes": [
+        "CA sets one 400% FPL floor covering both tiers."
+      ]
+    },
+    "fronts_reference_model": [
+      {
+        "applicable": false,
+        "citation": "",
+        "front": "charity_care",
+        "reason": "Screened ineligible; no charity-care front."
+      },
+      {
+        "applicable": true,
+        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "front": "audit",
+        "reason": "Itemized bill present -- billing audit always runs."
+      }
+    ]
+  },
+  "notes": "Income is ~438.6% FPL (household of 1), over Stanford's estimated 400% CA-floor line -- ineligible on the merits, and the demanded-docs list exactly matches the FAP's published list. Audit front still applies (itemized bill always triggers it) even though charity care correctly does not.",
+  "patient": {
+    "annual_income": 7000000,
+    "household_size": 1,
+    "insured": true,
+    "name": "Harold Kim",
+    "state": "CA"
+  },
+  "proves": "check_denial_lawfulness's negative branch: the hospital demanded exactly the documents its own published FAP lists, and the patient's income is genuinely over the threshold on the merits. No flag should fire -- the system must be precise, not reflexive, about calling a denial unlawful.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Insured patient, LAWFULLY denied charity care, California"
+}
