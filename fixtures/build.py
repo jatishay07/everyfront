@@ -96,7 +96,7 @@ def build_case_json(case: CaseFixture, hospitals: dict[str, Hospital]) -> dict:
     determination = None
     if hospital is not None:
         eligibility = screen_eligibility(
-            case.patient["annual_income"],
+            case.patient["annual_income_cents"],
             case.patient["household_size"],
             case.patient["state"],
             hospital_to_contract(hospital),

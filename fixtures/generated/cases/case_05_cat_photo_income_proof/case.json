@@ -99,7 +99,7 @@
   },
   "notes": "The math would clear free-tier eligibility (~106.5% FPL under Sutter's real 400% line) if the proof were valid -- the point of this case is entirely that it is not.",
   "patient": {
-    "annual_income": 3500000,
+    "annual_income_cents": 3500000,
     "household_size": 4,
     "insured": false,
     "name": "Sam Whitaker",

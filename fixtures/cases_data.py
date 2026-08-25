@@ -249,7 +249,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Jordan Alvarez",
             "household_size": 3,
-            "annual_income": _cents(32_000),  # cents, despite the contract key name
+            "annual_income_cents": _cents(32_000),
             "insured": False,
             "state": "CA",
         },
@@ -320,7 +320,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Priya Nandakumar",
             "household_size": 2,
-            "annual_income": _cents(40_000),
+            "annual_income_cents": _cents(40_000),
             "insured": True,
             "state": "IL",
         },
@@ -398,7 +398,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Denise Okafor",
             "household_size": 1,
-            "annual_income": _cents(18_000),
+            "annual_income_cents": _cents(18_000),
             "insured": False,
             "state": "CA",
         },
@@ -455,7 +455,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Marcus Whitfield",
             "household_size": 2,
-            "annual_income": _cents(50_000),
+            "annual_income_cents": _cents(50_000),
             "insured": False,
             "state": "IL",
         },
@@ -511,7 +511,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Sam Whitaker",
             "household_size": 4,
-            "annual_income": _cents(35_000),
+            "annual_income_cents": _cents(35_000),
             "insured": False,
             "state": "CA",
         },
@@ -564,7 +564,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Casey Nguyen",
             "household_size": 2,
-            "annual_income": _cents(26_000),
+            "annual_income_cents": _cents(26_000),
             "insured": False,
             "state": "CA",
         },
@@ -610,7 +610,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Aisha Bello",
             "household_size": 3,
-            "annual_income": _cents(30_000),
+            "annual_income_cents": _cents(30_000),
             "insured": False,
             "state": "IL",
         },
@@ -707,7 +707,7 @@ CASES: list[CaseFixture] = [
         patient={
             "name": "Harold Kim",
             "household_size": 1,
-            "annual_income": _cents(70_000),
+            "annual_income_cents": _cents(70_000),
             "insured": True,
             "state": "CA",
         },

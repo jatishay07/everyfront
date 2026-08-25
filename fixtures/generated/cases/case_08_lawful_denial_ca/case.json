@@ -101,7 +101,7 @@
   },
   "notes": "Income is ~438.6% FPL (household of 1), over Stanford's estimated 400% CA-floor line -- ineligible on the merits, and the demanded-docs list exactly matches the FAP's published list. Audit front still applies (itemized bill always triggers it) even though charity care correctly does not.",
   "patient": {
-    "annual_income": 7000000,
+    "annual_income_cents": 7000000,
     "household_size": 1,
     "insured": true,
     "name": "Harold Kim",

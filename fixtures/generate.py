@@ -203,7 +203,7 @@ def render_gfe_pdf(path: Path, case: CaseFixture, hospital: Hospital, gfe_delta_
 
 
 def render_pay_stub_pdf(path: Path, case: CaseFixture) -> None:
-    annual_cents = case.patient["annual_income"]
+    annual_cents = case.patient["annual_income_cents"]
     biweekly_gross = annual_cents / 26
     c = canvas.Canvas(str(path), pagesize=LETTER, invariant=1)
     width, height = LETTER
