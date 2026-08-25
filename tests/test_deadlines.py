@@ -13,7 +13,9 @@ import pytest
 from rules.deadlines import (
     FAP_WINDOW_DAYS,
     STATE_FAP_WINDOWS,
+    STATE_UNINSURED_DISCOUNTS,
     StateFAPRule,
+    StateUninsuredDiscount,
     compute_deadlines,
 )
 
@@ -222,17 +224,38 @@ class TestIllinoisUninsuredDiscount:
         d = _front(compute_deadlines(b, "IL", insured=False), "uninsured discount")
         assert d.basis_date == date(2026, 3, 1)
 
-    def test_unconfirmed_trigger_is_flagged_not_hidden(self):
-        """Agreement §2.2: a citation we have not verified must say so."""
-        b = _bill(discharge_date=date(2026, 1, 12), screening_date=date(2026, 3, 1))
-        d = _front(compute_deadlines(b, "IL", insured=False), "uninsured discount")
-        assert "unverified" in d.citation
-
     def test_confirmed_trigger_is_not_flagged(self):
-        b = _bill(discharge_date=date(2026, 1, 12))
+        """Real IL: all four statutory triggers are now primary-source confirmed."""
+        b = _bill(discharge_date=date(2026, 1, 12), screening_date=date(2026, 3, 1))
         d = _front(compute_deadlines(b, "IL", insured=False), "uninsured discount")
         assert "unverified" not in d.citation
         assert "210 ILCS 89" in d.citation
+
+    def test_unconfirmed_trigger_is_flagged_not_hidden(self):
+        """Agreement §2.2: a citation we have not verified must say so.
+
+        As of the wo6 citation audit, all four of IL's real triggers are
+        primary-source confirmed (see STATE_UNINSURED_DISCOUNTS["IL"]), so
+        this branch is not reachable with real shipping data any more. It
+        stays load-bearing for the next state added with a partially-checked
+        trigger list, so it is exercised here with a synthetic entry rather
+        than left untested until that day.
+        """
+        STATE_UNINSURED_DISCOUNTS["ZV"] = StateUninsuredDiscount(
+            days=90,
+            citation="Fake Stat. §9",
+            max_fpl_pct=300,
+            uninsured_only=False,
+            runs_from_latest_of=("discharge_date", "screening_date"),
+            confirmed_triggers=("discharge_date",),  # screening_date deliberately unconfirmed
+        )
+        try:
+            b = _bill(discharge_date=date(2026, 1, 12), screening_date=date(2026, 3, 1))
+            d = _front(compute_deadlines(b, "ZV", insured=False), "uninsured discount")
+            assert "unverified" in d.citation
+            assert d.basis_field == "screening_date"
+        finally:
+            del STATE_UNINSURED_DISCOUNTS["ZV"]
 
     def test_insured_patient_does_not_get_the_uninsured_discount(self):
         b = _bill(discharge_date=date(2026, 1, 12))

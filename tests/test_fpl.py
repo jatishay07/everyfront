@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from rules.fpl import fpl_annual_cents, income_as_fpl_pct, state_group
+from rules.fpl import _FPL, fpl_annual_cents, income_as_fpl_pct, state_group
 
 
 class TestStateGrouping:
@@ -55,3 +55,40 @@ class TestFPLPercentage:
         pct = income_as_fpl_pct(60_000_00, 4, "IL", 2026)
         assert 175 < pct < 185
         assert pct < 250
+
+
+class TestTableMatchesPrimarySource:
+    """Pin every (year, state group) entry to the Federal Register notice that
+    published it. Each figure here was independently re-verified against the
+    primary source on 2026-08-25 (STATUTE wo6, the citation audit) -- not
+    copied from `rules/fpl.py`'s own table, so this test can actually catch a
+    transcription error in that table rather than just restating it.
+
+    2025 AK/HI regression: LEDGER found (and this audit independently
+    confirmed against ASPE's 2025 detailed-guidelines PDF) that the AK and HI
+    2025 per-person increments were each entered $10 low ($6,870 / $6,320
+    instead of $6,880 / $6,330). This table encodes the corrected, verified
+    values so a future transcription slip fails a test instead of silently
+    shipping.
+    """
+
+    # (year, state group) -> (first_person, each_additional_person, citation)
+    VERIFIED = {
+        (2026, "48"): (15_960, 5_680, "91 FR 1797 (HHS, Jan. 15, 2026; FR Doc. 2026-00755)"),
+        (2026, "AK"): (19_950, 7_100, "91 FR 1797 (HHS, Jan. 15, 2026; FR Doc. 2026-00755)"),
+        (2026, "HI"): (18_360, 6_530, "91 FR 1797 (HHS, Jan. 15, 2026; FR Doc. 2026-00755)"),
+        (2025, "48"): (15_650, 5_500, "90 FR 5917 (HHS, Jan. 17, 2025; FR Doc. 2025-01377)"),
+        (2025, "AK"): (19_550, 6_880, "90 FR 5917 (HHS, Jan. 17, 2025; FR Doc. 2025-01377)"),
+        (2025, "HI"): (17_990, 6_330, "90 FR 5917 (HHS, Jan. 17, 2025; FR Doc. 2025-01377)"),
+    }
+
+    def test_every_table_entry_has_a_pinned_expectation(self):
+        """The verified set and the shipping table must cover exactly the same keys."""
+        shipping_keys = {(year, group) for year, groups in _FPL.items() for group in groups}
+        assert shipping_keys == set(self.VERIFIED)
+
+    @pytest.mark.parametrize("year,group", sorted(VERIFIED))
+    def test_value_matches_the_published_notice(self, year, group):
+        first, additional, citation = self.VERIFIED[(year, group)]
+        assert citation.strip(), "every pinned value must carry its Federal Register citation"
+        assert _FPL[year][group] == (first, additional)
