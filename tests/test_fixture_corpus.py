@@ -40,7 +40,7 @@ GENERATED = REPO_ROOT / "fixtures" / "generated"
 EIN_RE = re.compile(r"^\d{2}-\d{7}$")
 STATE_RE = re.compile(r"^[A-Z]{2}$")
 
-CONTRACT_PATIENT_KEYS = {"name", "household_size", "annual_income", "insured", "state"}
+CONTRACT_PATIENT_KEYS = {"name", "household_size", "annual_income_cents", "insured", "state"}
 CONTRACT_BILL_KEYS = {
     "hospital_ein",
     "provider_name",
@@ -98,7 +98,9 @@ class TestCorpusShape:
         patient = _load(case_id)["patient"]
         assert set(patient) == CONTRACT_PATIENT_KEYS
         assert isinstance(patient["household_size"], int) and patient["household_size"] >= 1
-        assert isinstance(patient["annual_income"], int) and patient["annual_income"] >= 0
+        assert (
+            isinstance(patient["annual_income_cents"], int) and patient["annual_income_cents"] >= 0
+        )
         assert isinstance(patient["insured"], bool)
         assert STATE_RE.match(patient["state"])
 
@@ -228,7 +230,7 @@ class TestExpectedEligibilityMatchesTheRealRulesEngine:
             assert fixture is None
             return
         real = screen_eligibility(
-            case.patient["annual_income"],
+            case.patient["annual_income_cents"],
             case.patient["household_size"],
             case.patient["state"],
             hospital_to_contract(hospital),
