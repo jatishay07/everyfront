@@ -145,19 +145,25 @@ def test_inject_bill_unknown_fixture_404(monkeypatch):
 
 
 def test_inject_bill_known_fixture_creates_case_and_calls_agent_core(monkeypatch):
+    """Defect #3 (persona 5 WO2): `/demo/inject_bill` now calls agent-core's
+    BATCH endpoint (`process_documents`) exactly once for every document in
+    the fixture, instead of once per document -- see agent_core_client.py and
+    agent_core/pipeline.py's `process_case_documents`.
+    """
     c, s = client_with_store(monkeypatch)
     calls = []
 
-    async def fake_process(case_id, doc_id):
-        calls.append((case_id, doc_id))
-        return {"reader": {}, "lookup": {}, "clock": {}, "auditor": {}, "strategist": {}}
+    async def fake_process(case_id, doc_ids):
+        calls.append((case_id, tuple(doc_ids)))
+        return {"readers": {}, "lookup": {}, "clock": {}, "auditor": {}, "strategist": {}}
 
-    monkeypatch.setattr(main, "agent_core_process_document", fake_process)
+    monkeypatch.setattr(main, "agent_core_process_documents", fake_process)
     resp = c.post("/demo/inject_bill", json={"fixture_name": "maria_uninsured_ca"})
     assert resp.status_code == 200
     body = resp.json()
     assert body["case_id"].startswith("demo-maria_uninsured_ca-")
     assert len(calls) == 1
+    assert len(calls[0][1]) == len(body["doc_ids"])  # one batch call, every doc_id included
 
     case = s.get_case(body["case_id"])
     assert case["patient"]["state"] == "CA"

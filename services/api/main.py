@@ -18,7 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 import httpx
 from api_core import config
 from api_core.agent_core_client import approve_filing as agent_core_approve_filing
-from api_core.agent_core_client import process_document as agent_core_process_document
+from api_core.agent_core_client import process_documents as agent_core_process_documents
 from api_core.demo_fixtures import available_fixtures, load_fixture
 from api_core.pubsub_client import publish
 from api_core.store import store
@@ -206,10 +206,16 @@ async def inject_bill(req: InjectBillRequest) -> dict:
     api_core.demo_fixtures's docstring.
 
     A fixture can carry more than one document (bill + GFE + income proof,
-    etc.); each is added and run through agent-core's pipeline IN ORDER so
-    the final case state reflects everything Reader has seen -- e.g.
-    Verifier's income-consistency check needs the income_proof document to
-    already be classified by the time a human calls approve_filing.
+    etc.). All of them are added up front, then run through agent-core's
+    pipeline in ONE batch call (`process_documents`): Reader runs for every
+    document CONCURRENTLY and the Lookup/Clock/Auditor/Strategist cascade
+    runs exactly once, instead of once per document (defect #3, persona 5
+    WO2 -- a case with 3 documents used to pay for 3 full cascades). The
+    final case state still reflects everything Reader has seen from every
+    document -- e.g. Verifier's income-consistency check still needs the
+    income_proof document classified by the time a human calls
+    approve_filing, and it is, since all of them are read before the
+    cascade runs.
     """
     fixture = load_fixture(req.fixture_name)
     if fixture is None:
@@ -229,25 +235,23 @@ async def inject_bill(req: InjectBillRequest) -> dict:
     store.create_case(case_id, {"patient": fixture["patient"], "bill": fixture["bill"]})
 
     doc_ids = []
-    pipeline_results = []
     for doc in fixture["documents"]:
         doc_id = store.add_document(case_id, {**doc, "gcs_uri": None})
         doc_ids.append(doc_id)
-
         # Real Pub/Sub publish -- genuinely exercises the topic (contract
         # §3.2) and is visible as evidence in the Cloud Console, even though
         # this endpoint does not wait on push delivery for the demo to
         # complete (see api_core/agent_core_client.py's docstring for why).
         publish(config.TOPIC_CASE_DOCUMENT_ADDED, {"case_id": case_id, "doc_id": doc_id})
 
-        try:
-            pipeline_results.append(await agent_core_process_document(case_id, doc_id))
-        except httpx.HTTPError as exc:
-            raise HTTPException(
-                status_code=502, detail=f"agent-core unreachable for inject_bill: {exc}"
-            ) from exc
+    try:
+        pipeline_result = await agent_core_process_documents(case_id, doc_ids)
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"agent-core unreachable for inject_bill: {exc}"
+        ) from exc
 
-    return {"case_id": case_id, "doc_ids": doc_ids, "pipeline": pipeline_results}
+    return {"case_id": case_id, "doc_ids": doc_ids, "pipeline": [pipeline_result]}
 
 
 @app.get("/hospitals/{ein}")

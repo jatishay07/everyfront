@@ -194,6 +194,11 @@ class ProcessDocument(BaseModel):
     doc_id: str
 
 
+class ProcessDocuments(BaseModel):
+    case_id: str
+    doc_ids: list[str]
+
+
 class ApproveFiling(BaseModel):
     case_id: str
     front: str
@@ -205,6 +210,18 @@ async def process_document(req: ProcessDocument) -> dict:
     docstring for why this exists alongside the push-subscriber route below.
     """
     return await pipeline.on_document_added(req.case_id, req.doc_id)
+
+
+@app.post("/internal/process_documents")
+async def process_documents(req: ProcessDocuments) -> dict:
+    """Batch synchronous entry point: run Reader for every doc_id CONCURRENTLY
+    and run the Lookup/Clock/Auditor/Strategist cascade exactly ONCE (defect
+    #3, persona 5 WO2) -- for a caller that already has every document for a
+    case up front (`services/api`'s `/demo/inject_bill`), instead of N calls
+    to `/internal/process_document` each re-running the whole cascade. See
+    `agent_core.pipeline.process_case_documents`'s docstring.
+    """
+    return await pipeline.process_case_documents(req.case_id, req.doc_ids)
 
 
 @app.post("/internal/approve_filing")
