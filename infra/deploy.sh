@@ -37,6 +37,24 @@ src_for() {
   esac
 }
 
+# Which packages/ each service needs on its PYTHONPATH. `gcloud run deploy
+# --source=services/<name>` uploads ONLY that directory, so a service importing
+# packages/rules builds and tests fine locally and then dies at runtime in Cloud
+# Run with ModuleNotFoundError. RELAY hit this; the deployed agent-core survived
+# only because it happened to define its tool inline instead of importing.
+#
+# Duplicating the packages into each service is not an option for the rules
+# engine -- §2.1 makes it the single source of truth for the law, and two copies
+# drift. So we stage a build context containing the service plus what it needs.
+pkgs_for() {
+  case "$1" in
+    intake)     echo "delivery" ;;
+    agent-core) echo "rules delivery" ;;
+    api)        echo "rules" ;;
+    *)          echo "" ;;
+  esac
+}
+
 sa_for() {
   case "$1" in
     intake)     echo "ef-intake" ;;
@@ -58,9 +76,34 @@ deploy_one() {
     return 0
   fi
 
+  # Stage a build context: the service at the root, plus each needed package
+  # under packages/ so PYTHONPATH resolves the same way it does locally.
+  pkgs="$(pkgs_for "$svc")"
+  ctx="$dir"
+  pythonpath=""
+  if [ -n "$pkgs" ]; then
+    ctx="$(mktemp -d)"
+    trap 'rm -rf "$ctx"' RETURN 2>/dev/null || true
+    cp -R "$dir"/. "$ctx"/
+    mkdir -p "$ctx/packages"
+    for pkg in $pkgs; do
+      if [ -d "packages/$pkg/$pkg" ]; then
+        cp -R "packages/$pkg/$pkg" "$ctx/packages/$pkg"
+      else
+        die "service '$svc' needs packages/$pkg but it does not exist"
+      fi
+    done
+    # Bytecode from the host is wrong for the container and only bloats the
+    # upload; the image rebuilds it.
+    find "$ctx" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+    find "$ctx" -name '*.pyc' -delete 2>/dev/null || true
+    pythonpath="/app/packages"
+    ok "staged $svc + packages: $pkgs"
+  fi
+
   log "Deploying $svc from $dir"
   gcloud run deploy "ef-${svc}" \
-    --source="$dir" \
+    --source="$ctx" \
     --region="$REGION" \
     --service-account="${sa}@${PROJECT_ID}.iam.gserviceaccount.com" \
     --min-instances=0 \
@@ -68,7 +111,7 @@ deploy_one() {
     --memory=1Gi \
     --timeout=300 \
     --allow-unauthenticated \
-    --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=TRUE" \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=TRUE${pythonpath:+,PYTHONPATH=$pythonpath}" \
     --quiet >/dev/null
   url="$(gcloud run services describe "ef-${svc}" --region="$REGION" --format='value(status.url)')"
   ok "$svc -> $url"

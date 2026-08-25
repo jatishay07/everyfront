@@ -1,0 +1,126 @@
+{
+  "bill": {
+    "amount_cents": 137500,
+    "collector_name": "Cascade Debt Recovery Group (SYNTHETIC)",
+    "first_statement_date": "2026-03-10",
+    "gfe_amount_cents": null,
+    "hospital_ein": "94-6174066",
+    "in_collections": true,
+    "provider_name": "Stanford Health Care",
+    "service_date": "2026-02-20",
+    "validation_notice_date": "2026-08-05"
+  },
+  "case_id": "case_03_in_collections_ca",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    },
+    {
+      "doc_id": "collection_notice",
+      "file": "documents/collection_notice.pdf",
+      "type": "collection_notice"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 15000,
+    "audit_findings_reference_model": [
+      {
+        "amount_cents": 15000,
+        "code": "73610",
+        "description": "X-RAY, ANKLE, 3+ VIEWS",
+        "kind": "exact_duplicate",
+        "note": "Same ankle X-ray billed twice."
+      }
+    ],
+    "deadlines": [
+      {
+        "basis_date": "2026-03-10",
+        "basis_field": "first_statement_date",
+        "citation": "Cal. Health & Safety Code \u00a7127405(e)(3)",
+        "days": null,
+        "days_remaining_as_of_2026_08_25": null,
+        "due": null,
+        "front": "charity_care",
+        "name": "Charity care application"
+      },
+      {
+        "basis_date": "2026-03-10",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-6(c)(3)(i)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": -48,
+        "due": "2026-07-08",
+        "front": "charity_care",
+        "name": "Extraordinary collection actions barred until"
+      },
+      {
+        "basis_date": "2026-03-10",
+        "basis_field": "first_statement_date",
+        "citation": "45 CFR 149.620(c)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": -48,
+        "due": "2026-07-08",
+        "front": "ppdr",
+        "name": "Patient-provider dispute resolution"
+      },
+      {
+        "basis_date": "2026-08-05",
+        "basis_field": "validation_notice_date",
+        "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
+        "days": 30,
+        "days_remaining_as_of_2026_08_25": 10,
+        "due": "2026-09-04",
+        "front": "debt_validation",
+        "name": "Written dispute of the debt"
+      }
+    ],
+    "denial_check_reference_model": null,
+    "eligibility": {
+      "citations": [
+        "Cal. Health & Safety Code \u00a7127405",
+        "26 CFR 1.501(r)-4(b)(2)"
+      ],
+      "determination": "free",
+      "discounted_threshold_pct": 400,
+      "fpl_pct": 112.782,
+      "free_threshold_pct": 400,
+      "notes": [
+        "CA sets one 400% FPL floor covering both tiers."
+      ]
+    },
+    "fronts_reference_model": [
+      {
+        "applicable": true,
+        "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
+        "front": "debt_validation",
+        "reason": "in_collections with an open validation window -- sequences before every other front."
+      },
+      {
+        "applicable": true,
+        "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "front": "charity_care",
+        "reason": "Screened free against Stanford Health Care's FAP."
+      },
+      {
+        "applicable": true,
+        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "front": "audit",
+        "reason": "Itemized bill present -- billing audit always runs."
+      }
+    ]
+  },
+  "notes": "validation_notice_date is 20 days before currentDate 2026-08-25 -- the 30-day validation window (due 2026-09-04) is open but closing, which is exactly the urgency that must sequence ahead of the (in this state, deadline-free) charity-care screen.",
+  "patient": {
+    "annual_income": 1800000,
+    "household_size": 1,
+    "insured": false,
+    "name": "Denise Okafor",
+    "state": "CA"
+  },
+  "proves": "in_collections + an open validation window forces debt-validation to sequence FIRST (12 CFR 1006.34 / 15 USC 1692g), ahead of charity-care exploration, even in CA where the charity-care clock never runs out.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Uninsured, referred to collections, California"
+}

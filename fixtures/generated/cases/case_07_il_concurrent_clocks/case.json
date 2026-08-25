@@ -1,0 +1,153 @@
+{
+  "bill": {
+    "amount_cents": 350000,
+    "collector_name": null,
+    "discharge_date": "2026-07-10",
+    "first_statement_date": "2026-07-20",
+    "gfe_amount_cents": 260000,
+    "hospital_ein": "36-2169147",
+    "in_collections": false,
+    "provider_name": "Advocate Christ Medical Center",
+    "service_date": "2026-07-09",
+    "validation_notice_date": null
+  },
+  "case_id": "case_07_il_concurrent_clocks",
+  "documents": [
+    {
+      "doc_id": "bill",
+      "file": "documents/bill.pdf",
+      "type": "itemized_bill"
+    },
+    {
+      "doc_id": "gfe",
+      "file": "documents/gfe.pdf",
+      "type": "gfe"
+    },
+    {
+      "doc_id": "income_proof",
+      "file": "documents/income_proof.pdf",
+      "type": "income_proof"
+    }
+  ],
+  "expected": {
+    "audit_findings_cents_total": 51500,
+    "audit_findings_reference_model": [
+      {
+        "amount_cents": 7000,
+        "code": "86787",
+        "description": "AB, VARICELLA ZOSTER IGG",
+        "kind": "cash_price_delta",
+        "note": "REAL figures from docs/SPIKE.md gate (b): Advocate's own attested MRF lists code 86787 gross $140.00 / cash $70.00 -- a flat 50%-of-gross discount. Billing a self-pay patient the gross price is a 2x overcharge against the hospital's own published cash price."
+      },
+      {
+        "amount_cents": 19000,
+        "code": "71046",
+        "description": "CHEST X-RAY, 2 VIEWS",
+        "kind": "mue_excess",
+        "note": "3 units billed in one line for a code with an illustrative 1-unit/day MUE ceiling -- flagged as 2 excess units. NOT cross-checked against a live CMS NCCI MUE table (packages/datapipes has no NCCI pipeline yet, WO3); verify before citing in a real filing."
+      },
+      {
+        "amount_cents": 22000,
+        "code": "80053",
+        "description": "COMPREHENSIVE METABOLIC PANEL",
+        "kind": "exact_duplicate",
+        "note": "Same metabolic panel billed twice."
+      },
+      {
+        "amount_cents": 3500,
+        "code": "36415",
+        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
+        "kind": "ptp_unbundling",
+        "note": "36415 alongside same-day E/M 99285, no modifier."
+      }
+    ],
+    "deadlines": [
+      {
+        "basis_date": "2026-07-20",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-4(b)(1)(iv)",
+        "days": 240,
+        "days_remaining_as_of_2026_08_25": 204,
+        "due": "2027-03-17",
+        "front": "charity_care",
+        "name": "Charity care application"
+      },
+      {
+        "basis_date": "2026-07-20",
+        "basis_field": "first_statement_date",
+        "citation": "26 CFR 1.501(r)-6(c)(3)(i)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 84,
+        "due": "2026-11-17",
+        "front": "charity_care",
+        "name": "Extraordinary collection actions barred until"
+      },
+      {
+        "basis_date": "2026-07-20",
+        "basis_field": "first_statement_date",
+        "citation": "45 CFR 149.620(c)",
+        "days": 120,
+        "days_remaining_as_of_2026_08_25": 84,
+        "due": "2026-11-17",
+        "front": "ppdr",
+        "name": "Patient-provider dispute resolution"
+      },
+      {
+        "basis_date": "2026-07-10",
+        "basis_field": "discharge_date",
+        "citation": "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        "days": 90,
+        "days_remaining_as_of_2026_08_25": 44,
+        "due": "2026-10-08",
+        "front": "charity_care",
+        "name": "IL uninsured discount application"
+      }
+    ],
+    "denial_check_reference_model": null,
+    "eligibility": {
+      "citations": [
+        "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        "26 CFR 1.501(r)-4(b)(2)"
+      ],
+      "determination": "free",
+      "discounted_threshold_pct": 600,
+      "fpl_pct": 109.8097,
+      "free_threshold_pct": 250,
+      "notes": [
+        "Uninsured patients at or below 300% FPL. Rural/critical-access facilities carry a higher ceiling; not yet encoded -- see TODO."
+      ]
+    },
+    "fronts_reference_model": [
+      {
+        "applicable": true,
+        "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "front": "charity_care",
+        "reason": "Screened free against Advocate Christ Medical Center's FAP."
+      },
+      {
+        "applicable": true,
+        "citation": "45 CFR 149.620(c)",
+        "front": "ppdr",
+        "reason": "Bill exceeds GFE by $900.00, over the $400 floor."
+      },
+      {
+        "applicable": true,
+        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "front": "audit",
+        "reason": "Itemized bill present -- billing audit always runs."
+      }
+    ]
+  },
+  "notes": "discharge_date 2026-07-10, first_statement_date 2026-07-20. Relative to currentDate 2026-08-25: IL discount due 2026-10-08 (nearest), ECA moratorium + PPDR both due 2026-11-17 (same 120-day offset from the same basis date -- a real coincidence of the rules, not a fixture error), federal FAP due 2027-03-17 (furthest out). Income ~109.8% FPL clears Advocate's real 250% free line.",
+  "patient": {
+    "annual_income": 3000000,
+    "household_size": 3,
+    "insured": false,
+    "name": "Aisha Bello",
+    "state": "IL"
+  },
+  "proves": "The product's actual thesis (README/video: 'five legal clocks running at once, interacting'): this single case has FOUR live Deadline objects on different clocks -- the federal 240-day FAP window, the 120-day ECA moratorium, the 120-day PPDR window, and IL's 90-day state discount -- each with a different basis date and a different due date. It also carries the richest audit trail in the corpus: a real cash-price delta from Advocate's own attested MRF (SPIKE gate (b)), an MUE-style unit excess, an exact duplicate, and an NCCI-style unbundling.",
+  "status": "intake",
+  "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
+  "title": "Uninsured, GFE blown, Illinois \u2014 four clocks at once"
+}
