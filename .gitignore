@@ -12,3 +12,10 @@ token*.json
 
 # Agent worktrees -- isolated checkouts, never part of the repo
 .claude/worktrees/
+
+# Test/coverage artifacts -- regenerated on every run, never committed
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
