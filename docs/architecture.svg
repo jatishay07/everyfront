@@ -18,15 +18,15 @@
 
   <!-- ============ TITLE ============ -->
   <text x="40" y="52" font-size="34" font-weight="700" fill="#1E1B2E">Every Front — Architecture</text>
-  <text x="40" y="78" font-size="15" fill="#5B5770">Six agents on Google ADK · Gemini 3.7 Flash + Gemma 4 · Cloud Run · Pub/Sub · Firestore</text>
+  <text x="40" y="78" font-size="15" fill="#5B5770">Six ADK agents · Gemini 3.7 Flash + Gemma 4 · Cloud Run · Pub/Sub · Firestore — deployed and running today</text>
 
   <!-- ============ LEGEND ============ -->
   <g>
-    <rect x="1185" y="24" width="26" height="14" rx="3" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
-    <text x="1219" y="35" font-size="13" fill="#1E1B2E">deployed / implemented today</text>
-    <rect x="1185" y="47" width="26" height="14" rx="3" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="2" stroke-dasharray="4,3"/>
-    <text x="1219" y="58" font-size="13" fill="#1E1B2E">designed in the contract — not yet built</text>
-    <text x="1185" y="78" font-size="11" font-style="italic" fill="#8A8698">status reflects the repo as of 2026-08-25 — see README's status table</text>
+    <rect x="1140" y="24" width="26" height="14" rx="3" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+    <text x="1174" y="35" font-size="13" fill="#1E1B2E">live and verified today</text>
+    <rect x="1140" y="47" width="26" height="14" rx="3" fill="#FDECEA" stroke="#B3540A" stroke-width="2" stroke-dasharray="4,3"/>
+    <text x="1174" y="58" font-size="13" fill="#1E1B2E">wired, but a known gap remains (see README)</text>
+    <text x="1140" y="78" font-size="11" font-style="italic" fill="#8A8698">status verified 2026-08-25 by curling the live services — see README's status table</text>
   </g>
 
   <!-- ============================================================ -->
@@ -63,42 +63,42 @@
     <text x="34" y="486" font-size="12" fill="#5B5770">eligibility inputs</text>
   </g>
 
-  <!-- packages/datapipes (planned) -->
+  <!-- packages/datapipes (live) -->
   <g>
-    <rect x="255" y="300" width="200" height="150" rx="10" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="6,5"/>
-    <text x="269" y="323" font-size="15" font-weight="600" fill="#1E1B2E">packages/datapipes</text>
-    <text x="269" y="340" font-size="12" fill="#8A8698" font-style="italic">planned</text>
-    <text x="269" y="360" font-size="12" fill="#5B5770">Schedule H parser</text>
-    <text x="269" y="376" font-size="12" fill="#5B5770">MRF fetcher</text>
-    <text x="269" y="392" font-size="12" fill="#5B5770">NCCI + FPL loaders</text>
-    <text x="269" y="412" font-size="12" fill="#5B5770">seeds 200 hospitals</text>
-    <text x="269" y="428" font-size="12" fill="#5B5770">(docs/SPIKE.md proved it works)</text>
+    <rect x="255" y="300" width="200" height="150" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+    <text x="269" y="323" font-size="15" font-weight="600" fill="#0F5C36">packages/datapipes</text>
+    <text x="269" y="340" font-size="11.5" fill="#1E8E5A" font-style="italic">live — seeded to Firestore + GCS</text>
+    <text x="269" y="360" font-size="12" fill="#1E5C3E">200 hospitals, 100% live FAP URL</text>
+    <text x="269" y="376" font-size="12" fill="#1E5C3E">2,881 NCCI PTP pairs, 15,112 MUE</text>
+    <text x="269" y="392" font-size="12" fill="#1E5C3E">EIN↔CCN crosswalk: 180/200</text>
+    <text x="269" y="408" font-size="12" fill="#1E5C3E">MRF cash prices: 3 live systems</text>
+    <text x="269" y="428" font-size="11" fill="#5B5770" font-style="italic">(docs/SPIKE.md has the receipts)</text>
   </g>
 
   <!-- inputs -> datapipes -->
-  <path d="M220,262 C238,262 238,340 253,352" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
-  <path d="M220,358 L253,375" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
-  <path d="M220,454 C238,454 238,400 253,398" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
+  <path d="M220,262 C238,262 238,340 253,352" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M220,358 L253,375" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M220,454 C238,454 238,400 253,398" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
 
   <!-- gmail -> intake -->
-  <path d="M220,173 C330,173 380,178 488,192" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
+  <path d="M220,173 C330,173 380,178 488,192" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
 
   <!-- datapipes -> firestore -->
-  <path d="M455,410 C520,470 470,600 488,712" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
-  <text x="368" y="560" font-size="11" fill="#8A8698" font-style="italic" transform="rotate(78 368 560)">writes hospitals/{ein}</text>
+  <path d="M455,410 C520,470 470,600 488,712" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <text x="368" y="560" font-size="11" fill="#5B5770" font-style="italic" transform="rotate(78 368 560)">writes hospitals/{ein}</text>
 
   <!-- ============================================================ -->
   <!-- GOOGLE CLOUD CLUSTER                                           -->
   <!-- ============================================================ -->
   <rect x="470" y="112" width="880" height="758" rx="16" fill="#EAF1FE" stroke="#4285F4" stroke-width="2"/>
   <text x="492" y="140" font-size="16" font-weight="700" fill="#1A56C4" letter-spacing="1.5">GOOGLE CLOUD</text>
-  <text x="492" y="158" font-size="11.5" fill="#3A5A8C">Cloud Run · Pub/Sub · Firestore — provisioned by infra/setup.sh (live)</text>
+  <text x="492" y="158" font-size="11.5" fill="#3A5A8C">Cloud Run · Pub/Sub · Firestore — provisioned by infra/setup.sh, deployed by infra/deploy.sh (live)</text>
 
   <!-- services/intake -->
-  <rect x="492" y="172" width="220" height="66" rx="10" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="6,5"/>
-  <text x="506" y="195" font-size="14.5" font-weight="600" fill="#1E1B2E">services/intake</text>
-  <text x="506" y="212" font-size="12" fill="#5B5770">Cloud Run — Gmail webhook</text>
-  <text x="506" y="227" font-size="11.5" fill="#8A8698" font-style="italic">planned</text>
+  <rect x="492" y="172" width="220" height="66" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="506" y="195" font-size="14.5" font-weight="600" fill="#0F5C36">services/intake</text>
+  <text x="506" y="212" font-size="12" fill="#1E5C3E">Cloud Run — Gmail webhook</text>
+  <text x="506" y="227" font-size="11.5" fill="#1E8E5A" font-style="italic">live — watch → GCS → Pub/Sub</text>
   <line x1="602" y1="238" x2="602" y2="278" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Pub/Sub bus -->
@@ -131,33 +131,34 @@
 
   <!-- agent-core outer box -->
   <rect x="492" y="382" width="658" height="278" rx="12" fill="#F1ECFB" stroke="#6C4AB6" stroke-width="2"/>
-  <text x="506" y="404" font-size="15" font-weight="700" fill="#4B2E91">agent-core — Cloud Run (ADK agent hierarchy)</text>
-  <text x="506" y="420" font-size="11.5" fill="#5B5770">a hello-world seed of this runtime is deployed and live; the 6-agent split below is the architected target, not yet fully wired</text>
+  <text x="506" y="404" font-size="15" font-weight="700" fill="#4B2E91">agent-core — Cloud Run (ADK agent hierarchy, live)</text>
+  <text x="506" y="420" font-size="11.5" fill="#5B5770">all six agents run today; a real /demo/inject_bill call produced 30 logged events with citations in 75s</text>
 
   <!-- six agent chips -->
   <!-- Reader -->
-  <rect x="510" y="432" width="80" height="66" rx="8" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <text x="550" y="458" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Reader</text>
-  <text x="550" y="474" font-size="9.5" fill="#8A8698" text-anchor="middle" font-style="italic">planned</text>
+  <rect x="510" y="432" width="80" height="66" rx="8" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="550" y="458" font-size="13" font-weight="600" fill="#0F5C36" text-anchor="middle">Reader</text>
+  <text x="550" y="474" font-size="9.5" fill="#1E8E5A" text-anchor="middle" font-style="italic">live</text>
   <path d="M590,465 L604,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Lookup -->
-  <rect x="608" y="432" width="80" height="66" rx="8" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <text x="648" y="458" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Lookup</text>
-  <text x="648" y="474" font-size="9.5" fill="#8A8698" text-anchor="middle" font-style="italic">planned</text>
+  <rect x="608" y="432" width="80" height="66" rx="8" fill="#FDECEA" stroke="#B3540A" stroke-width="2" stroke-dasharray="5,4"/>
+  <text x="648" y="456" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Lookup</text>
+  <text x="648" y="470" font-size="8.5" fill="#B3540A" text-anchor="middle" font-style="italic">live · EIN-only</text>
+  <text x="648" y="482" font-size="8.5" fill="#B3540A" text-anchor="middle" font-style="italic">no name match</text>
   <path d="M688,465 L702,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Clock / Auditor -->
-  <rect x="706" y="432" width="118" height="66" rx="8" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <text x="765" y="453" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Clock /</text>
-  <text x="765" y="468" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Auditor</text>
-  <text x="765" y="483" font-size="9.5" fill="#8A8698" text-anchor="middle" font-style="italic">planned wrapper</text>
+  <rect x="706" y="432" width="118" height="66" rx="8" fill="#FDECEA" stroke="#B3540A" stroke-width="2" stroke-dasharray="5,4"/>
+  <text x="765" y="450" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Clock /</text>
+  <text x="765" y="465" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Auditor</text>
+  <text x="765" y="480" font-size="9" fill="#B3540A" text-anchor="middle" font-style="italic">live · partial</text>
   <path d="M824,465 L838,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Strategist -->
-  <rect x="842" y="432" width="106" height="66" rx="8" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <text x="895" y="458" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Strategist</text>
-  <text x="895" y="474" font-size="9.5" fill="#8A8698" text-anchor="middle" font-style="italic">planned</text>
+  <rect x="842" y="432" width="106" height="66" rx="8" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="895" y="458" font-size="13" font-weight="600" fill="#0F5C36" text-anchor="middle">Strategist</text>
+  <text x="895" y="474" font-size="9.5" fill="#1E8E5A" text-anchor="middle" font-style="italic">live</text>
 
   <!-- approval gate diamond -->
   <path d="M958,443 L982,465 L958,487 L934,465 Z" fill="#FFFFFF" stroke="#1E1B2E" stroke-width="1.5"/>
@@ -168,34 +169,34 @@
   <path d="M982,465 L996,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Verifier -->
-  <rect x="1000" y="432" width="80" height="66" rx="8" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <text x="1040" y="458" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Verifier</text>
-  <text x="1040" y="474" font-size="9.5" fill="#8A8698" text-anchor="middle" font-style="italic">planned</text>
+  <rect x="1000" y="432" width="80" height="66" rx="8" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="1040" y="458" font-size="13" font-weight="600" fill="#0F5C36" text-anchor="middle">Verifier</text>
+  <text x="1040" y="474" font-size="9.5" fill="#1E8E5A" text-anchor="middle" font-style="italic">live</text>
   <path d="M1080,465 L1094,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Filer -->
-  <rect x="1098" y="432" width="42" height="66" rx="8" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="5,4"/>
-  <text x="1119" y="458" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Filer</text>
-  <text x="1119" y="474" font-size="8.5" fill="#8A8698" text-anchor="middle" font-style="italic">planned</text>
+  <rect x="1098" y="432" width="42" height="66" rx="8" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="1119" y="458" font-size="13" font-weight="600" fill="#0F5C36" text-anchor="middle">Filer</text>
+  <text x="1119" y="474" font-size="8.5" fill="#1E8E5A" text-anchor="middle" font-style="italic">live</text>
 
   <!-- model chips -->
   <rect x="510" y="514" width="160" height="52" rx="8" fill="#FDECEA" stroke="#E8710A" stroke-width="1.5"/>
   <text x="520" y="533" font-size="12.5" font-weight="700" fill="#B3540A">Gemma 4 (26B-A4B-IT)</text>
-  <text x="520" y="548" font-size="11" fill="#7A4406">first-pass doc classifier</text>
-  <text x="520" y="561" font-size="10" fill="#7A4406" font-style="italic">verified live · bonus model</text>
+  <text x="520" y="548" font-size="11" fill="#7A4406">Reader's first-pass doc classifier</text>
+  <text x="520" y="561" font-size="10" fill="#7A4406" font-style="italic">live on every case · bonus model</text>
   <line x1="590" y1="514" x2="565" y2="500" stroke="#8A8698" stroke-width="1.2" stroke-dasharray="3,3"/>
 
   <rect x="678" y="514" width="462" height="52" rx="8" fill="#E3F5F1" stroke="#12796B" stroke-width="1.5"/>
   <text x="688" y="533" font-size="12.5" font-weight="700" fill="#0E5C50">Gemini 3.7 Flash — via Vertex AI (location=global)</text>
-  <text x="688" y="549" font-size="11" fill="#0E5C50">extraction · reasoning · narration — temperature 0, JSON schema, retry-on-503</text>
-  <text x="688" y="562" font-size="10" fill="#0E5C50" font-style="italic">deployed and answering live on Cloud Run today</text>
+  <text x="688" y="549" font-size="11" fill="#0E5C50">Reader's structured extraction, every agent's narration — temperature 0, JSON schema, retry-on-503</text>
+  <text x="688" y="562" font-size="10" fill="#0E5C50" font-style="italic">the LLM narrates; packages/rules below always computes (§2.1)</text>
   <line x1="765" y1="514" x2="765" y2="500" stroke="#8A8698" stroke-width="1.2" stroke-dasharray="3,3"/>
 
   <!-- packages/rules -->
   <rect x="678" y="578" width="462" height="62" rx="8" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
-  <text x="688" y="598" font-size="13" font-weight="700" fill="#0F5C36">packages/rules — deterministic engine (live, unit-tested)</text>
-  <text x="688" y="614" font-size="11" fill="#1E5C3E">deadlines · eligibility · FPL tables — every result carries a regulation citation</text>
-  <text x="688" y="628" font-size="10.5" fill="#1E5C3E" font-style="italic">zero LLM calls · the LLM narrates, the code computes (§2.1)</text>
+  <text x="688" y="598" font-size="13" font-weight="700" fill="#0F5C36">packages/rules — deterministic engine (live, 182 tests)</text>
+  <text x="688" y="614" font-size="11" fill="#1E5C3E">deadlines · eligibility · fronts · audit · denial triage — every result cites its regulation</text>
+  <text x="688" y="628" font-size="10.5" fill="#1E5C3E" font-style="italic">100% branch coverage · zero LLM calls anywhere in this package</text>
 
   <!-- agent-core <-> Firestore -->
   <line x1="600" y1="660" x2="600" y2="700" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
@@ -214,19 +215,19 @@
   <text x="768" y="794" font-size="9.5" fill="#5B5770">writes approval</text>
 
   <!-- services/api -->
-  <rect x="492" y="802" width="318" height="58" rx="10" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="6,5"/>
-  <text x="506" y="822" font-size="13.5" font-weight="600" fill="#1E1B2E">services/api — Cloud Run (FastAPI)</text>
-  <text x="506" y="838" font-size="11" fill="#5B5770">/cases · /dashboard/stats · POST /approve_filing</text>
-  <text x="506" y="852" font-size="10.5" fill="#8A8698" font-style="italic">planned</text>
+  <rect x="492" y="802" width="318" height="58" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="506" y="822" font-size="13.5" font-weight="600" fill="#0F5C36">services/api — Cloud Run (FastAPI, live)</text>
+  <text x="506" y="838" font-size="11" fill="#1E5C3E">all 8 §3.3 endpoints, incl. /demo/inject_bill</text>
+  <text x="506" y="852" font-size="10.5" fill="#1E8E5A" font-style="italic">ef-api-….run.app — curled 2026-08-25</text>
 
   <!-- api -> web -->
   <line x1="810" y1="831" x2="838" y2="831" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- web -->
-  <rect x="842" y="802" width="308" height="58" rx="10" fill="#FFFFFF" stroke="#9AA0A6" stroke-width="1.5" stroke-dasharray="6,5"/>
-  <text x="856" y="822" font-size="13.5" font-weight="600" fill="#1E1B2E">web — Cloud Run (Next.js)</text>
-  <text x="856" y="838" font-size="11" fill="#5B5770">stats banner · activity feed · Approve button</text>
-  <text x="856" y="852" font-size="10.5" fill="#8A8698" font-style="italic">planned</text>
+  <rect x="842" y="802" width="308" height="58" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="856" y="822" font-size="13.5" font-weight="600" fill="#0F5C36">web — Cloud Run (Next.js, built)</text>
+  <text x="856" y="838" font-size="11" fill="#1E5C3E">command center · case detail · activity feed · intake</text>
+  <text x="856" y="852" font-size="10.5" fill="#1E8E5A" font-style="italic">ships via infra/deploy.sh all</text>
 
   <!-- The approval loop is dashboard, then api, then Firestore, then Strategist reads it on its
        next pass. Deliberately no line drawn across the whole diagram for this: the gate icon
@@ -236,38 +237,38 @@
   <!-- EXTERNAL DELIVERY (right column)                               -->
   <!-- ============================================================ -->
   <g>
-    <rect x="1380" y="382" width="200" height="66" rx="10" fill="#FDF3E3" stroke="#B76E00" stroke-width="1.5"/>
-    <text x="1394" y="405" font-size="15" font-weight="600" fill="#1E1B2E">Phaxio — fax</text>
-    <text x="1394" y="422" font-size="12" fill="#5B5770">test mode, allowlisted</text>
-    <text x="1394" y="437" font-size="12" fill="#5B5770">destinations only</text>
+    <rect x="1380" y="382" width="200" height="66" rx="10" fill="#FDECEA" stroke="#B3540A" stroke-width="1.5" stroke-dasharray="5,4"/>
+    <text x="1394" y="402" font-size="15" font-weight="600" fill="#1E1B2E">Phaxio — fax</text>
+    <text x="1394" y="418" font-size="11.5" fill="#5B5770">allowlisted test destinations</text>
+    <text x="1394" y="434" font-size="10.5" fill="#B3540A" font-style="italic">no live keys yet → recording stub</text>
   </g>
   <g>
-    <rect x="1380" y="462" width="200" height="66" rx="10" fill="#FDF3E3" stroke="#B76E00" stroke-width="1.5"/>
-    <text x="1394" y="485" font-size="15" font-weight="600" fill="#1E1B2E">Lob — certified mail</text>
-    <text x="1394" y="502" font-size="12" fill="#5B5770">test_ keys, tracking</text>
-    <text x="1394" y="517" font-size="12" fill="#5B5770">on every send</text>
+    <rect x="1380" y="462" width="200" height="66" rx="10" fill="#FDECEA" stroke="#B3540A" stroke-width="1.5" stroke-dasharray="5,4"/>
+    <text x="1394" y="482" font-size="15" font-weight="600" fill="#1E1B2E">Lob — certified mail</text>
+    <text x="1394" y="498" font-size="11.5" fill="#5B5770">tracking, same interface</text>
+    <text x="1394" y="514" font-size="10.5" fill="#B3540A" font-style="italic">no live keys yet → recording stub</text>
   </g>
   <g>
-    <rect x="1380" y="542" width="200" height="66" rx="10" fill="#FDF3E3" stroke="#B76E00" stroke-width="1.5"/>
-    <text x="1394" y="565" font-size="15" font-weight="600" fill="#1E1B2E">Google Calendar</text>
-    <text x="1394" y="582" font-size="12" fill="#5B5770">deadline ladder,</text>
-    <text x="1394" y="597" font-size="12" fill="#5B5770">red ≤ 7 days</text>
+    <rect x="1380" y="542" width="200" height="66" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+    <text x="1394" y="565" font-size="15" font-weight="600" fill="#0F5C36">Google Calendar</text>
+    <text x="1394" y="582" font-size="12" fill="#1E5C3E">deadline ladder,</text>
+    <text x="1394" y="597" font-size="12" fill="#1E5C3E">red ≤ 7 days — live</text>
   </g>
   <g>
-    <rect x="1380" y="622" width="200" height="66" rx="10" fill="#FDF3E3" stroke="#B76E00" stroke-width="1.5"/>
-    <text x="1394" y="645" font-size="15" font-weight="600" fill="#1E1B2E">Google Drive</text>
-    <text x="1394" y="662" font-size="12" fill="#5B5770">per-case, advocate-</text>
-    <text x="1394" y="677" font-size="12" fill="#5B5770">shareable folder</text>
+    <rect x="1380" y="622" width="200" height="66" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+    <text x="1394" y="645" font-size="15" font-weight="600" fill="#0F5C36">Google Drive</text>
+    <text x="1394" y="662" font-size="12" fill="#1E5C3E">per-case, advocate-</text>
+    <text x="1394" y="677" font-size="12" fill="#1E5C3E">shareable folder — live</text>
   </g>
 
-  <!-- Filer fans out to delivery (planned integration) -->
-  <path d="M1140,448 C1250,420 1320,410 1378,410" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
-  <path d="M1140,455 C1260,470 1330,485 1378,492" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
-  <path d="M1140,462 C1260,520 1330,555 1378,570" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
-  <path d="M1140,468 C1250,560 1330,635 1378,650" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="5,4" marker-end="url(#arrowMuted)"/>
-  <text x="1178" y="378" font-size="11" fill="#8A8698" font-style="italic">packages/delivery — planned (vendors behind one swappable interface)</text>
+  <!-- Filer fans out to delivery (built, behind one swappable interface) -->
+  <path d="M1140,448 C1250,420 1320,410 1378,410" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M1140,455 C1260,470 1330,485 1378,492" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M1140,462 C1260,520 1330,555 1378,570" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <path d="M1140,468 C1250,560 1330,635 1378,650" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
+  <text x="1230" y="378" font-size="10.5" fill="#5B5770" font-style="italic">packages/delivery — live: 5 real forms filled</text>
 
   <!-- ============ FOOTER ============ -->
-  <text x="40" y="920" font-size="12" fill="#5B5770">Deployed today: https://ef-agent-core-756591166292.us-central1.run.app · Gemini 3.7 Flash via Vertex AI</text>
+  <text x="40" y="920" font-size="12" fill="#5B5770">Live today: https://ef-agent-core-756591166292.us-central1.run.app · https://ef-api-756591166292.us-central1.run.app · Gemini 3.7 Flash + Gemma 4 via Vertex AI</text>
   <text x="40" y="938" font-size="11" fill="#8A8698">Every Front — All Things Agentic Hackathon · The Taskmaster track</text>
 </svg>
