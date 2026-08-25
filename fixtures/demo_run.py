@@ -142,10 +142,25 @@ def real_run() -> int:
         _log(t0, f"  front {front['front']}: {front.get('reason', '')}")
 
     applicable_fronts = [f["front"] for f in data.get("fronts", []) if f.get("applicable")]
+    # A per-front approval failure (e.g. the Verifier's human-in-the-loop
+    # gate blocking on a real pre-filing issue) must not stack-trace-crash
+    # the whole rehearsal -- rehearsing failure until it can't happen on
+    # camera (persona 7's whole mandate) means surfacing it clearly and
+    # still checking every other front, not aborting on the first one. The
+    # run's final exit code still reflects it honestly (see below): this is
+    # graceful reporting, not silently pretending a blocked front succeeded.
+    approved_fronts: list[str] = []
+    blocked_fronts: list[tuple[str, str]] = []
     for front in applicable_fronts:
         _log(t0, f"approving filing for front={front}...")
         r = client.post(f"/cases/{case_id}/approve_filing", json={"front": front})
+        if r.status_code == 409:
+            reason = r.json().get("detail", r.text)
+            _log(t0, f"  BLOCKED: front={front} not approved -- {reason}")
+            blocked_fronts.append((front, reason))
+            continue
         r.raise_for_status()
+        approved_fronts.append(front)
 
     deadline = time.monotonic() + FILING_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -153,7 +168,7 @@ def real_run() -> int:
         r.raise_for_status()
         data = r.json()
         fronts_by_name = {f["front"]: f for f in data.get("fronts", [])}
-        if all(fronts_by_name.get(f, {}).get("status") == "filed" for f in applicable_fronts):
+        if all(fronts_by_name.get(f, {}).get("status") == "filed" for f in approved_fronts):
             break
         time.sleep(POLL_INTERVAL_S)
     else:
@@ -167,13 +182,28 @@ def real_run() -> int:
 
     elapsed = time.monotonic() - t0
     _log(t0, f"DONE in {elapsed:.1f}s (budget {BUDGET_S}s)")
+
+    ok = True
     if elapsed > BUDGET_S:
         print(
             f"WARNING: exceeded the {BUDGET_S}s demo budget -- see WO4 acceptance",
             file=sys.stderr,
         )
-        return 1
-    return 0
+        ok = False
+    if blocked_fronts:
+        # Reported, not swallowed: a blocked front is a real problem (either
+        # a genuine pre-filing issue the Verifier is right to catch, or a
+        # bug in it) and the happy path is not fully happy while any
+        # applicable front never gets approved. See this PR's HANDOFF notes.
+        print(
+            f"BLOCKED: {len(blocked_fronts)}/{len(applicable_fronts)} applicable front(s) "
+            "were not approved:",
+            file=sys.stderr,
+        )
+        for front, reason in blocked_fronts:
+            print(f"  - {front}: {reason}", file=sys.stderr)
+        ok = False
+    return 0 if ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:

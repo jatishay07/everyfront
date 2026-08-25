@@ -44,14 +44,20 @@ class TestDemoResetDryRun:
         for coll in RESET_COLLECTIONS:
             assert f"{coll}/" in lines
 
-    def test_plan_reseeds_the_real_hospital_count(self):
+    def test_plan_verifies_the_real_hospital_count_without_writing(self):
+        """AMENDED 2026-08-25: this used to re-seed (write) hospitals/{ein};
+        now it only verifies they exist, since LEDGER's real 200-hospital
+        Schedule H seed owns that collection and a write here would clobber
+        it with this corpus's 4-hospital placeholder record. See
+        fixtures/demo_reset.py's module docstring."""
         from fixtures.cases_data import HOSPITALS
         from fixtures.demo_reset import plan
 
         hospitals = _hospitals()
         assert len(hospitals) == len(HOSPITALS)
         lines = "\n".join(plan(hospitals))
-        assert f"re-seed {len(HOSPITALS)} hospitals" in lines
+        assert f"verify (read-only, never write) that {len(HOSPITALS)} hospitals" in lines
+        assert "re-seed" not in lines
 
     def test_plan_is_deterministic(self):
         from fixtures.demo_reset import plan

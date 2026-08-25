@@ -12,11 +12,20 @@ What it does, in order:
   2. Deletes every document in `filings/`.
   3. Deletes every object under `demo/` in the GCS documents bucket -- NOT
      the whole bucket, so anything outside the demo prefix survives.
-  4. Re-seeds `hospitals/{ein}` from fixtures/generated/hospitals.json, so a
-     bare or half-populated project always ends up with the same known-good
-     hospital records the fixture corpus depends on (LEDGER's real seed
-     pipeline, packages/datapipes, is not built yet -- WO1/2 -- so this is
-     the fixture-scale stand-in).
+  4. Verifies (read-only) that this corpus's hospital EINs already exist in
+     `hospitals/{ein}` -- logs a warning per missing EIN, but never writes.
+
+AMENDED 2026-08-25 (live-verification pass against the deployed project):
+this used to ALSO re-seed `hospitals/{ein}` from fixtures/generated/
+hospitals.json as a "fixture-scale stand-in" for LEDGER's not-yet-built real
+seed pipeline. That pipeline shipped for real (packages/datapipes WO1-3,
+200 real hospitals from IRS Schedule H) and running `.set()` over the same
+4 EINs from this corpus's minimal fixture record would silently downgrade
+whatever richer/more accurate fields LEDGER's real pipeline wrote (ccn, mrf
+data, a fresher tax_year, etc.) back to this fixture's placeholder values --
+and FORGE flagged explicitly: never touch `hospitals/` here, re-seeding it
+for real means re-downloading gigabytes of IRS filings. Verify-only, never
+write, from this point on.
 
 Deliberately does NOT touch the demo Google Calendar -- WO4's acceptance
 criterion here is scoped to "Firestore/GCS"; wiring the calendar in is
@@ -28,10 +37,9 @@ Idempotent: running it twice in a row is safe and ends in the same state
 
 `--dry-run` is fully offline: it needs no GCP credentials, no project, and no
 network access at all -- it only prints the fixed plan (which collections get
-cleared, which prefix gets wiped, how many hospitals get reseeded from the
-committed fixture file). That is what tests/test_demo_harness.py exercises
-in CI; the real reset path is exercised by hand during demo rehearsal, since
-this sandbox has no live GCP project to reset.
+cleared, which prefix gets wiped, which hospital EINs get checked). That is
+what tests/test_demo_harness.py exercises in CI; the real reset path is
+exercised against the live deployed project during demo rehearsal.
 """
 
 from __future__ import annotations
@@ -76,7 +84,10 @@ def plan(hospitals: dict) -> list[str]:
         for c in RESET_COLLECTIONS
     ]
     lines.append(f"delete all objects under gs://{bucket_name}/{GCS_DEMO_PREFIX}")
-    lines.append(f"re-seed {len(hospitals)} hospitals/{{ein}} record(s) from {HOSPITALS_JSON.name}")
+    lines.append(
+        f"verify (read-only, never write) that {len(hospitals)} hospitals/{{ein}} "
+        f"record(s) from {HOSPITALS_JSON.name} already exist in Firestore"
+    )
     return lines
 
 
@@ -115,10 +126,24 @@ def real_reset() -> None:
         blob.delete()
     print(f"  deleted {len(blobs)} object(s) under gs://{bucket_name}/{GCS_DEMO_PREFIX}")
 
+    # Read-only check. NEVER write here -- see the module docstring's 2026-08-25
+    # amendment: LEDGER's real 200-hospital Schedule H seed owns this
+    # collection now, and clobbering it with this corpus's 4-hospital
+    # placeholder record would be a real data-loss regression, not a reset.
     hospitals = json.loads(HOSPITALS_JSON.read_text())
-    for ein, record in hospitals.items():
-        client.collection("hospitals").document(ein).set(record)
-    print(f"  re-seeded {len(hospitals)} hospitals/{{ein}} record(s) from {HOSPITALS_JSON}")
+    missing = [
+        ein for ein in hospitals if not client.collection("hospitals").document(ein).get().exists
+    ]
+    if missing:
+        print(
+            f"  WARNING: {len(missing)} hospital EIN(s) this corpus depends on are "
+            f"missing from hospitals/: {missing}. Not writing them -- re-run "
+            "LEDGER's seed pipeline (packages/datapipes) instead of trusting this "
+            "script to fabricate hospital records.",
+            file=sys.stderr,
+        )
+    else:
+        print(f"  verified {len(hospitals)} hospitals/{{ein}} record(s) already present")
 
     print("Reset complete.")
 
