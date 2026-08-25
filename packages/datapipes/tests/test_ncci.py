@@ -108,6 +108,31 @@ def test_no_cpt_descriptor_text_stored(db_path):
                 assert "copyright" not in cell.lower()
 
 
+def test_default_db_path_points_inside_the_package():
+    assert ncci.default_db_path().parent.name == "data"
+    assert ncci.default_db_path().name == "ncci.sqlite"
+
+
+def test_load_default_opens_the_bundled_snapshot():
+    """WO6: the bundled snapshot ships with the package so a consumer (e.g.
+    services/agent-core) can get a real NCCI lookup with zero network access.
+    2,881 PTP edit rows / 15,112 MUE rows per docs/ (see data/ncci_manifest.json)."""
+    with ncci.load_default() as tbl:
+        # 71046 (chest x-ray, 2 views) is a real code carried in the bundled
+        # MUE table -- confirmed live 2026-08-25.
+        result = tbl.mue("71046")
+        assert result is not None
+        assert result.mue_value >= 1
+
+
+def test_load_default_raises_cleanly_when_snapshot_is_missing(monkeypatch):
+    monkeypatch.setattr(
+        ncci, "DEFAULT_DB_PATH", ncci.DEFAULT_DB_PATH.parent / "does-not-exist.sqlite"
+    )
+    with pytest.raises(FileNotFoundError):
+        ncci.load_default()
+
+
 def test_lookup_and_mue_under_10ms(db_path):
     with ncci.NCCITable(db_path) as tbl:
         t0 = time.perf_counter()

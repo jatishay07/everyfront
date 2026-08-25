@@ -1,0 +1,13 @@
+{
+  "built_at": "2026-08-25",
+  "built_by": "datapipes.ncci.download_and_build (LEDGER, persona 2, WO6)",
+  "quarter": "2026 Q3",
+  "sources": {
+    "mue": "medicare-ncci-2026-q3-facility-outpatient-hospital-services-mue-table.zip",
+    "ptp_additions": "Additions_Eff_07-01-2026.txt",
+    "ptp_deletions": "Deletions_Eff_07-01-2026.txt"
+  },
+  "ptp_edit_rows": 2881,
+  "mue_rows": 15112,
+  "note": "This is CMS's quarterly PTP additions/deletions list, not the full AMA-license-gated baseline table -- see the licensing boundary in ncci.py's module docstring. It carries no CPT descriptors, only codes and edit flags."
+}

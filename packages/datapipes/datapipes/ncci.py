@@ -225,6 +225,33 @@ def download_and_build(out_dir: Path) -> Path:
     )
 
 
+DEFAULT_DB_PATH = Path(__file__).parent / "data" / "ncci.sqlite"
+"""A pre-built snapshot bundled with this package (see `data/ncci_manifest.json`
+for provenance: quarter, row counts, exact source files). This is what lets a
+consumer -- e.g. `services/agent-core`'s auditor -- get a working NCCI lookup
+with zero network access and zero dependency on `download_and_build` having
+ever run in that process. It is data only (codes + edit flags, no AMA
+descriptors), same licensing boundary as the rest of this module."""
+
+
+def default_db_path() -> Path:
+    """Path to the bundled snapshot, for callers that want to open it directly."""
+    return DEFAULT_DB_PATH
+
+
+def load_default() -> NCCITable:
+    """Open the bundled snapshot (see `DEFAULT_DB_PATH`) read-only.
+
+    Raises `FileNotFoundError` if the snapshot wasn't packaged (e.g. a build
+    context that didn't copy `datapipes/data/`) -- callers wanting graceful
+    degradation should catch that themselves, same pattern as
+    `agent_core.mrf_cache`'s `available()`/`unavailable_reason()`.
+    """
+    if not DEFAULT_DB_PATH.exists():
+        raise FileNotFoundError(f"bundled NCCI snapshot not found at {DEFAULT_DB_PATH}")
+    return NCCITable(DEFAULT_DB_PATH)
+
+
 class NCCITable:
     """Read-only handle on the sqlite lookup table. <10ms per lookup/mue call."""
 
