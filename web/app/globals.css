@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  background-color: theme("colors.ink.950");
+  color: theme("colors.ink.100");
+}
+
+* {
+  border-color: theme("colors.ink.700");
+}
+
+body {
+  font-feature-settings: "cv11", "ss01";
+}
+
+/* Numerals that must never reflow their container as they tick, per the WO1
+   acceptance bar: "zero layout shift during live polling." */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+::selection {
+  background-color: theme("colors.signal.blue");
+  color: white;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: theme("colors.ink.700");
+  border-radius: 999px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+.input {
+  @apply w-full rounded-lg border border-ink-700 bg-ink-950 px-3 py-2 text-sm text-ink-100 outline-none transition-colors placeholder:text-ink-600 focus:border-signal-blue/60;
+}
