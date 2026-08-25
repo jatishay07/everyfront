@@ -67,14 +67,25 @@ def dry_run() -> int:
 
 
 def real_run() -> int:
-    import httpx
-
+    # Config check BEFORE the optional import. Reversed, a missing httpx
+    # produces a traceback instead of this message -- and on demo day the
+    # person running this needs to be told what to set, not shown a stack.
     api_url = os.environ.get("EVERYFRONT_API_URL", "").rstrip("/")
     if not api_url:
         print(
             "BLOCKED: EVERYFRONT_API_URL is not set. Point it at the deployed "
             "services/api Cloud Run URL (contract §3.3) before running the "
             "real demo harness.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        import httpx
+    except ModuleNotFoundError:
+        print(
+            "BLOCKED: httpx is not installed. Run "
+            "`pip install -r fixtures/requirements.txt` before the real demo harness.",
             file=sys.stderr,
         )
         return 1
