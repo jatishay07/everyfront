@@ -1,0 +1,20 @@
+# RELAY (persona 4). Versions pinned to what was verified locally end-to-end
+# (all 4 PDF forms filled + visually spot-checked, all vendor/calendar/drive
+# code paths unit-tested) -- see the PR description for the verification
+# transcript.
+#
+# NOT installed by root CI (see .github/workflows/ci.yml) -- every third-party
+# import in this package is deferred inside the function that needs it
+# specifically so `import delivery` and test collection succeed without these
+# installed (see packages/delivery/delivery/pdf/engine.py's module docstring).
+# Real PDF-filling/vendor/Google-API tests skip cleanly via
+# `pytest.importorskip` when these aren't present and run for real when they
+# are (this repo's own .venv has all of them). See the PR's HANDOFF for what
+# to add to CI so these run for real there too, instead of skipping.
+pypdf==6.16.2
+reportlab==5.0.1
+requests==2.34.2
+google-cloud-storage==3.13.1
+google-api-python-client==2.199.0
+google-auth==2.57.0
+google-auth-oauthlib==1.4.1
