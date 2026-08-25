@@ -58,7 +58,7 @@
       {
         "basis_date": "2026-07-28",
         "basis_field": "first_statement_date",
-        "citation": "45 CFR 149.620(c)",
+        "citation": "45 CFR 149.620(c)(1)",
         "days": 120,
         "days_remaining_as_of_2026_08_25": 92,
         "due": "2026-11-25",
@@ -69,7 +69,7 @@
     "denial_check_reference_model": null,
     "eligibility": {
       "citations": [
-        "Cal. Health & Safety Code \u00a7127405",
+        "Cal. Health & Safety Code \u00a7127405(a)(1)(A), (d)(1)",
         "26 CFR 1.501(r)-4(b)(2)"
       ],
       "determination": "free",
@@ -99,7 +99,7 @@
   },
   "notes": "The math would clear free-tier eligibility (~106.5% FPL under Sutter's real 400% line) if the proof were valid -- the point of this case is entirely that it is not.",
   "patient": {
-    "annual_income": 3500000,
+    "annual_income_cents": 3500000,
     "household_size": 4,
     "insured": false,
     "name": "Sam Whitaker",

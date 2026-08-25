@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { USING_MOCK } from "@/lib/api";
+import { useEffect, useState } from "react";
+import { usingMock } from "@/lib/api";
 
 const LINKS = [
   { href: "/", label: "Command Center" },
@@ -12,6 +13,19 @@ const LINKS = [
 
 export function TopNav() {
   const pathname = usePathname();
+  // Resolved once from the server (app/api/config) so this badge reflects
+  // whichever backend the container is actually pointed at right now — not
+  // a value frozen into the JS bundle at build time.
+  const [mock, setMock] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    usingMock().then((v) => {
+      if (!cancelled) setMock(v);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <header className="sticky top-0 z-40 border-b border-ink-800 bg-ink-950/85 backdrop-blur supports-[backdrop-filter]:bg-ink-950/70">
@@ -53,7 +67,7 @@ export function TopNav() {
         </nav>
 
         <div className="ml-auto flex items-center gap-3">
-          {USING_MOCK && (
+          {mock && (
             <span className="hidden rounded-full border border-signal-amber/30 bg-signal-amber/10 px-2.5 py-1 text-[11px] font-medium uppercase tracking-wide text-signal-amber sm:inline-block">
               Mock data layer
             </span>

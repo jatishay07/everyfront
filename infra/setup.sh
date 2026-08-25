@@ -87,6 +87,32 @@ else
   ok "created Firestore database in $REGION"
 fi
 
+# ---------------------------------------------------------------- indexes
+# `GET /events` (contract §3.3) is a CROSS-CASE query: it reads the `events`
+# subcollection of every case at once, ordered by time. Firestore refuses a
+# collection-group query without a collection-group index and returns 400
+# FailedPrecondition, which surfaces as a 500 from the API -- so the live
+# activity feed, the screen the demo is built around, was broken on every
+# request until this existed.
+#
+# gcloud's `indexes fields update` only accepts order/array-config and cannot
+# set queryScope, so this goes through the Firestore Admin REST API directly.
+log "Firestore indexes"
+_index_payload='{"indexConfig":{"indexes":[
+  {"queryScope":"COLLECTION_GROUP","fields":[{"fieldPath":"ts","order":"DESCENDING"}]},
+  {"queryScope":"COLLECTION_GROUP","fields":[{"fieldPath":"ts","order":"ASCENDING"}]},
+  {"queryScope":"COLLECTION","fields":[{"fieldPath":"ts","order":"DESCENDING"}]},
+  {"queryScope":"COLLECTION","fields":[{"fieldPath":"ts","order":"ASCENDING"}]}
+]}}'
+if curl -sS -m 90 -X PATCH \
+    "https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/collectionGroups/events/fields/ts?updateMask=indexConfig" \
+    -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+    -H "Content-Type: application/json" -d "$_index_payload" >/dev/null 2>&1; then
+  ok "events.ts collection-group index (may take a few minutes to build)"
+else
+  printf '    \033[33mwarn\033[0m could not set the events.ts index -- GET /events will 500 until it exists\n'
+fi
+
 # ---------------------------------------------------------------- buckets
 log "GCS buckets"
 for bucket in "ef-documents-${PROJECT_ID}" "ef-datasets-${PROJECT_ID}"; do

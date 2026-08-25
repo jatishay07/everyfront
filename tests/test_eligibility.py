@@ -91,15 +91,75 @@ class TestStateFloors:
         assert r.discounted_threshold_pct == 600  # not lowered to IL's 300
 
     def test_illinois_floor_binds_for_profit_hospitals(self):
-        """210 ILCS 89 reaches every IL hospital, unlike 26 CFR 1.501(r)."""
+        """210 ILCS 89 reaches every IL hospital, unlike 26 CFR 1.501(r).
+
+        400% FPL sits between the general-hospital free floor (200%) and its
+        discount ceiling (600%) -- verified against ilga.gov, 210 ILCS 89/10.
+        """
         for_profit = {
             "free_care_max_fpl_pct": None,
             "discounted_care_max_fpl_pct": None,
             "nonprofit": False,
         }
-        r = screen_eligibility(FPL4_2026 * 2, 4, "IL", for_profit)
+        r = screen_eligibility(FPL4_2026 * 4, 4, "IL", for_profit)
         assert r.determination == "discounted"
         assert any("210 ILCS 89" in c for c in r.citations)
+
+    def test_illinois_general_hospital_free_floor_is_200_pct(self):
+        """The corrected general-hospital floor also sets a FREE tier -- the
+        pre-audit table had no free floor for IL at all."""
+        h = {"free_care_max_fpl_pct": None, "discounted_care_max_fpl_pct": None}
+        r = screen_eligibility(FPL4_2026 * 2, 4, "IL", h)  # 200% FPL, at the line
+        assert r.determination == "free"
+        assert r.free_threshold_pct == 200
+
+    def test_illinois_rural_critical_access_gets_the_lower_tier(self):
+        """A hospital explicitly flagged rural/CAH gets 125%/300%, not 200%/600%."""
+        h = {
+            "free_care_max_fpl_pct": None,
+            "discounted_care_max_fpl_pct": None,
+            "rural_or_critical_access": True,
+        }
+        r = screen_eligibility(FPL4_2026 * 4, 4, "IL", h)  # 400% FPL
+        assert r.determination == "ineligible"  # above the rural 300% discount ceiling
+        assert r.discounted_threshold_pct == 300
+        assert any("rural/critical-access hospital tier applied" in n for n in r.notes)
+
+    def test_illinois_unclassified_hospital_notes_the_assumption(self):
+        """When rural/CAH status is unknown, the general floor applies but the
+        assumption is surfaced rather than presented as a confirmed fact."""
+        h = {"free_care_max_fpl_pct": None, "discounted_care_max_fpl_pct": None}
+        r = screen_eligibility(FPL4_2026 * 4, 4, "IL", h)
+        assert r.discounted_threshold_pct == 600
+        assert any("assuming the more common class" in n for n in r.notes)
+
+    def test_washington_large_system_gets_the_higher_tier(self):
+        h = {
+            "free_care_max_fpl_pct": None,
+            "discounted_care_max_fpl_pct": None,
+            "large_system": True,
+        }
+        r = screen_eligibility(FPL4_2026 * 3, 4, "WA", h)  # 300% FPL
+        assert r.determination == "free"  # large-system free floor is 300%
+        assert r.free_threshold_pct == 300
+
+    def test_washington_default_is_the_smaller_non_large_system_floor(self):
+        h = {"free_care_max_fpl_pct": None, "discounted_care_max_fpl_pct": None}
+        r = screen_eligibility(FPL4_2026 * 3, 4, "WA", h)  # 300% FPL
+        assert r.determination == "discounted"  # non-large-system ceiling is 300%
+        assert r.discounted_threshold_pct == 300
+
+    def test_state_floor_classification_false_is_treated_like_absent(self):
+        """An explicit False is not "unknown" -- it means confirmed non-elevated,
+        so no assumption note should be appended."""
+        h = {
+            "free_care_max_fpl_pct": None,
+            "discounted_care_max_fpl_pct": None,
+            "rural_or_critical_access": False,
+        }
+        r = screen_eligibility(FPL4_2026 * 4, 4, "IL", h)
+        assert r.discounted_threshold_pct == 600
+        assert not any("assuming the more common class" in n for n in r.notes)
 
     def test_for_profit_gets_no_501r_citation(self):
         for_profit = {
@@ -168,11 +228,27 @@ class TestExplainCoversEveryBranch:
 
 class TestFloorEdges:
     def test_floor_with_no_free_tier_leaves_free_alone(self):
-        """IL sets only a discounted floor; the free tier must pass through."""
-        h = {"free_care_max_fpl_pct": 150, "discounted_care_max_fpl_pct": 200}
-        r = screen_eligibility(FPL4_2026, 4, "IL", h)
-        assert r.free_threshold_pct == 150
-        assert r.discounted_threshold_pct == 300
+        """A state floor that sets only a discounted tier must not touch free.
+
+        Neither shipping state currently does this (both CA and the
+        corrected IL table set a free floor too), so this exercises the
+        `floor.free_pct is None` branch with a synthetic state rather than
+        leaving it untested.
+        """
+        from rules.eligibility import StateFloor
+
+        STATE_FLOORS["ZD"] = StateFloor(
+            free_pct=None,
+            discounted_pct=200,
+            citation="Fake Stat. §3 (discount-only floor)",
+        )
+        try:
+            h = {"free_care_max_fpl_pct": 150, "discounted_care_max_fpl_pct": 100}
+            r = screen_eligibility(FPL4_2026, 4, "ZD", h)
+            assert r.free_threshold_pct == 150, "no free floor -- hospital's own number stands"
+            assert r.discounted_threshold_pct == 200, "raised to the state's discount floor"
+        finally:
+            del STATE_FLOORS["ZD"]
 
     def test_hospital_already_above_the_floor_is_untouched(self):
         h = {"free_care_max_fpl_pct": 500, "discounted_care_max_fpl_pct": 700}

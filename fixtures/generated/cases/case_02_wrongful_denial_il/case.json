@@ -45,7 +45,7 @@
       {
         "basis_date": "2026-01-05",
         "basis_field": "first_statement_date",
-        "citation": "26 CFR 1.501(r)-4(b)(1)(iv)",
+        "citation": "26 CFR 1.501(r)-1(b)(3)",
         "days": 240,
         "days_remaining_as_of_2026_08_25": 8,
         "due": "2026-09-02",
@@ -65,7 +65,7 @@
       {
         "basis_date": "2026-01-05",
         "basis_field": "first_statement_date",
-        "citation": "45 CFR 149.620(c)",
+        "citation": "45 CFR 149.620(c)(1)",
         "days": 120,
         "days_remaining_as_of_2026_08_25": -112,
         "due": "2026-05-05",
@@ -83,7 +83,7 @@
     },
     "eligibility": {
       "citations": [
-        "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act; general/non-rural hospital tier)",
         "26 CFR 1.501(r)-4(b)(2)"
       ],
       "determination": "free",
@@ -91,7 +91,8 @@
       "fpl_pct": 184.8429,
       "free_threshold_pct": 250,
       "notes": [
-        "Uninsured patients at or below 300% FPL. Rural/critical-access facilities carry a higher ceiling; not yet encoded -- see TODO."
+        "hospital record does not say whether 'rural_or_critical_access' applies; assuming the more common class (IL base-rate floor) -- confirm before relying on this for an atypical hospital",
+        "General (non-rural) IL hospital floor: 100% charity <=200% FPL, discount <=600% FPL. Rural/critical-access hospitals get a LOWER floor (125%/300%) -- see STATE_FLOORS['IL_RURAL'] and _STATE_FLOOR_ELEVATED below; this default assumes a general hospital when classification is unknown, matching every real IL hospital in this repo's fixtures."
       ]
     },
     "fronts_reference_model": [
@@ -111,7 +112,7 @@
   },
   "notes": "As of currentDate 2026-08-25 the federal 240-day window (due 2026-09-02) is inside its final ~8 days -- a red-chip, close-to-\u22647-day deadline for the demo. Income sits at ~184.8% FPL, under Advocate's real filed 250% free-care line -- the denial was wrong on the merits AND on the documentation.",
   "patient": {
-    "annual_income": 4000000,
+    "annual_income_cents": 4000000,
     "household_size": 2,
     "insured": true,
     "name": "Priya Nandakumar",

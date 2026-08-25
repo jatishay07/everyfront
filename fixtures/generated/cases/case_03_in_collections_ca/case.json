@@ -58,7 +58,7 @@
       {
         "basis_date": "2026-03-10",
         "basis_field": "first_statement_date",
-        "citation": "45 CFR 149.620(c)",
+        "citation": "45 CFR 149.620(c)(1)",
         "days": 120,
         "days_remaining_as_of_2026_08_25": -48,
         "due": "2026-07-08",
@@ -79,7 +79,7 @@
     "denial_check_reference_model": null,
     "eligibility": {
       "citations": [
-        "Cal. Health & Safety Code \u00a7127405",
+        "Cal. Health & Safety Code \u00a7127405(a)(1)(A), (d)(1)",
         "26 CFR 1.501(r)-4(b)(2)"
       ],
       "determination": "free",
@@ -113,7 +113,7 @@
   },
   "notes": "validation_notice_date is 20 days before currentDate 2026-08-25 -- the 30-day validation window (due 2026-09-04) is open but closing, which is exactly the urgency that must sequence ahead of the (in this state, deadline-free) charity-care screen.",
   "patient": {
-    "annual_income": 1800000,
+    "annual_income_cents": 1800000,
     "household_size": 1,
     "insured": false,
     "name": "Denise Okafor",

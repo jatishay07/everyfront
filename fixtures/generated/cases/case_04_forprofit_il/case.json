@@ -34,7 +34,7 @@
       {
         "basis_date": "2026-06-20",
         "basis_field": "first_statement_date",
-        "citation": "26 CFR 1.501(r)-4(b)(1)(iv)",
+        "citation": "26 CFR 1.501(r)-1(b)(3)",
         "days": 240,
         "days_remaining_as_of_2026_08_25": 174,
         "due": "2027-02-15",
@@ -54,7 +54,7 @@
       {
         "basis_date": "2026-06-20",
         "basis_field": "first_statement_date",
-        "citation": "45 CFR 149.620(c)",
+        "citation": "45 CFR 149.620(c)(1)",
         "days": 120,
         "days_remaining_as_of_2026_08_25": 54,
         "due": "2026-10-18",
@@ -64,7 +64,7 @@
       {
         "basis_date": "2026-06-01",
         "basis_field": "discharge_date",
-        "citation": "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        "citation": "210 ILCS 89/15(b) (Hospital Uninsured Patient Discount Act)",
         "days": 90,
         "days_remaining_as_of_2026_08_25": 5,
         "due": "2026-08-30",
@@ -75,17 +75,19 @@
     "denial_check_reference_model": null,
     "eligibility": {
       "citations": [
-        "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)"
+        "210 ILCS 89/10 (Hospital Uninsured Patient Discount Act; general/non-rural hospital tier)"
       ],
       "determination": "discounted",
-      "discounted_threshold_pct": 300,
+      "discounted_threshold_pct": 600,
       "fpl_pct": 231.0536,
-      "free_threshold_pct": null,
+      "free_threshold_pct": 200,
       "notes": [
         "hospital reports no free care threshold",
         "hospital reports no discounted care threshold",
+        "hospital record does not say whether 'rural_or_critical_access' applies; assuming the more common class (IL base-rate floor) -- confirm before relying on this for an atypical hospital",
+        "free-care threshold raised to the IL statutory floor",
         "discounted-care threshold raised to the IL statutory floor",
-        "Uninsured patients at or below 300% FPL. Rural/critical-access facilities carry a higher ceiling; not yet encoded -- see TODO."
+        "General (non-rural) IL hospital floor: 100% charity <=200% FPL, discount <=600% FPL. Rural/critical-access hospitals get a LOWER floor (125%/300%) -- see STATE_FLOORS['IL_RURAL'] and _STATE_FLOOR_ELEVATED below; this default assumes a general hospital when classification is unknown, matching every real IL hospital in this repo's fixtures."
       ]
     },
     "fronts_reference_model": [
@@ -105,7 +107,7 @@
   },
   "notes": "Income is ~231% of FPL for a household of 2 -- at or under the IL statutory 300% discount floor (210 ILCS 89/10; eligibility.py STATE_FLOORS['IL'] applies to for-profits), so screen_eligibility correctly returns 'discounted' via the state floor alone even though hospital.nonprofit is False and the hospital publishes no threshold of its own. discharge_date is included because IL's state discount clock runs from the latest of discharge/service/screening/public-program-denial, not from the billing statement.",
   "patient": {
-    "annual_income": 5000000,
+    "annual_income_cents": 5000000,
     "household_size": 2,
     "insured": false,
     "name": "Marcus Whitfield",
