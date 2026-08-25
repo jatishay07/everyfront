@@ -9,3 +9,6 @@ service-account*.json
 credentials*.json
 token*.json
 .DS_Store
+
+# Agent worktrees -- isolated checkouts, never part of the repo
+.claude/worktrees/
