@@ -32,7 +32,11 @@ def test_serialize_deadline_matches_shape():
     payload = serialize_deadline(charity)
     assert payload["due"] == "2026-08-29"  # +240 days
     assert payload["basis_date"] == "2026-01-01"
-    assert "26 CFR 1.501(r)-4" in payload["citation"]
+    # STATUTE's WO6 citation audit moved the 240-day figure's cite from
+    # 1.501(r)-4 to the defined-term source, 1.501(r)-1(b)(3) (verified
+    # verbatim against law.cornell.edu/cfr/text/26/1.501(r)-4) -- this
+    # assertion just tracks that upstream fix, not a law change of our own.
+    assert "26 CFR 1.501(r)-1(b)(3)" in payload["citation"]
     assert "explain" in payload and isinstance(payload["explain"], str)
 
 

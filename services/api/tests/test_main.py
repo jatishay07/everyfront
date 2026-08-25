@@ -171,6 +171,89 @@ def test_inject_bill_known_fixture_creates_case_and_calls_agent_core(monkeypatch
     assert s.get_hospital("94-0562680") is not None
 
 
+def test_inject_bill_merges_fixture_hospital_fields_into_an_already_seeded_hospital(monkeypatch):
+    """DEFECT (PROOF PR #23 HANDOFF #2): the old code only wrote a fixture's
+    `hospital` dict to Firestore when `store.get_hospital(ein) is None` --
+    "don't clobber LEDGER's real seed." But that meant PROOF's two
+    hand-seeded denial-triage fixtures (case_02, case_08), whose EINs LEDGER
+    HAD already seeded, never got their `fap_required_documents` field
+    persisted at all: Lookup resolves straight from Firestore and
+    agent_core/pipeline.py fully replaces `case["hospital"]` with whatever
+    Lookup found, so a field that was never actually written there vanishes
+    -- reproducing case_08's `insufficient_data` bug non-deterministically
+    depending on which hospital happened to need the fixture-only field.
+
+    Fix: merge in only the keys the existing (real, LEDGER-seeded) record
+    does not already have -- never touch a key LEDGER's real record already
+    carries, but do not silently drop the fixture's own additive data either.
+    """
+    c, s = client_with_store(monkeypatch)
+    ein = "36-2169147"
+    # Simulate LEDGER having already seeded this EIN with real Schedule H data
+    # (no fap_required_documents -- that field is not part of §3.1's schema).
+    s.put_hospital(ein, {"name": "Advocate Christ Medical Center", "nonprofit": True, "state": "IL"})
+
+    fake_fixture = {
+        "patient": {"name": "SYNTHETIC -- TEST", "state": "IL"},
+        "bill": {"hospital_ein": ein, "amount_cents": 1000_00},
+        "hospital": {
+            "ein": ein,
+            "name": "Advocate Christ Medical Center",
+            "nonprofit": True,
+            "fap_required_documents": ["completed application form", "proof of income last 30 days"],
+        },
+        "documents": [],
+    }
+    monkeypatch.setattr(main, "load_fixture", lambda name: fake_fixture)
+
+    async def fake_process(case_id, doc_ids):
+        return {"readers": {}, "lookup": {}, "clock": {}, "auditor": {}, "strategist": {}}
+
+    monkeypatch.setattr(main, "agent_core_process_documents", fake_process)
+
+    resp = c.post("/demo/inject_bill", json={"fixture_name": "case_02_wrongful_denial_il"})
+    assert resp.status_code == 200
+
+    updated = s.get_hospital(ein)
+    # LEDGER's real field is untouched...
+    assert updated["name"] == "Advocate Christ Medical Center"
+    assert updated["state"] == "IL"
+    # ...and the fixture's additive field actually made it into Firestore this
+    # time, where agent_core.agents.lookup will actually see it.
+    assert updated["fap_required_documents"] == [
+        "completed application form",
+        "proof of income last 30 days",
+    ]
+
+
+def test_inject_bill_never_overwrites_an_existing_hospital_field(monkeypatch):
+    """The merge must be additive-only: a fixture's own (possibly stale)
+    hospital field must never clobber LEDGER's real seeded value."""
+    c, s = client_with_store(monkeypatch)
+    ein = "94-6174066"
+    s.put_hospital(ein, {"name": "Stanford Health Care", "nonprofit": True, "mrf_url": "real-url"})
+
+    fake_fixture = {
+        "patient": {"name": "SYNTHETIC -- TEST", "state": "CA"},
+        "bill": {"hospital_ein": ein, "amount_cents": 500_00},
+        "hospital": {"ein": ein, "name": "STALE FIXTURE NAME", "mrf_url": None},
+        "documents": [],
+    }
+    monkeypatch.setattr(main, "load_fixture", lambda name: fake_fixture)
+
+    async def fake_process(case_id, doc_ids):
+        return {"readers": {}, "lookup": {}, "clock": {}, "auditor": {}, "strategist": {}}
+
+    monkeypatch.setattr(main, "agent_core_process_documents", fake_process)
+
+    resp = c.post("/demo/inject_bill", json={"fixture_name": "case_08_lawful_denial_ca"})
+    assert resp.status_code == 200
+
+    updated = s.get_hospital(ein)
+    assert updated["name"] == "Stanford Health Care"  # not clobbered by the fixture
+    assert updated["mrf_url"] == "real-url"
+
+
 def test_get_hospital_404_and_success(monkeypatch):
     c, s = client_with_store(monkeypatch)
     assert c.get("/hospitals/00-0000000").status_code == 404

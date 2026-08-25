@@ -461,6 +461,41 @@ def test_savings_is_audit_only_when_charity_care_does_not_apply(monkeypatch):
     assert s.get_case("c1")["savings_found_cents"] == 210_00
 
 
+def test_savings_found_cents_is_idempotent_across_repeated_cascade_runs(monkeypatch):
+    """DEFECT (persona 5 WO6 task 4): this used to be
+    `(case.get("savings_found_cents") or 0) + combined_cents` -- an
+    ACCUMULATION, not a recomputation. `_run_cascade` can genuinely run more
+    than once for the same case (a redelivered Pub/Sub `case.document.added`,
+    §2.3's own "every handler must tolerate redelivery," or simply a second
+    document arriving via `on_document_added`'s one-cascade-per-document
+    path) -- each run already recomputes the CURRENT total from every
+    document/field on file, so re-running it with nothing new must report
+    the same number, not double it.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_cascade(
+        monkeypatch,
+        hospital={"ein": "1", "name": "Test", "nonprofit": False},
+        findings_total_cents=210_00,
+        denial_check={"ran": False, "reason": "no denial_letter document on file"},
+    )
+    s.create_case("c1", {"patient": {}, "bill": {"amount_cents": 900_00}})
+
+    case = s.get_case("c1")
+    asyncio.run(pipeline._run_cascade("c1", case))
+    assert s.get_case("c1")["savings_found_cents"] == 210_00
+    assert s.get_case("c1")["audit_findings_cents"] == 210_00
+
+    # Simulate redelivery / a second document triggering the same cascade
+    # again with the identical audit facts -- the number must not double.
+    case = s.get_case("c1")
+    asyncio.run(pipeline._run_cascade("c1", case))
+    assert s.get_case("c1")["savings_found_cents"] == 210_00
+    assert s.get_case("c1")["audit_findings_cents"] == 210_00
+
+
 # ---------------------------------------------------------------------------
 # Defect #3: batch document processing runs Reader concurrently and the
 # Lookup->Clock/Auditor->Strategist cascade exactly once, not once per doc.

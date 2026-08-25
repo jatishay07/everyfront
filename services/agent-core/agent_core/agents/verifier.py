@@ -49,8 +49,19 @@ def _facts(case_id: str, case: dict, front: str) -> dict:
                     "document (Reader's cat-photo check failed)"
                 )
                 continue
+            # BUG (verified live on case_01, the demo's own happy path, 2026-08-25):
+            # Reader's JSON-schema extraction returns 0 -- not null -- as its
+            # "field not found" sentinel for an integer field the document never
+            # states (a pay stub has no reason to mention household size at all).
+            # `doc_household is not None` let that 0 sentinel through as if it
+            # were a REAL stated value of zero, so `0 != 3` tripped a false-
+            # positive block on a document that never claimed anything about
+            # household size in the first place. Guarding on truthiness (like
+            # the income check below already does) treats 0/absent as "this
+            # document said nothing" -- the same fix, applied to both fields,
+            # since income has the identical 0-sentinel exposure.
             doc_income = ext.get("annual_income_cents")
-            if doc_income is not None and stated_income:
+            if doc_income and stated_income:
                 tolerance = stated_income * config.VERIFIER_INCOME_TOLERANCE_PCT / 100
                 if abs(doc_income - stated_income) > tolerance:
                     issues.append(
@@ -59,11 +70,7 @@ def _facts(case_id: str, case: dict, front: str) -> dict:
                         f"{config.VERIFIER_INCOME_TOLERANCE_PCT:.0f}% tolerance"
                     )
             doc_household = ext.get("household_size")
-            if (
-                doc_household is not None
-                and stated_household is not None
-                and doc_household != stated_household
-            ):
+            if doc_household and stated_household is not None and doc_household != stated_household:
                 issues.append(
                     f"document {d.get('doc_id')} states household size {doc_household}, "
                     f"case states {stated_household}"
