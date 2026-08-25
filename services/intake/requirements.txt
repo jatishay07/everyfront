@@ -1,0 +1,14 @@
+# RELAY (persona 4). Deliberately self-contained: this service does NOT
+# depend on packages/delivery or packages/rules even though it could import
+# them under pytest (pyproject.toml's `pythonpath` puts both on sys.path) --
+# infra/deploy.sh builds this service with `--source=services/intake`, which
+# scopes the Cloud Build context to this directory alone. A cross-package
+# import that works locally would fail to build in production. See
+# intake/google_auth.py's docstring and the PR's HANDOFF.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+google-cloud-storage==3.13.1
+google-cloud-pubsub==2.39.2
+google-api-python-client==2.199.0
+google-auth==2.57.0
+google-auth-oauthlib==1.4.1
