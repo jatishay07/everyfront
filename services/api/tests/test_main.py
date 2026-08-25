@@ -191,7 +191,9 @@ def test_inject_bill_merges_fixture_hospital_fields_into_an_already_seeded_hospi
     ein = "36-2169147"
     # Simulate LEDGER having already seeded this EIN with real Schedule H data
     # (no fap_required_documents -- that field is not part of §3.1's schema).
-    s.put_hospital(ein, {"name": "Advocate Christ Medical Center", "nonprofit": True, "state": "IL"})
+    s.put_hospital(
+        ein, {"name": "Advocate Christ Medical Center", "nonprofit": True, "state": "IL"}
+    )
 
     fake_fixture = {
         "patient": {"name": "SYNTHETIC -- TEST", "state": "IL"},
@@ -200,7 +202,10 @@ def test_inject_bill_merges_fixture_hospital_fields_into_an_already_seeded_hospi
             "ein": ein,
             "name": "Advocate Christ Medical Center",
             "nonprofit": True,
-            "fap_required_documents": ["completed application form", "proof of income last 30 days"],
+            "fap_required_documents": [
+                "completed application form",
+                "proof of income last 30 days",
+            ],
         },
         "documents": [],
     }
