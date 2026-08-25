@@ -50,7 +50,9 @@ def test_render_filing_pdf_produces_a_real_pdf_not_a_placeholder():
         "patient": {"name": "SYNTHETIC -- TEST", "household_size": 2},
         "bill": {"hospital_ein": "36-2169147", "amount_cents": 123456},
     }
-    pdf_bytes, form_id = delivery_bridge.render_filing_pdf("charity_care", case, {"filing_id": "f1"})
+    pdf_bytes, form_id = delivery_bridge.render_filing_pdf(
+        "charity_care", case, {"filing_id": "f1"}
+    )
     assert form_id == "advocate_fap"
     assert isinstance(pdf_bytes, bytes)
     assert pdf_bytes.startswith(b"%PDF")
