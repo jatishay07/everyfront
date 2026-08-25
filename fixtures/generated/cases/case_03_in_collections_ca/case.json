@@ -113,7 +113,7 @@
   },
   "notes": "validation_notice_date is 20 days before currentDate 2026-08-25 -- the 30-day validation window (due 2026-09-04) is open but closing, which is exactly the urgency that must sequence ahead of the (in this state, deadline-free) charity-care screen.",
   "patient": {
-    "annual_income": 1800000,
+    "annual_income_cents": 1800000,
     "household_size": 1,
     "insured": false,
     "name": "Denise Okafor",

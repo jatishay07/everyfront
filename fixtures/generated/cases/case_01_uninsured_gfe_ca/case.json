@@ -117,7 +117,7 @@
   },
   "notes": "GFE set $700 under the final bill -- comfortably clears the 45 CFR 149.620(b) $400 'substantially in excess' floor.",
   "patient": {
-    "annual_income": 3200000,
+    "annual_income_cents": 3200000,
     "household_size": 3,
     "insured": false,
     "name": "Jordan Alvarez",

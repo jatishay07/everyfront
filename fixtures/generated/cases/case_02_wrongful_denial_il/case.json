@@ -112,7 +112,7 @@
   },
   "notes": "As of currentDate 2026-08-25 the federal 240-day window (due 2026-09-02) is inside its final ~8 days -- a red-chip, close-to-\u22647-day deadline for the demo. Income sits at ~184.8% FPL, under Advocate's real filed 250% free-care line -- the denial was wrong on the merits AND on the documentation.",
   "patient": {
-    "annual_income": 4000000,
+    "annual_income_cents": 4000000,
     "household_size": 2,
     "insured": true,
     "name": "Priya Nandakumar",

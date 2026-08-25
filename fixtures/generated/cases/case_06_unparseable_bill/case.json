@@ -35,7 +35,7 @@
   },
   "notes": "This fixture's document is deliberately not a valid PDF (a truncated byte stream inside a plausible-looking header). Any extractor must fail closed: no hospital_ein, no amount, no dates invented from nothing.",
   "patient": {
-    "annual_income": 2600000,
+    "annual_income_cents": 2600000,
     "household_size": 2,
     "insured": false,
     "name": "Casey Nguyen",

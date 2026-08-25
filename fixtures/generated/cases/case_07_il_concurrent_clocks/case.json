@@ -141,7 +141,7 @@
   },
   "notes": "discharge_date 2026-07-10, first_statement_date 2026-07-20. Relative to currentDate 2026-08-25: IL discount due 2026-10-08 (nearest), ECA moratorium + PPDR both due 2026-11-17 (same 120-day offset from the same basis date -- a real coincidence of the rules, not a fixture error), federal FAP due 2027-03-17 (furthest out). Income ~109.8% FPL clears Advocate's real 250% free line.",
   "patient": {
-    "annual_income": 3000000,
+    "annual_income_cents": 3000000,
     "household_size": 3,
     "insured": false,
     "name": "Aisha Bello",
