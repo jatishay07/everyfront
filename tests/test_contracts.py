@@ -52,6 +52,31 @@ MONEY_FIELDS = {
     "total_billed_cents",
 }
 
+# §3.1 events agent enum. Every agent §4 defines must be able to write to the
+# audit log -- an agent that cannot log is invisible in the activity feed, which
+# is the demo's primary evidence that the fleet did the work.
+EXPECTED_EVENT_AGENTS = {
+    "reader",
+    "lookup",
+    "clock",
+    "auditor",
+    "strategist",
+    "verifier",
+    "filer",
+}
+
+# §3.3 endpoints the dashboard actually consumes.
+EXPECTED_ENDPOINTS = {
+    "GET  /cases",
+    "GET  /cases/{id}",
+    "POST /cases",
+    "POST /cases/{id}/approve_filing",
+    "GET  /dashboard/stats",
+    "POST /demo/inject_bill",
+    "GET  /hospitals/{ein}",
+    "GET  /events",
+}
+
 # §1.2 the four legal fronts -- also the `fronts[].front` enum in §3.1.
 EXPECTED_FRONTS = {"charity_care", "ppdr", "debt_validation", "audit"}
 
@@ -102,4 +127,28 @@ def test_every_money_field_is_denominated_in_cents() -> None:
         assert field in PLAYBOOK, f"§3 money field {field!r} missing from the playbook"
     assert "annual_income," not in PLAYBOOK, (
         "bare `annual_income` reintroduced -- every money field must be _cents"
+    )
+
+
+def test_every_persona_5_agent_can_write_to_the_audit_log() -> None:
+    """§4 defines a Verifier; §3.1's enum omitted it until 2026-08-25.
+
+    An agent that cannot append to cases/{id}/events is invisible in the
+    activity feed -- and the Verifier's blocked-filing decision is exactly the
+    human-in-the-loop moment §4 persona 5 says judges reward.
+    """
+    for agent in EXPECTED_EVENT_AGENTS:
+        assert f'"{agent}"' in PLAYBOOK, f"§3.1 event agent {agent!r} missing"
+
+
+def test_dashboard_endpoints_exist_in_the_contract() -> None:
+    """The UI cannot consume an endpoint §3.3 never promised."""
+    for endpoint in EXPECTED_ENDPOINTS:
+        assert endpoint in PLAYBOOK, f"§3.3 endpoint {endpoint!r} missing"
+
+
+def test_every_stat_is_derivable_from_the_case_shape() -> None:
+    """§3.4 reported unlawful_denials_flagged with no field behind it."""
+    assert "denial_flag" in PLAYBOOK, (
+        "§3.4 reports unlawful_denials_flagged; §3.1 needs denial_flag to derive it"
     )
