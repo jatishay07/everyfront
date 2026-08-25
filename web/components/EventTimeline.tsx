@@ -1,10 +1,11 @@
 "use client";
 
-import { formatDateTime, relativeTime } from "@/lib/format";
+import { formatDateTime, humanizeAction, relativeTime } from "@/lib/format";
 import { useNow } from "@/hooks/useNow";
 import type { CaseEvent } from "@/lib/types";
 import { AgentAvatar } from "./AgentAvatar";
 import { CitationRow } from "./CitationChip";
+import { RichText } from "./RichText";
 
 /**
  * The events/ audit log rendered as a timeline — §4 persona 6 WO2. Newest
@@ -28,13 +29,15 @@ export function EventTimeline({ events }: { events: CaseEvent[] }) {
           </div>
           <div className="min-w-0 flex-1 pb-1">
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-              <span className="text-sm font-semibold text-ink-100">{e.action}</span>
+              <span className="text-sm font-semibold text-ink-100">{humanizeAction(e.action)}</span>
               <span className="text-xs text-ink-500" title={formatDateTime(e.ts)}>
                 {relativeTime(e.ts, now)}
               </span>
             </div>
-            <p className="mt-1 text-sm leading-relaxed text-ink-300">{e.detail}</p>
-            {e.citations.length > 0 && (
+            <p className="mt-1 text-sm leading-relaxed text-ink-300">
+              <RichText text={e.detail} />
+            </p>
+            {(e.citations ?? []).length > 0 && (
               <div className="mt-2">
                 <CitationRow citations={e.citations} />
               </div>

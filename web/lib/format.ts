@@ -79,6 +79,18 @@ export function titleCase(s: string): string {
     .join(" ");
 }
 
+/**
+ * Event `action` strings from the live pipeline are snake_case, sometimes
+ * with a `:sub_kind` suffix (e.g. `select_front:audit`,
+ * `audit_finding:duplicate_line_item`) — verified via curl against the live
+ * API's `events[]`. Freeze-frame readability (§4 persona 6 WO2/WO3) wants
+ * "Select Front: Audit", not the raw wire value.
+ */
+export function humanizeAction(action: string): string {
+  const [base, sub] = action.split(":");
+  return sub ? `${titleCase(base)}: ${titleCase(sub)}` : titleCase(base);
+}
+
 export const FRONT_LABELS: Record<string, string> = {
   charity_care: "Charity Care",
   ppdr: "PPDR",

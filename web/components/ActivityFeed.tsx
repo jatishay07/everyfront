@@ -3,12 +3,13 @@
 import Link from "next/link";
 import { useMemo, useRef, useState } from "react";
 import { getActivityFeed } from "@/lib/api";
-import { AGENT_LABELS, formatDateTime, relativeTime } from "@/lib/format";
+import { AGENT_LABELS, formatDateTime, humanizeAction, relativeTime } from "@/lib/format";
 import { useNow } from "@/hooks/useNow";
 import { usePolling } from "@/hooks/usePolling";
 import type { AgentName, CaseEvent } from "@/lib/types";
 import { AgentAvatar } from "./AgentAvatar";
 import { CitationRow } from "./CitationChip";
+import { RichText } from "./RichText";
 
 const POLL_MS = 3000;
 const AGENTS: AgentName[] = ["reader", "lookup", "clock", "auditor", "strategist", "verifier", "filer"];
@@ -86,7 +87,7 @@ function ActivityRow({ event, now, fresh }: { event: CaseEvent; now: Date; fresh
       <AgentAvatar agent={event.agent} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="text-sm font-semibold text-ink-100">{event.action}</span>
+          <span className="text-sm font-semibold text-ink-100">{humanizeAction(event.action)}</span>
           <Link
             href={`/cases/${event.case_id}`}
             className="text-xs text-signal-blue hover:underline"
@@ -97,8 +98,10 @@ function ActivityRow({ event, now, fresh }: { event: CaseEvent; now: Date; fresh
             {relativeTime(event.ts, now)}
           </span>
         </div>
-        <p className="mt-1 text-sm leading-relaxed text-ink-300">{event.detail}</p>
-        {event.citations.length > 0 && (
+        <p className="mt-1 text-sm leading-relaxed text-ink-300">
+          <RichText text={event.detail} />
+        </p>
+        {(event.citations ?? []).length > 0 && (
           <div className="mt-2">
             <CitationRow citations={event.citations} />
           </div>
