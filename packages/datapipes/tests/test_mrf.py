@@ -7,9 +7,28 @@ development; see the module docstring for what was verified and how.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 from datapipes import mrf
+
+
+class _FakeRawStream:
+    """Minimal file-like object standing in for `requests.Response.raw` in the
+    JSON (ijson) path -- supports `.read(n)` and the `decode_content`
+    attribute `_parse_json_mrf` sets unconditionally."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos = 0
+        self.decode_content = None
+
+    def read(self, n: int = -1) -> bytes:
+        if n is None or n < 0:
+            n = len(self._data) - self._pos
+        chunk = self._data[self._pos : self._pos + n]
+        self._pos += len(chunk)
+        return chunk
 
 
 class _FakeResp:
@@ -93,6 +112,21 @@ def test_parse_csv_mrf_filters_empty_cash_and_matches_code():
     assert prices[0].gross == 140.0
 
 
+def test_parse_csv_mrf_first_row_wins_when_a_code_repeats_at_a_different_price():
+    """Regression: Advocate's real MRF bills CPT 86787 under two different
+    descriptions ("...IGG" then "...IGM" later in the file) at two different
+    cash prices. The first occurrence must win -- not whichever happens to
+    be last -- to match this function's own "first match wins" docstring and
+    docs/SPIKE.md gate (b)'s recorded $140.00/$70.00 figure."""
+    lines = _csv_mrf_lines() + [b"Varicella IgM,86787,CPT,,,,,,,145.00,72.50"]
+    resp = _FakeResp(lines=lines, headers={"Content-Type": "text/csv"})
+    with patch("datapipes.mrf.requests.get", return_value=resp):
+        prices = mrf.fetch_cash_prices("http://example.com/x.csv", ["86787"])
+    assert len(prices) == 1
+    assert prices[0].cash == 70.0
+    assert prices[0].description == "Varicella IgG"
+
+
 def test_parse_csv_mrf_no_codes_requested_present():
     resp = _FakeResp(lines=_csv_mrf_lines(), headers={"Content-Type": "text/csv"})
     with patch("datapipes.mrf.requests.get", return_value=resp):
@@ -103,6 +137,51 @@ def test_parse_csv_mrf_no_codes_requested_present():
 def test_fetch_cash_prices_returns_empty_on_exception():
     with patch("datapipes.mrf.requests.get", side_effect=OSError("boom")):
         assert mrf.fetch_cash_prices("http://example.com/x.csv", ["86787"]) == []
+
+
+def _json_mrf_bytes() -> bytes:
+    doc = {
+        "hospital_name": "Test Hospital",
+        "standard_charge_information": [
+            {
+                "description": "Varicella IgG",
+                "code_information": [{"code": "86787", "type": "CPT"}],
+                "standard_charges": [{"gross_charge": 140.0, "discounted_cash": 70.0}],
+            },
+            {
+                "description": "No cash price on file",
+                "code_information": [{"code": "99999", "type": "CPT"}],
+                "standard_charges": [{"gross_charge": 500.0}],  # trap: no discounted_cash
+            },
+        ],
+    }
+    return json.dumps(doc).encode("utf-8")
+
+
+def test_parse_json_mrf_matches_code_and_cash():
+    resp = _FakeResp(
+        raw=_FakeRawStream(_json_mrf_bytes()), headers={"Content-Type": "application/json"}
+    )
+    with patch("datapipes.mrf.requests.get", return_value=resp):
+        prices = mrf.fetch_cash_prices("http://example.com/x.json", ["86787", "99999"])
+    assert len(prices) == 1
+    assert prices[0].code == "86787"
+    assert prices[0].cash == 70.0
+    assert prices[0].gross == 140.0
+
+
+def test_parse_json_mrf_strips_leading_bom():
+    """Regression: Stanford Health Care's real MRF (docs/SPIKE.md gate (b),
+    confirmed live 2026-08-25) is emitted with a UTF-8 BOM before the opening
+    `{`. Without stripping it, ijson's C backend raises on the first token
+    and `fetch_cash_prices` silently returns [] -- this used to happen for
+    every code on a real, reachable, gate-(b)-verified hospital."""
+    body = b"\xef\xbb\xbf" + _json_mrf_bytes()
+    resp = _FakeResp(raw=_FakeRawStream(body), headers={"Content-Type": "application/json"})
+    with patch("datapipes.mrf.requests.get", return_value=resp):
+        prices = mrf.fetch_cash_prices("http://example.com/x.json", ["86787"])
+    assert len(prices) == 1
+    assert prices[0].cash == 70.0
 
 
 def test_discover_and_fetch_tries_each_pointer_until_one_yields_results():

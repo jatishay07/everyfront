@@ -129,8 +129,8 @@ def _ptp_findings(
     seen: set[tuple[str, str]] = set()
     for a in range(len(lines)):
         for b in range(a + 1, len(lines)):
-            idx_a, code_a, _, _ = lines[a]
-            idx_b, code_b, _, _ = lines[b]
+            idx_a, code_a, _, charge_a = lines[a]
+            idx_b, code_b, _, charge_b = lines[b]
             if code_a == code_b:
                 continue  # identical codes are a duplicate concern, not a PTP conflict
             key = tuple(sorted((code_a, code_b)))
@@ -140,17 +140,31 @@ def _ptp_findings(
             if edit is None:
                 continue
             seen.add(key)
+            # Which billed line actually carries the column-2 (component) code
+            # -- needed to price the finding, not just narrate it.
+            column2_charge = charge_a if code_a == edit.column2_code else charge_b
             if edit.modifier_allowed:
                 desc = (
                     f"{edit.column2_code} is a component of {edit.column1_code} under NCCI PTP "
                     "(edit indicator 1) -- billable together only with an appropriate modifier "
                     "and supporting documentation."
                 )
+                # Indicator 1 pairs CAN be legitimately billed together with a
+                # modifier; without evidence one was used, this is a review
+                # flag, not a certain overcharge -- never assign a dollar
+                # figure here (§4 persona 7 / this work order's #3: an
+                # unsubstantiated finding must not be counted).
+                savings = None
             else:
                 desc = (
                     f"{edit.column2_code} is bundled into {edit.column1_code} under NCCI PTP "
                     "(edit indicator 0) -- these codes may never be billed together."
                 )
+                # Indicator 0: the component code should never have been
+                # billed separately at all, so its own charge IS the
+                # overcharge -- substantiated whenever that line has a usable
+                # charge_cents.
+                savings = column2_charge
             findings.append(
                 AuditFinding(
                     "ptp_conflict",
@@ -158,6 +172,7 @@ def _ptp_findings(
                     desc,
                     _PTP_MUE_CITATION,
                     lines=(idx_a, idx_b),
+                    potential_savings_cents=savings,
                 )
             )
     return findings
@@ -282,3 +297,31 @@ def audit_line_items(
         findings.extend(_cash_price_findings(lines, cash_price_lookup))
 
     return findings
+
+
+def total_savings_cents(findings: list[AuditFinding]) -> int:
+    """The dollar total to report for a caseload (§3.4 `audit_findings_cents`).
+
+    NOT a naive `sum(f.potential_savings_cents for f in findings)` -- two of
+    the four checks can name the *same* line item with two different
+    theories of the same underlying overcharge. Concretely: a duplicate
+    metabolic-panel line and a cash-price-delta finding on that same line
+    both describe money owed back on that one line, computed two different
+    ways (gross-charge-of-the-extra-copy vs. gross-minus-cash-per-copy).
+    Summing both would over-claim -- exactly what this work order's #3
+    forbids ("a judge doing arithmetic on screen must not catch a
+    discrepancy... over-claiming is far worse than under-claiming").
+
+    Instead: split each finding's savings evenly across the lines it names,
+    then for every line take the SINGLE LARGEST substantiated theory that
+    names it (never the sum of overlapping ones), and add up those per-line
+    maxima. A line untouched by any dollar-bearing finding contributes 0.
+    """
+    per_line_max_cents: dict[int, int] = {}
+    for f in findings:
+        if not f.potential_savings_cents or not f.lines:
+            continue
+        share_cents = f.potential_savings_cents // len(f.lines)
+        for idx in f.lines:
+            per_line_max_cents[idx] = max(per_line_max_cents.get(idx, 0), share_cents)
+    return sum(per_line_max_cents.values())

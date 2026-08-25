@@ -21,6 +21,15 @@ actively dangerous while it existed: sys.path ordering let an unqualified
 instead of STATUTE's real, actively-developed package. The explicit insert
 below still forces `packages/rules` (the one true copy) to the front of
 sys.path -- cheap insurance against anything else ever shadowing it again.
+
+LEDGER WO6: `packages/datapipes` is now also inserted, matching
+`infra/deploy.sh`'s `pkgs_for agent-core` (amended this same work order to
+include `datapipes` -- it previously only listed `rules delivery`, which is
+exactly why `mrf_cache`/`ncci_cache` were unconditionally unavailable in the
+deployed container; see those modules' docstrings). Tests that want to cover
+the "datapipes isn't bundled" degradation path explicitly monkeypatch the
+relevant module attribute rather than relying on sys.path -- see
+test_mrf_cache.py / test_ncci_cache.py.
 """
 
 from __future__ import annotations
@@ -33,3 +42,4 @@ _REPO_ROOT = _AGENT_CORE_DIR.parent.parent
 
 sys.path.insert(0, str(_AGENT_CORE_DIR))
 sys.path.insert(0, str(_REPO_ROOT / "packages" / "rules"))
+sys.path.insert(0, str(_REPO_ROOT / "packages" / "datapipes"))

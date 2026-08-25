@@ -197,8 +197,10 @@ def audit_line_items(
     """Contract §3.5. `*_lookup` callables come from LEDGER's NCCI/MRF tables
     (packages/datapipes) when available; `audit_line_items` degrades
     gracefully (skips the check that lookup feeds) when a lookup is None --
-    see rules.audit's docstring. LEDGER has not shipped those tables in this
-    repo yet, so agent_core always calls this with the defaults (None) today.
+    see rules.audit's docstring. WO6: LEDGER's NCCI table now ships bundled
+    with the package (`datapipes.ncci.load_default`) and the MRF fetcher has
+    been live since WO5 -- `agent_core.ncci_cache` / `agent_core.mrf_cache`
+    build the real callables the Auditor passes here.
     """
     return _audit_line_items(
         items,
@@ -206,6 +208,30 @@ def audit_line_items(
         mue_lookup=mue_lookup,
         cash_price_lookup=cash_price_lookup,
     )
+
+
+def _fallback_total_savings_cents(findings: list) -> int:
+    """Naive sum -- only used if `rules.audit.total_savings_cents` fails to
+    import at all. Real callers get the overlap-safe version; see that
+    function's docstring for why summing blindly over-claims.
+    """
+    return sum(f.potential_savings_cents or 0 for f in findings if f.potential_savings_cents)
+
+
+try:
+    from rules.audit import total_savings_cents as _total_savings_cents
+
+    TOTAL_SAVINGS_SOURCE = "rules.audit.total_savings_cents (STATUTE/LEDGER WO6)"
+except ImportError:
+    _total_savings_cents = _fallback_total_savings_cents
+    TOTAL_SAVINGS_SOURCE = "SWARM fallback -- rules.audit.total_savings_cents failed to import"
+
+
+def total_savings_cents(findings: list) -> int:
+    """The §3.4 `audit_findings_cents` dollar figure for a caseload -- overlap-
+    safe (see `rules.audit.total_savings_cents`), never a naive sum.
+    """
+    return _total_savings_cents(findings)
 
 
 # --------------------------------------------------------------------------
@@ -290,6 +316,7 @@ def bridge_sources() -> dict[str, str]:
         "select_fronts": SELECT_FRONTS_SOURCE,
         "audit_line_items": AUDIT_SOURCE,
         "check_denial_lawfulness": DENIAL_SOURCE,
+        "total_savings_cents": TOTAL_SAVINGS_SOURCE,
     }
 
 
@@ -303,4 +330,5 @@ __all__ = [
     "compute_deadlines",
     "screen_eligibility",
     "select_fronts",
+    "total_savings_cents",
 ]

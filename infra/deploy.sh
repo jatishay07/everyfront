@@ -46,10 +46,19 @@ src_for() {
 # Duplicating the packages into each service is not an option for the rules
 # engine -- §2.1 makes it the single source of truth for the law, and two copies
 # drift. So we stage a build context containing the service plus what it needs.
+#
+# LEDGER WO6: agent-core previously omitted `datapipes` here, so its own
+# `mrf_cache`/`ncci_cache` modules were unconditionally unavailable in the
+# deployed container -- confirmed live: `demo/inject_bill` reported
+# `cash_price_source: "skipped -- packages/datapipes not importable"` for
+# every case, and the NCCI PTP/MUE checks had no table to query even once
+# wired. `datapipes` carries a bundled, offline NCCI snapshot (no network at
+# runtime) plus the live MRF fetcher used as a fallback -- see those two
+# modules' docstrings in services/agent-core/agent_core/.
 pkgs_for() {
   case "$1" in
     intake)     echo "delivery" ;;
-    agent-core) echo "rules delivery" ;;
+    agent-core) echo "rules delivery datapipes" ;;
     api)        echo "rules" ;;
     *)          echo "" ;;
   esac

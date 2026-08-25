@@ -3,11 +3,20 @@
 Covers NCCI PTP conflicts, MUE unit ceilings, exact-duplicate lines, and the
 cash-price delta -- each independently gated on whether a lookup was injected,
 per the module's "LEDGER's table may not exist yet" design.
+
+LEDGER's WO6 audit fix added two things beyond that original scope, tested
+below: (1) a definite-indicator (modifier_allowed=False) PTP conflict now
+carries a dollar figure -- the column-2 line's own charge, since that code
+should never have been billed at all; an indicator-1 conflict still carries
+none, since a modifier could make it legitimate and we have no evidence
+either way; (2) `total_savings_cents`, which prevents double-counting when
+two different checks name the same line with two different overcharge
+theories.
 """
 
 from __future__ import annotations
 
-from rules.audit import AuditFinding, PTPEdit, audit_line_items
+from rules.audit import AuditFinding, PTPEdit, audit_line_items, total_savings_cents
 
 
 def _known_pair_lookup(a: str, b: str) -> PTPEdit | None:
@@ -93,6 +102,61 @@ class TestPTP:
         items = [{"code": "A"}, {"code": "B"}, {"code": "A"}, {"code": "B"}]
         findings = audit_line_items(items, ptp_lookup=lookup)
         assert len([f for f in findings if f.kind == "ptp_conflict"]) == 1
+
+    def test_indicator_zero_prices_the_column2_line_as_the_overcharge(self):
+        """Never-billable-together: the component code should never have
+        appeared at all, so its own charge is a certain overcharge."""
+
+        def lookup(a, b):
+            return (
+                PTPEdit("99213", "36415", modifier_allowed=False)
+                if {a, b}
+                == {
+                    "99213",
+                    "36415",
+                }
+                else None
+            )
+
+        items = [
+            {"code": "99213", "units": 1, "charge_cents": 10_000},
+            {"code": "36415", "units": 1, "charge_cents": 3_500},
+        ]
+        findings = audit_line_items(items, ptp_lookup=lookup)
+        ptp = [f for f in findings if f.kind == "ptp_conflict"][0]
+        assert ptp.potential_savings_cents == 3_500
+
+    def test_indicator_zero_with_no_charge_on_the_component_line_stays_unpriced(self):
+        def lookup(a, b):
+            return (
+                PTPEdit("99213", "36415", modifier_allowed=False)
+                if {a, b}
+                == {
+                    "99213",
+                    "36415",
+                }
+                else None
+            )
+
+        items = [{"code": "99213", "charge_cents": 10_000}, {"code": "36415"}]
+        findings = audit_line_items(items, ptp_lookup=lookup)
+        ptp = [f for f in findings if f.kind == "ptp_conflict"][0]
+        assert ptp.potential_savings_cents is None
+
+    def test_indicator_one_never_carries_a_dollar_figure(self):
+        """Billable together with a modifier -- without evidence one was
+        used, this stays a review flag, never a priced finding."""
+
+        def lookup(a, b):
+            return PTPEdit("A", "B", modifier_allowed=True) if {a, b} == {"A", "B"} else None
+
+        items = [
+            {"code": "A", "charge_cents": 100_00},
+            {"code": "B", "charge_cents": 50_00},
+        ]
+        findings = audit_line_items(items, ptp_lookup=lookup)
+        ptp = [f for f in findings if f.kind == "ptp_conflict"][0]
+        assert ptp.potential_savings_cents is None
 
 
 class TestMUE:
@@ -275,3 +339,61 @@ class TestExplain:
     def test_explain_omits_savings_when_zero(self):
         finding = AuditFinding("duplicate", ("A",), "desc", "cite", potential_savings_cents=0)
         assert "Potential overcharge" not in finding.explain()
+
+
+class TestTotalSavingsCents:
+    def test_disjoint_findings_simply_sum(self):
+        findings = [
+            AuditFinding("duplicate", ("A",), "d", "c", lines=(0, 1), potential_savings_cents=500),
+            AuditFinding(
+                "cash_price_delta", ("B",), "d", "c", lines=(2,), potential_savings_cents=300
+            ),
+        ]
+        assert total_savings_cents(findings) == 800
+
+    def test_overlapping_findings_on_the_same_line_take_the_max_not_the_sum(self):
+        """Real shape from case_07: a duplicate metabolic-panel pair (lines
+        3,4) AND a per-line cash-price delta on each of those same two lines
+        -- two theories about the same overcharge must not stack."""
+        findings = [
+            AuditFinding(
+                "duplicate", ("80053",), "d", "c", lines=(3, 4), potential_savings_cents=22_000
+            ),
+            AuditFinding(
+                "cash_price_delta",
+                ("80053",),
+                "d",
+                "c",
+                lines=(3,),
+                potential_savings_cents=11_250,
+            ),
+            AuditFinding(
+                "cash_price_delta",
+                ("80053",),
+                "d",
+                "c",
+                lines=(4,),
+                potential_savings_cents=11_250,
+            ),
+        ]
+        # duplicate's $220 splits into $110/line; cash-price's $112.50/line
+        # wins on each line (larger) -> $225 total, not $220 + $225 = $445.
+        assert total_savings_cents(findings) == 22_500
+
+    def test_findings_with_no_savings_or_no_lines_are_ignored(self):
+        findings = [
+            AuditFinding("ptp_conflict", ("A", "B"), "d", "c", lines=(0, 1)),
+            AuditFinding("duplicate", ("A",), "d", "c", potential_savings_cents=100),
+        ]
+        assert total_savings_cents(findings) == 0
+
+    def test_empty_findings_list_is_zero(self):
+        assert total_savings_cents([]) == 0
+
+    def test_single_finding_on_a_single_line(self):
+        findings = [
+            AuditFinding(
+                "cash_price_delta", ("A",), "d", "c", lines=(0,), potential_savings_cents=7_000
+            )
+        ]
+        assert total_savings_cents(findings) == 7_000

@@ -1,14 +1,15 @@
 """agent_core.mrf_cache -- bounded, cached cash-price lookups for the
 cash-price-delta component of `savings_found_cents` (defect #1).
 
-`packages/datapipes` is not on this test suite's sys.path (see
-services/agent-core/tests/conftest.py -- only packages/rules is forced onto
-it, matching what agent-core's own Cloud Run build context bundles today), so
-`mrf_cache._fetch_cash_prices` is None in this process exactly like it would
-be in production. Every test here monkeypatches that module attribute
-directly rather than relying on a real `datapipes` import, so the caching/
-timeout/degradation LOGIC is covered regardless of whether datapipes happens
-to be importable in a given environment.
+WO6 update: `packages/datapipes` IS now on this test suite's sys.path (see
+services/agent-core/tests/conftest.py) and IS bundled into agent-core's
+Cloud Run build context (`infra/deploy.sh`'s `pkgs_for agent-core`) -- so
+`mrf_cache._fetch_cash_prices` resolves to the real function in this process
+now, same as production. Every test here still monkeypatches that module
+attribute directly rather than relying on the real network call, so the
+caching/timeout/degradation LOGIC is covered deterministically regardless of
+network access, and independently of whether datapipes happens to be
+importable in a given environment.
 """
 
 from __future__ import annotations
