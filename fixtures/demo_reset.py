@@ -283,12 +283,30 @@ def reseed(api_url: str, project: str) -> int:
     return 0
 
 
+def _default_bucket_name() -> str:
+    """The documents bucket to purge -- `GCS_DOCUMENTS_BUCKET` if set,
+    otherwise infra/setup.sh's actual naming convention
+    (`ef-documents-${PROJECT_ID}`, infra/setup.sh:118), NOT the bare
+    `ef-documents` this used to fall back to. That bucket does not exist in
+    the deployed project (confirmed live, 2026-08-25: only
+    `ef-documents-everyfront-hack-2026`, `ef-datasets-everyfront-hack-2026`,
+    and a Cloud Run source-staging bucket exist) -- an operator who forgot to
+    export GCS_DOCUMENTS_BUCKET got a 404 NotFound instead of a purge.
+    Falls back to the bare name only when GOOGLE_CLOUD_PROJECT itself isn't
+    set either, which only happens for `plan()`'s offline --dry-run display
+    (nothing is touched there regardless).
+    """
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
+    default = f"ef-documents-{project}" if project else "ef-documents"
+    return os.environ.get("GCS_DOCUMENTS_BUCKET", default)
+
+
 def plan(hospitals: dict) -> list[str]:
     """The fixed sequence of actions a real reset (+ reseed) performs, in
     order. Pure and offline so both `--dry-run` and the test suite can check
     it without touching GCP.
     """
-    bucket_name = os.environ.get("GCS_DOCUMENTS_BUCKET", "ef-documents")
+    bucket_name = _default_bucket_name()
     lines = [
         f"delete all docs in {c}/ (+ their documents/ and events/ subcollections)"
         for c in RESET_COLLECTIONS
@@ -339,7 +357,7 @@ def real_reset(*, do_reseed: bool) -> int:
         n = _delete_collection(client, coll)
         print(f"  deleted {n} doc(s) from {coll}/ (+ their documents/ and events/ subcollections)")
 
-    bucket_name = os.environ.get("GCS_DOCUMENTS_BUCKET", "ef-documents")
+    bucket_name = _default_bucket_name()
     gcs = storage.Client(project=project)
     bucket = gcs.bucket(bucket_name)
     blobs = list(bucket.list_blobs(prefix=GCS_DEMO_PREFIX))
