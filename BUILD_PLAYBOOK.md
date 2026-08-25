@@ -89,7 +89,11 @@ everyfront/
 ## 3.1 Firestore collections
 ```
 cases/{case_id}
-  patient: {name, household_size, annual_income, insured: bool, state}       # synthetic
+  patient: {name, household_size, annual_income_cents, insured: bool, state}  # synthetic
+           # AMENDED 2026-08-25 (FORGE): was `annual_income`, the only money field
+           # in §3.1 without a _cents suffix. Ambiguity is a silent 100x bug -- read
+           # as cents, a $60,000 household becomes $600 and screens as free-care
+           # eligible. Every money field in this contract is now cents, always.
   bill: {hospital_ein, hospital_ccn, provider_name, amount_cents, service_date,
          first_statement_date, gfe_amount_cents|null, in_collections: bool,
          collector_name|null, validation_notice_date|null}

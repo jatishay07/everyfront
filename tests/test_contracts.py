@@ -40,6 +40,18 @@ EXPECTED_STAT_KEYS = {
     "human_hours",
 }
 
+# Every money field in §3.1 is denominated in CENTS. Mixing units silently is a
+# 100x error in a number that decides whether someone's bill gets erased, so the
+# suffix is load-bearing rather than stylistic.
+MONEY_FIELDS = {
+    "annual_income_cents",
+    "amount_cents",
+    "gfe_amount_cents",
+    "savings_found_cents",
+    "audit_findings_cents",
+    "total_billed_cents",
+}
+
 # §1.2 the four legal fronts -- also the `fronts[].front` enum in §3.1.
 EXPECTED_FRONTS = {"charity_care", "ppdr", "debt_validation", "audit"}
 
@@ -78,3 +90,16 @@ def test_locked_model_ids_are_declared() -> None:
     for model in ("gemini-3.7-flash", "gemma-4-26b-a4b-it"):
         assert model in PLAYBOOK, f"§1.4 model {model!r} missing from playbook"
         assert model in ENV_EXAMPLE, f"§1.4 model {model!r} missing from .env.example"
+
+
+def test_every_money_field_is_denominated_in_cents() -> None:
+    """A money field without a _cents suffix is a unit ambiguity waiting to bite.
+
+    `annual_income` was exactly that until 2026-08-25 -- the only money field in
+    §3.1 lacking the suffix, which invited a reader to pass dollars.
+    """
+    for field in MONEY_FIELDS:
+        assert field in PLAYBOOK, f"§3 money field {field!r} missing from the playbook"
+    assert "annual_income," not in PLAYBOOK, (
+        "bare `annual_income` reintroduced -- every money field must be _cents"
+    )
