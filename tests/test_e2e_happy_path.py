@@ -30,10 +30,15 @@ from __future__ import annotations
 import os
 import time
 
-import httpx
 import pytest
 
 pytestmark = pytest.mark.e2e
+
+# `-m "not e2e"` filters by marker, but pytest still IMPORTS every test module
+# during collection -- so a module-level `import httpx` fails the whole run in
+# CI, where httpx is not installed, before the marker is ever consulted.
+# importorskip defers that to collection-with-skip instead of collection-error.
+httpx = pytest.importorskip("httpx", reason="e2e only; not installed in PR CI")
 
 API_URL = os.environ.get("EVERYFRONT_STAGING_API_URL", "").rstrip("/")
 PROJECT = os.environ.get("GOOGLE_CLOUD_PROJECT", "")
