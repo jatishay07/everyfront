@@ -89,7 +89,11 @@ everyfront/
 ## 3.1 Firestore collections
 ```
 cases/{case_id}
-  patient: {name, household_size, annual_income, insured: bool, state}       # synthetic
+  patient: {name, household_size, annual_income_cents, insured: bool, state}  # synthetic
+           # AMENDED 2026-08-25 (FORGE): was `annual_income`, the only money field
+           # in §3.1 without a _cents suffix. Ambiguity is a silent 100x bug -- read
+           # as cents, a $60,000 household becomes $600 and screens as free-care
+           # eligible. Every money field in this contract is now cents, always.
   bill: {hospital_ein, hospital_ccn, provider_name, amount_cents, service_date,
          first_statement_date, gfe_amount_cents|null, in_collections: bool,
          collector_name|null, validation_notice_date|null}
@@ -98,6 +102,9 @@ cases/{case_id}
   fronts: [{front: "charity_care"|"ppdr"|"debt_validation"|"audit",
             applicable: bool, reason: str, deadline: date|null,
             status: "open"|"filed"|"won"|"lost"|"na"}]
+  denial_flag: bool                      # AMENDED 2026-08-25 (FORGE): §3.4 reports
+           # unlawful_denials_flagged but nothing in this shape let you derive it.
+           # Set by check_denial_lawfulness (26 CFR 1.501(r)-4(b)(3)).
   savings_found_cents: int
   created_at, updated_at
 
@@ -107,7 +114,10 @@ cases/{case_id}/documents/{doc_id}
   gcs_uri, extracted: {…}, verified: bool|null, verification_notes: str
 
 cases/{case_id}/events/{event_id}          # the audit log — the UI activity feed reads this
-  ts, agent: "reader"|"lookup"|"clock"|"auditor"|"strategist"|"filer",
+  ts, agent: "reader"|"lookup"|"clock"|"auditor"|"strategist"|"verifier"|"filer",
+           # AMENDED 2026-08-25 (FORGE): "verifier" was missing though §4 persona 5
+           # defines a Verifier agent. Its blocked-filing decision is the
+           # human-in-the-loop moment the rubric rewards, and it had nowhere to log.
   action: str, detail: str, citations: [str]
 
 hospitals/{ein}
@@ -136,6 +146,11 @@ POST /cases/{id}/approve_filing     {front}        # human-in-the-loop gate
 GET  /dashboard/stats               → the demo number (see §3.4)
 POST /demo/inject_bill              {fixture_name} # drives the live demo
 GET  /hospitals/{ein}
+GET  /events?limit&agent          → global cross-case event stream    # ADDED 2026-08-25
+           # The live activity feed (§4 persona 6 WO3, "the demo's money shot") is
+           # cross-case; /cases/{id} only ever exposed one case's events.
+POST /cases                       {patient, bill} → case_id           # ADDED 2026-08-25
+           # The intake flow (§4 persona 6 WO4) had no way to create a case.
 ```
 
 ## 3.4 The demo stat object (everything feeds this — it's the 40% criterion on screen)

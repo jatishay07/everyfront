@@ -121,6 +121,47 @@ else
   gcloud pubsub topics create dead-letter >/dev/null; ok "dead-letter"
 fi
 
+# ---------------------------------------------------------------- subscriptions
+# ATLAS WO1 acceptance names "topics + push subscriptions". Topics alone are
+# INERT: nothing is ever delivered until something subscribes. Created here as
+# pull subscriptions; deploy.sh converts them to push once the Cloud Run URLs
+# exist, because a push endpoint cannot be named before the service is deployed.
+#
+# Every one carries a dead-letter policy. Agreement §2.3 requires handlers to
+# tolerate redelivery -- but a poison message must not redeliver forever.
+log "Pub/Sub subscriptions"
+SUB_RECORDS="
+intake.email.received|ef-intake-email
+case.document.added|ef-document-added
+case.analysis.complete|ef-analysis-complete
+filing.requested|ef-filing-requested
+filing.completed|ef-filing-completed
+"
+while IFS='|' read -r topic sub; do
+  [ -z "$topic" ] && continue
+  if gcloud pubsub subscriptions describe "$sub" >/dev/null 2>&1; then
+    skip "$sub"
+  else
+    gcloud pubsub subscriptions create "$sub" \
+      --topic="$topic" \
+      --ack-deadline=60 \
+      --message-retention-duration=1d \
+      --dead-letter-topic=dead-letter \
+      --max-delivery-attempts=5 >/dev/null
+    ok "$sub -> $topic"
+  fi
+done <<< "$SUB_RECORDS"
+
+# The dead-letter topic needs a subscription of its own, or dead-lettered
+# messages are silently dropped -- which defeats the point of having one.
+if gcloud pubsub subscriptions describe ef-dead-letter >/dev/null 2>&1; then
+  skip "ef-dead-letter"
+else
+  gcloud pubsub subscriptions create ef-dead-letter --topic=dead-letter \
+    --message-retention-duration=7d >/dev/null
+  ok "ef-dead-letter -> dead-letter"
+fi
+
 # ---------------------------------------------------------------- service accounts
 log "Service accounts (least privilege)"
 # macOS ships bash 3.2, which has no associative arrays. Parallel
