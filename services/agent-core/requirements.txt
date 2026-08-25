@@ -13,3 +13,23 @@ uvicorn[standard]==0.52.4
 # agent_core/pubsub_client.py) so local dev and CI never need real credentials.
 google-cloud-firestore==2.29.0
 google-cloud-pubsub==2.39.2
+
+# BUG (persona 5 WO6 task 1, found live 2026-08-25): `infra/deploy.sh` stages
+# packages/delivery's SOURCE into this service's build context (see
+# `pkgs_for`), but this service's own Dockerfile only ever
+# `pip install -r requirements.txt` from THIS file -- RELAY's
+# `packages/delivery/requirements.txt` is never installed here. Locally this
+# never surfaced (pypdf/reportlab were already in the dev venv from working
+# in the monorepo), so every test and manual run rendered real PDFs fine --
+# but the deployed container had `delivery.pdf.engine`/`delivery.vendors.*`
+# importable while their actual runtime dependencies were entirely missing,
+# and both are imported lazily (see packages/delivery/pdf/engine.py's own
+# docstring for why) so nothing failed until the FIRST real filing request:
+# `ModuleNotFoundError: No module named 'pypdf'` inside `_fill_acroform`,
+# 500ing every `approve_filing` call. Versions match
+# packages/delivery/requirements.txt exactly -- one source of truth for RELAY's
+# own pins, duplicated here only because Docker has no cross-service install.
+pypdf==6.16.2
+reportlab==5.0.1
+requests==2.34.2
+google-cloud-storage==3.13.1

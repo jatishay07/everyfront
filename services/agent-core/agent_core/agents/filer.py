@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import uuid
 
-from .. import config, delivery_bridge
+from .. import config, delivery_bridge, document_storage
 from ..store import store
 from . import common
 
@@ -45,9 +45,24 @@ CHANNEL_BY_FRONT = {
 }
 
 # Real-world destination would be the C2C fax line for PPDR (888-610-4092,
-# §1.2) or the hospital's/collector's mailing address for the rest. Test-mode
-# only, per RELAY's guardrail (persona 4): never a real hospital destination.
+# §1.2) or the hospital's/collector's mailing address for the rest -- recorded
+# here, and in every filing's audit trail, purely for the record.
 PPDR_FAX_NUMBER = "888-610-4092"
+
+# BUG (verified live, persona 5 WO6 task 1): `packages/delivery/vendors/
+# allowlist.py` enforces RELAY's own guardrail ("never send to a real
+# hospital fax number or address") IN CODE, unconditionally -- even
+# FakeFaxVendor/FakeMailVendor call `assert_*_destination_allowed` before
+# recording a send. It was never going to accept the REAL C2C fax number
+# above, or a destination dict shaped `{"name", "test_mode"}` with no
+# `line1`/`city`/`state`/`zip` at all (what this module used to build for
+# every mail-channel front) -- every `approve_filing` call for every front
+# raised `UnsafeDestinationError` before a filing could ever be recorded.
+# The fix is to send test-mode to RELAY's own documented allowlisted
+# destinations (NANP 555-01XX for fax, ZIP 000XX for mail) and log the real
+# destination in the filing/event record instead of trying to reach it.
+_TEST_FAX_DESTINATION = "+18005550142"  # NANP 555-0142: reserved-fictional, RELAY-allowlisted
+_TEST_MAIL_ADDRESS = {"line1": "1 Demo Plaza", "city": "Sandbox", "state": "CA", "zip": "00000"}
 
 
 async def run(case_id: str, case: dict, front: str, filing_id: str | None = None) -> dict:
@@ -66,14 +81,13 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         },
     )
 
-    destination = (
-        PPDR_FAX_NUMBER
-        if channel == "fax"
-        else {
-            "name": (case.get("hospital") or {}).get("name", "unknown hospital"),
-            "test_mode": True,
-        }
-    )
+    hospital_name = (case.get("hospital") or {}).get("name", "unknown hospital")
+    if channel == "fax":
+        destination = _TEST_FAX_DESTINATION
+        real_destination = PPDR_FAX_NUMBER
+    else:
+        destination = {"name": hospital_name, **_TEST_MAIL_ADDRESS}
+        real_destination = hospital_name
     vendor_result = delivery_bridge.deliver(
         filing_id=filing_id,
         case_id=case_id,
@@ -81,6 +95,31 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         pdf=pdf_bytes,
         destination=destination,
         channel=channel,
+    )
+
+    # Task 2 (persona 5 WO6): save the real filled PDF Filer just rendered as
+    # a case document -- contract §3.1's `generated_application`/
+    # `generated_letter`, exactly the artifact CANVAS's document gallery
+    # exists to show a judge. `gcs_uri` degrades to `None` (never raises) if
+    # no bucket is configured; the document record still gets created either
+    # way so "a filing happened" always has a corresponding document.
+    gcs_uri = document_storage.upload_pdf(case_id, filing_id, form_id, pdf_bytes)
+    doc_type = document_storage.doc_type_for_front(front)
+    doc_id = store.add_document(
+        case_id,
+        {
+            "type": doc_type,
+            "gcs_uri": gcs_uri,
+            "extracted": {
+                "front": front,
+                "form_id": form_id,
+                "filing_id": filing_id,
+                "channel": channel,
+                "pdf_bytes": len(pdf_bytes),
+            },
+            "verified": None,
+            "verification_notes": "",
+        },
     )
 
     filing = {
@@ -91,6 +130,9 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         "status": vendor_result.get("status", "sent"),
         "form_id": form_id,
         "pdf_bytes": len(pdf_bytes),
+        "doc_id": doc_id,
+        "gcs_uri": gcs_uri,
+        "real_destination": real_destination,
         "proof": {
             k: v
             for k, v in vendor_result.items()
@@ -109,6 +151,9 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         "simulated": bool(vendor_result.get("simulated")),
         "form_id": form_id,
         "pdf_bytes": len(pdf_bytes),
+        "doc_id": doc_id,
+        "gcs_uri": gcs_uri,
+        "real_destination": real_destination,
     }
     tool = common.make_fact_tool(
         "get_filer_result",

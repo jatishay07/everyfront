@@ -226,11 +226,37 @@ async def inject_bill(req: InjectBillRequest) -> dict:
 
     case_id = f"demo-{req.fixture_name}-{uuid.uuid4().hex[:8]}"
     hospital = fixture.get("hospital")
-    if hospital and store.get_hospital(hospital["ein"]) is None:
-        # Don't clobber LEDGER's real 200-hospital Firestore seed (WO1) for an
-        # EIN it already has -- only fill in the gap for a hospital this
-        # deployment doesn't know about yet.
-        store.put_hospital(hospital["ein"], {k: v for k, v in hospital.items() if k != "ein"})
+    if hospital:
+        ein = hospital["ein"]
+        existing = store.get_hospital(ein)
+        fixture_fields = {k: v for k, v in hospital.items() if k != "ein"}
+        if existing is None:
+            # Don't clobber LEDGER's real 200-hospital Firestore seed (WO1) for
+            # an EIN it already has -- only fill in the gap for a hospital this
+            # deployment doesn't know about yet.
+            store.put_hospital(ein, fixture_fields)
+        else:
+            # DEFECT (PROOF PR #23 HANDOFF item #2): the old `is None` guard
+            # above meant a hospital LEDGER had ALREADY seeded -- which case_02
+            # (Advocate Christ, real schedule_h data) and case_08 (Stanford,
+            # estimated-floor data) both are -- never got PROOF's per-fixture
+            # `fap_required_documents` written to Firestore at all: the demo's
+            # own denial-triage fixtures depend on `hospitals/{ein}` carrying a
+            # field the real contract has no place for yet (see auditor.py's
+            # docstring). Once Lookup resolves the hospital straight from
+            # Firestore (agent_core/pipeline.py's cascade fully replaces
+            # `case["hospital"]` with that resolved record), a field that was
+            # never actually persisted vanishes -- reproducing exactly as
+            # "insufficient_data" for one denial fixture but not the other,
+            # depending on incidental cache/resolution timing rather than any
+            # real difference between the two structurally identical cases.
+            # Fix: merge in only the keys LEDGER's real record does not
+            # already have (never clobber real seeded data) so both denial
+            # fixtures consistently carry their hand-seeded doc list into the
+            # actual record Lookup reads.
+            extra = {k: v for k, v in fixture_fields.items() if k not in existing}
+            if extra:
+                store.put_hospital(ein, {**existing, **extra})
 
     store.create_case(case_id, {"patient": fixture["patient"], "bill": fixture["bill"]})
 

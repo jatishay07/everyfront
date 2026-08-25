@@ -33,9 +33,12 @@ def test_proof_corpus_loads_if_present():
         return
     assert fixture["patient"]["state"] == "CA"
     assert fixture["patient"]["insured"] is False
-    # PROOF's corpus predates annual_income -> annual_income_cents; both keys
-    # must carry the same (already-cents) value.
-    assert fixture["patient"]["annual_income_cents"] == fixture["patient"]["annual_income"]
+    # PROOF's WO5 (PR #23) fixed the bare `annual_income` key at the source
+    # (fixtures/cases_data.py) rather than leaving `_load_proof_case`'s
+    # both-keys shim as the only place carrying `annual_income_cents` -- the
+    # generated corpus now only ever has the _cents key.
+    assert fixture["patient"]["annual_income_cents"] > 0
+    assert "annual_income" not in fixture["patient"]
     assert fixture["bill"]["hospital_ein"] == "94-0562680"
     assert fixture["hospital"]["name"] == "Sutter Bay Hospitals"
     doc_types = [d["type"] for d in fixture["documents"]]
