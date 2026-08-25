@@ -7,6 +7,9 @@ case.document.added fires") without actually needing a live Gmail account.
 
 from __future__ import annotations
 
+import io
+
+import pypdf
 from intake import pipeline
 
 
@@ -49,8 +52,52 @@ def test_process_new_message_stores_attachment_and_publishes_event(monkeypatch):
     assert event["case_id"] == "case-thread_1"
     assert event["gcs_uri"] == "gs://bucket/intake/msg_1/bill.pdf"
     assert event["filename"] == "bill.pdf"
+    # WO7: not a real PDF, so extraction degrades to "" rather than raising --
+    # the field is still present so agent-core has something to key off of.
+    assert event["raw_text"] == ""
     assert uploads == [("msg_1", "bill.pdf", b"%PDF fake bytes", "application/pdf")]
     assert published == [("case.document.added", event)]
+
+
+def test_process_new_message_extracts_real_pdf_text(monkeypatch):
+    """A real one-page PDF's text rides along in the published event -- the
+    fix for the gap FORGE flagged (WO7): agent-core's Reader reads
+    `documents/{doc_id}.raw_text`, and nothing upstream ever populated it for
+    a live, Gmail-sourced attachment before this.
+    """
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    writer.write(buf)
+    pdf_bytes = buf.getvalue()
+
+    fake_message = {
+        "threadId": "thread_2",
+        "payload": {
+            "parts": [
+                {
+                    "mimeType": "application/pdf",
+                    "filename": "bill.pdf",
+                    "body": {"attachmentId": "att_1"},
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(pipeline.gmail_client, "fetch_message", lambda mid: fake_message)
+    monkeypatch.setattr(pipeline.gmail_client, "fetch_attachment_bytes", lambda mid, aid: pdf_bytes)
+    monkeypatch.setattr(pipeline.dedupe, "claim", lambda ns, key: True)
+    monkeypatch.setattr(pipeline.storage, "upload_attachment", lambda *a, **k: "gs://bucket/x.pdf")
+    published = []
+    monkeypatch.setattr(
+        pipeline.pubsub, "publish", lambda topic, data: published.append((topic, data))
+    )
+
+    result = pipeline.process_new_message("msg_2")
+
+    assert len(result) == 1
+    # A blank page has no text -- the point is the key exists and extraction
+    # ran against real pypdf, not that this particular fixture has content.
+    assert result[0]["raw_text"] == ""
 
 
 def test_process_new_message_skips_already_claimed_attachments(monkeypatch):
