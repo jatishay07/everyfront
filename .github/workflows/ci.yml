@@ -15,6 +15,22 @@ jobs:
           python-version: "3.12"
       - name: Install tooling
         run: pip install ruff pytest pytest-cov
+
+      - name: Install package and service requirements
+        # Each packages/<name>/ and services/<name>/ may declare its own deps.
+        # Without this, pytest fails at COLLECTION -- it imports every test
+        # module before markers are consulted, so a module-level `import ijson`
+        # kills the whole run even when that test would have been skipped.
+        # Three separate PRs hit this before the cause was fixed here.
+        run: |
+          found=0
+          for req in packages/*/requirements.txt services/*/requirements.txt; do
+            [ -f "$req" ] || continue
+            echo "installing $req"
+            pip install -r "$req"
+            found=$((found + 1))
+          done
+          echo "installed $found requirement file(s)"
       - name: Lint
         run: ruff check .
       - name: Format check
