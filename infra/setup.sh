@@ -65,6 +65,7 @@ APIS=(
   storage.googleapis.com secretmanager.googleapis.com aiplatform.googleapis.com
   cloudbuild.googleapis.com artifactregistry.googleapis.com
   cloudscheduler.googleapis.com gmail.googleapis.com
+  billingbudgets.googleapis.com
   calendar-json.googleapis.com drive.googleapis.com
 )
 ENABLED="$(gcloud services list --enabled --format='value(config.name)')"
@@ -207,8 +208,8 @@ if [[ -n "$BILLING_ACCOUNT" ]]; then
     gcloud billing budgets create --billing-account="$BILLING_ACCOUNT" \
       --display-name="everyfront-guard" --budget-amount=150USD \
       --threshold-rule=percent=0.33 --threshold-rule=percent=0.66 \
-      --threshold-rule=percent=1.0 >/dev/null 2>&1 \
-      && ok "budget alerts at \$50 / \$100 / \$150" \
+      --threshold-rule=percent=0.90 --threshold-rule=percent=1.0 >/dev/null 2>&1 \
+      && ok "budget alerts at 33/66/90/100% of \$150" \
       || printf '    \033[33mwarn\033[0m budget create failed (needs billing.budgets.create) -- set it in the console\n'
   fi
 else
