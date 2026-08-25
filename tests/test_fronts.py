@@ -133,7 +133,7 @@ class TestCharityCare:
         d = _decision(select_fronts(case, today=TODAY), "charity_care")
         assert d.applicable is False
         assert "for-profit" in d.reason
-        assert "1.501(r)-1(b)(20)" in d.citation
+        assert "1.501(r)-1(b)(18)" in d.citation
 
     def test_income_over_every_threshold_is_ineligible(self):
         case = _case(patient={"annual_income": 900_000_00})
