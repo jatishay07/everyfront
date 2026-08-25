@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import os
 
-from . import dedupe, gmail_client, pubsub, state, storage
+from . import dedupe, gmail_client, pubsub, state, storage, text_extract
 
 TOPIC_CASE_DOCUMENT_ADDED = os.environ.get("TOPIC_CASE_DOCUMENT_ADDED", "case.document.added")
 
@@ -20,11 +20,14 @@ def _case_id_for_thread(thread_id: str) -> str:
     """A Gmail thread becomes one case: replies/forwards about the same bill
     land in the same case rather than spawning a new one per message.
 
-    HANDOFF (see PR description): this service has no Firestore grant (see
-    `dedupe.py`), so it cannot look up whether a case already exists for
-    this thread under some OTHER key -- Reader (SWARM, agent-core) should
-    create `cases/{case_id}` on first sight of this id if it is not already
-    there.
+    HANDOFF (see PR description, WO7): this service has no Firestore grant
+    (see `dedupe.py`), so it cannot look up or create `cases/{case_id}` /
+    `documents/{doc_id}` itself. As of WO7 the `case.document.added` event
+    (below) carries everything needed to do so -- `gcs_uri`, `filename`, and
+    now `raw_text` -- so agent-core's document-added handler auto-creating
+    both records on first sight is a pure "store what you were already
+    given" op, not a new GCS round-trip or PDF parser. See the PR
+    description's HANDOFF section for the exact patch.
     """
     return f"case-{thread_id}"
 
@@ -50,11 +53,17 @@ def process_new_message(message_id: str) -> list[dict]:
         content = gmail_client.fetch_attachment_bytes(message_id, att["attachment_id"])
         gcs_uri = storage.upload_attachment(message_id, att["filename"], content, att["mime_type"])
         doc_id = hashlib.sha1(claim_key.encode()).hexdigest()[:16]  # noqa: S324 -- id derivation only
+        # `raw_text` travels IN the event, extracted here rather than left for
+        # a downstream consumer to re-fetch from GCS -- see text_extract.py's
+        # docstring for why this closes the real gap (agent-core's Reader
+        # reads `documents/{doc_id}.raw_text`, and nothing upstream of this
+        # commit ever wrote it for a live, Gmail-sourced PDF).
         event = {
             "case_id": case_id,
             "doc_id": doc_id,
             "gcs_uri": gcs_uri,
             "filename": att["filename"],
+            "raw_text": text_extract.extract_pdf_text(content),
             "gmail_message_id": message_id,
             "gmail_thread_id": thread_id,
         }
