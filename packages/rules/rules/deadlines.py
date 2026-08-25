@@ -6,12 +6,29 @@ a judge reading the repo -- or a hospital reading our filing -- can check the la
 
 Federal floors implemented here:
 
-  * 240-day FAP application window .... 26 CFR 1.501(r)-4(b)(1)(iv), running
-    from the FIRST POST-DISCHARGE BILLING STATEMENT, not the date of service.
-    That distinction is the most common way patients lose the right.
-  * 120-day ECA moratorium ............ 26 CFR 1.501(r)-6(c)(3)(i)
-  * 30-day pre-ECA written notice ..... 26 CFR 1.501(r)-6(c)(4)
-  * PPDR, 120 calendar days ........... 45 CFR 149.620(c)
+  * 240-day FAP application window .... 26 CFR 1.501(r)-1(b)(3) (the defined
+    term "application period"), running from the FIRST POST-DISCHARGE BILLING
+    STATEMENT, not the date of service. That distinction is the most common
+    way patients lose the right.
+    CORRECTED 2026-08-25 (STATUTE, wo6 citation audit): this module and
+    `fronts.py` previously cited "26 CFR 1.501(r)-4(b)(1)(iv)" for the
+    240-day figure. Verified against law.cornell.edu/cfr/text/26/1.501(r)-4:
+    that subsection doesn't even exist -- (b)(1) only runs through (iii), and
+    covers the FAP's basic-requirements list (emergency/medically-necessary
+    care, wide publicity, etc.), not the application deadline at all. The
+    "later of the 240th day after the first post-discharge billing
+    statement" language lives in the definition of "application period" at
+    1.501(r)-1(b)(3), confirmed verbatim against the primary source.
+  * 120-day ECA moratorium ............ 26 CFR 1.501(r)-6(c)(3)(i) -- verified
+    verbatim against law.cornell.edu/cfr/text/26/1.501(r)-6.
+  * 30-day pre-ECA written notice ..... 26 CFR 1.501(r)-6(c)(4)(i) -- the
+    30-day, written-notice requirement is in (c)(4)(i) specifically; the
+    parent (c)(4) also covers the plain-language summary that must accompany
+    the notice.
+  * PPDR, 120 calendar days ........... 45 CFR 149.620(c)(1) -- verified
+    verbatim ("postmarked within 120 calendar days of receiving the initial
+    bill...") against law.cornell.edu/cfr/text/45/149.620. CORRECTED
+    2026-08-25: previously cited only the parent "(c)".
   * Debt validation, 30 days .......... 12 CFR 1006.34(b); 15 USC 1692g(a)
   * Itemized bill, 30 days ............ 42 USC 1395b-7(b)
 
@@ -35,8 +52,11 @@ VALIDATION_WINDOW_DAYS = 30
 ITEMIZED_BILL_DAYS = 30
 
 # PPDR eligibility floor: the bill must exceed the Good Faith Estimate by at
-# least this much. 45 CFR 149.620(b) -- "substantially in excess" is defined as
-# at least $400 above the expected charges.
+# least this much. 45 CFR 149.620(a)(2)(ii) -- "substantially in excess" is
+# defined as at least $400 above the expected charges. CORRECTED 2026-08-25
+# (STATUTE, wo6 citation audit): previously cited "(b)"; verified against
+# law.cornell.edu/cfr/text/45/149.620 -- the $400 definition is in the
+# definitions paragraph at (a)(2)(ii), not (b).
 PPDR_MIN_DELTA_CENTS = 400_00
 
 
@@ -53,12 +73,34 @@ class StateFAPRule:
 
 # Only states the product claims to support. An unlisted state falls back to the
 # federal floor -- we never guess at a state rule we have not read.
+#
+# Every citation below was re-verified against the primary source on
+# 2026-08-25 (STATUTE, wo6 citation audit):
+#   * CA -- confirmed verbatim: HSC §127405(e)(3) reads "A hospital shall not
+#     impose time limits for applying for charity care or discounted
+#     payments, nor deny eligibility based on the timing of a patient's
+#     application." (leginfo.legislature.ca.gov)
+#   * NY -- confirmed: PHL §2807-k(9-a)(e) requires the hospital's financial
+#     assistance policy "permit patients to apply for assistance at any time
+#     during the collection process" -- pinned to paragraph (e), the operative
+#     no-deadline clause within 9-a.
+#   * WA -- CORRECTED. The 2-year window is NOT in (5) -- (5) is where the
+#     two-tier income table lives (see eligibility.py STATE_FLOORS["WA"]).
+#     The actual 2-year retroactive-application right is RCW
+#     70.170.060(10)(b): charity care may be "applied for ... within two
+#     years of the time of service" on a showing of good-faith payment
+#     efforts. (app.leg.wa.gov)
+#   * NJ -- CORRECTED. N.J.A.C. §10:52-11.8 is "Income eligibility criteria
+#     and documentation" (the sliding-scale discount tiers) and contains no
+#     deadline at all. The 1-year window is at §10:52-11.13(b) ("at any time
+#     up to one year from the date of outpatient service or inpatient
+#     discharge"), reinforced by (c)(6). (law.cornell.edu/regulations/new-jersey)
 STATE_FAP_WINDOWS: dict[str, StateFAPRule] = {
     # No application deadline may be imposed. Demo state -- the "safe" case.
     "CA": StateFAPRule(None, "Cal. Health & Safety Code §127405(e)(3)"),
-    "NY": StateFAPRule(None, "N.Y. Pub. Health Law §2807-k(9-a)"),
-    "WA": StateFAPRule(730, "Wash. Rev. Code §70.170.060(5)"),
-    "NJ": StateFAPRule(365, "N.J. Admin. Code §10:52-11.8"),
+    "NY": StateFAPRule(None, "N.Y. Pub. Health Law §2807-k(9-a)(e)"),
+    "WA": StateFAPRule(730, "Wash. Rev. Code §70.170.060(10)(b)"),
+    "NJ": StateFAPRule(365, "N.J. Admin. Code §10:52-11.13(b)"),
     # NOTE: Illinois is deliberately ABSENT from this table. Its 90-day clock
     # belongs to a separate state program, not to the federal FAP window --
     # see STATE_UNINSURED_DISCOUNTS below.
@@ -77,6 +119,13 @@ class StateUninsuredDiscount:
 
     days: int
     citation: str
+    # Documentation only -- NOT read by compute_deadlines or screen_eligibility.
+    # The authoritative, enforced FPL ceiling lives in eligibility.py's
+    # STATE_FLOORS (which is hospital-class-dependent for IL: general hospitals
+    # get a 600% discount / 200% free floor, rural/critical-access hospitals
+    # get 300% / 125% -- 210 ILCS 89/10. This field is kept at the rural/CAH
+    # figure because that is the more conservative number to surface in a
+    # docstring-adjacent constant nobody currently reads for enforcement).
     max_fpl_pct: int
     uninsured_only: bool
     runs_from_latest_of: tuple[str, ...]
@@ -89,11 +138,25 @@ class StateUninsuredDiscount:
 STATE_UNINSURED_DISCOUNTS: dict[str, StateUninsuredDiscount] = {
     # Hospital Uninsured Patient Discount Act. Binds every Illinois hospital,
     # for-profit included -- so an IL patient at a for-profit facility still has
-    # this right even though no 501(r) obligation exists. Window was 60 days as
-    # enacted and was amended to 90.
+    # this right even though no 501(r) obligation exists (the Act's "Hospital"
+    # definition at 210 ILCS 89/5 carries no nonprofit/tax-exempt qualifier).
+    # Window was 60 days as enacted and was amended to 90 days by P.A. 102-581,
+    # eff. 1/1/2022, which also added the screening/public-program-denial
+    # triggers alongside discharge/service.
+    #
+    # CORRECTED 2026-08-25 (STATUTE, wo6 citation audit): the deadline and its
+    # four triggering events live in 210 ILCS 89/15(b), not /25(a) (Sec. 25 is
+    # the Act's enforcement provision -- Attorney General powers -- and says
+    # nothing about the application window). Verified verbatim against
+    # ilga.gov: "Hospitals shall permit an uninsured patient to apply for a
+    # discount within 90 days of the date of discharge, date of service,
+    # completion of the screening under the Fair Patient Billing Act, or
+    # denial of an application for a public health insurance program." All
+    # four events named there are now confirmed_triggers below -- previously
+    # only two of the four had been checked against the statute text.
     "IL": StateUninsuredDiscount(
         days=90,
-        citation="210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
+        citation="210 ILCS 89/15(b) (Hospital Uninsured Patient Discount Act)",
         max_fpl_pct=300,
         uninsured_only=True,
         runs_from_latest_of=(
@@ -102,7 +165,12 @@ STATE_UNINSURED_DISCOUNTS: dict[str, StateUninsuredDiscount] = {
             "screening_date",
             "public_program_denial_date",
         ),
-        confirmed_triggers=("discharge_date", "service_date"),
+        confirmed_triggers=(
+            "discharge_date",
+            "service_date",
+            "screening_date",
+            "public_program_denial_date",
+        ),
     ),
 }
 
@@ -158,7 +226,7 @@ def _resolve_fap_window(state: str) -> tuple[int | None, str]:
     """
     rule = STATE_FAP_WINDOWS.get(state.strip().upper())
     if rule is None:
-        return FAP_WINDOW_DAYS, "26 CFR 1.501(r)-4(b)(1)(iv)"
+        return FAP_WINDOW_DAYS, "26 CFR 1.501(r)-1(b)(3)"
     if rule.days is None:
         return None, rule.citation
     if rule.days < FAP_WINDOW_DAYS:
@@ -166,7 +234,7 @@ def _resolve_fap_window(state: str) -> tuple[int | None, str]:
         # federal window; we cite both so the reasoning is auditable.
         return (
             FAP_WINDOW_DAYS,
-            "26 CFR 1.501(r)-4(b)(1)(iv) (federal floor; "
+            "26 CFR 1.501(r)-1(b)(3) (federal floor; "
             f"{rule.citation} is shorter at {rule.days} days)",
         )
     return rule.days, rule.citation
@@ -175,10 +243,18 @@ def _resolve_fap_window(state: str) -> tuple[int | None, str]:
 def _latest_of(bill: dict, fields: tuple[str, ...]) -> tuple[date | None, str]:
     """Pick the latest populated date among `fields`.
 
-    Illinois runs its 90-day clock from the latest of discharge, service,
-    screening, or public-program denial (210 ILCS 89/25(a)). Taking the latest
-    is what the statute says and is also the patient-favorable reading: an
-    earlier basis date would expire the right sooner.
+    Illinois's 90-day clock (210 ILCS 89/15(b)) names four possible triggers --
+    discharge, service, Fair Patient Billing Act screening, or public-program
+    denial -- but the statute text itself does not say "latest of": it lists
+    the four events without an explicit ordering rule. CORRECTED 2026-08-25
+    (STATUTE, wo6 citation audit): a prior version of this docstring claimed
+    "latest of ... is what the statute says", which overstates what the text
+    supports. Taking the latest of the four is this codebase's own
+    interpretation -- it matches Illinois Health & Hospital Association
+    compliance guidance and is the patient-favorable reading (an earlier
+    basis date would expire the right sooner) -- but it is a gloss, not a
+    verbatim requirement, and is documented as such rather than presented as
+    settled statutory text.
 
     Returns (None, "") when the case carries none of the fields, so the caller
     can degrade to "unknown" instead of inventing a date.
@@ -273,7 +349,7 @@ def compute_deadlines(
             )
         )
 
-    # --- PPDR: 120 calendar days from the initial bill (45 CFR 149.620(c)) ---
+    # --- PPDR: 120 calendar days from the initial bill (45 CFR 149.620(c)(1)) ---
     if isinstance(first, date):
         out.append(
             Deadline(
@@ -282,7 +358,7 @@ def compute_deadlines(
                 first + timedelta(days=PPDR_WINDOW_DAYS),
                 first,
                 "first_statement_date",
-                "45 CFR 149.620(c)",
+                "45 CFR 149.620(c)(1)",
                 PPDR_WINDOW_DAYS,
             )
         )

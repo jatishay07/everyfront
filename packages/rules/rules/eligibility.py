@@ -53,24 +53,136 @@ class StateFloor:
     note: str = ""
 
 
+# Hospital-class-dependent floors (IL rural/critical-access vs. general; WA
+# large-system vs. other) need a SECOND tier keyed off a hospital-record flag
+# that the current `hospitals/{ein}` contract (§3.1) does not carry today --
+# it has no rural/critical-access or system-size field. `screen_eligibility`
+# resolves `STATE_FLOORS[state]` as the DEFAULT tier and only switches to the
+# elevated tier (`_STATE_FLOOR_ELEVATED` below) when the hospital record
+# explicitly says so via `_STATE_FLOOR_CLASSIFIER_KEYS[state]`. Each state's
+# default was chosen as its more common hospital class (general/non-rural for
+# IL; non-large-system for WA by facility count) rather than uniformly
+# defaulting "low" or "high" -- but it is still a base-rate default, not a
+# confirmed fact, so the note on the elevated tier's absence is always
+# surfaced (see `screen_eligibility`). HANDOFF (LEDGER / contract owners):
+# add `hospital["rural_or_critical_access"]` (IL, from CMS's CAH designation)
+# and `hospital["large_system"]` (WA, from the RCW 70.170.060(5) size test) to
+# the hospital record so this floor can resolve to its confirmed tier instead
+# of the base-rate default.
 STATE_FLOORS: dict[str, StateFloor] = {
     # Hospital Fair Pricing Policies. The 400% floor is why Sutter's filed 400%
     # is the statutory minimum rather than generosity -- spike gate (a).
+    # Pinned to Cal. HSC §127405(a)(1)(A) (eligibility trigger) and (d)(1)
+    # (payment-limit cap) -- CORRECTED 2026-08-25 (STATUTE, wo6 citation
+    # audit): a prior version cited this floor to the bare section number,
+    # which is where the NO-DEADLINE rule lives ((e)(3), see deadlines.py),
+    # not the 400% figure. Verified against leginfo.legislature.ca.gov.
     "CA": StateFloor(
         free_pct=400,
         discounted_pct=400,
-        citation="Cal. Health & Safety Code §127405",
+        citation="Cal. Health & Safety Code §127405(a)(1)(A), (d)(1)",
         note="CA sets one 400% FPL floor covering both tiers.",
     ),
     # Hospital Uninsured Patient Discount Act -- the same act that carries the
-    # 90-day clock in deadlines.py. Binds for-profit hospitals too.
+    # 90-day clock in deadlines.py (210 ILCS 89/15(b)). Binds for-profit
+    # hospitals too (the Act's "Hospital" definition, 210 ILCS 89/5, carries
+    # no nonprofit/tax-exempt qualifier).
+    #
+    # CORRECTED 2026-08-25 (STATUTE, wo6 citation audit): a prior version
+    # applied a single 300%-discount / no-free floor to every IL hospital.
+    # Verified verbatim against ilga.gov (210 ILCS 89/10): that 300%/125%
+    # pairing is the RURAL / CRITICAL-ACCESS HOSPITAL tier specifically ("family
+    # income of not more than 125% of the federal poverty" for 100% charity,
+    # "not more than 300%" for the discount). GENERAL (non-rural) hospitals --
+    # the large majority of IL facilities, including every real hospital in
+    # this codebase's fixtures -- get a materially more generous floor: 100%
+    # charity up to 200% FPL, discount up to 600% FPL. The old single-tier
+    # value was quietly understating every general-hospital patient's floor by
+    # 300 percentage points on the discount tier and by not enforcing a
+    # free-care floor at all.
     "IL": StateFloor(
-        free_pct=None,
-        discounted_pct=300,
-        citation="210 ILCS 89/10 (Hospital Uninsured Patient Discount Act)",
-        note="Uninsured patients at or below 300% FPL. Rural/critical-access "
-        "facilities carry a higher ceiling; not yet encoded -- see TODO.",
+        free_pct=200,
+        discounted_pct=600,
+        citation="210 ILCS 89/10 (Hospital Uninsured Patient Discount Act; general/"
+        "non-rural hospital tier)",
+        note="General (non-rural) IL hospital floor: 100% charity <=200% FPL, "
+        "discount <=600% FPL. Rural/critical-access hospitals get a LOWER "
+        "floor (125%/300%) -- see STATE_FLOORS['IL_RURAL'] and "
+        "_STATE_FLOOR_ELEVATED below; this default assumes a general hospital "
+        "when classification is unknown, matching every real IL hospital in "
+        "this repo's fixtures.",
     ),
+    # Same Act, rural/critical-access tier -- lower than the general tier
+    # above. Used by `screen_eligibility` only when the hospital record
+    # explicitly says `rural_or_critical_access: True`; see
+    # `_STATE_FLOOR_ELEVATED`.
+    "IL_RURAL": StateFloor(
+        free_pct=125,
+        discounted_pct=300,
+        citation="210 ILCS 89/10 (Hospital Uninsured Patient Discount Act; rural/"
+        "critical-access hospital tier)",
+        note="Rural/critical-access IL hospital floor: 100% charity <=125% FPL, "
+        "discount <=300% FPL.",
+    ),
+    # Washington's Charity Care Act sets a two-tier floor by hospital/system
+    # size (RCW 70.170.060(5)) -- verified verbatim against app.leg.wa.gov.
+    # The statute actually grants a THIRD, intermediate 75%-of-charges partial
+    # discount band (301-350% for large systems, 201-250% for others) that
+    # this module cannot represent: `EligibilityResult.determination` is a
+    # binary free/discounted/ineligible/unknown, with no partial-percentage
+    # output. Both partial-discount bands are folded into "discounted" here,
+    # using the OUTER edge of each state's discount range as `discounted_pct`
+    # -- the correct binary answer to "is some discount available", even
+    # though the exact percentage a patient receives inside the discounted
+    # band needs the hospital's own schedule, not this floor. Flagged as a
+    # known simplification rather than silently doing 3-tier math nobody asked
+    # this API to return.
+    "WA": StateFloor(
+        free_pct=200,
+        discounted_pct=300,
+        citation="Wash. Rev. Code §70.170.060(5) (other/non-large-system hospital tier)",
+        note="Non-large-system WA hospital floor: 100% charity <=200% FPL, "
+        "some discount <=300% FPL (75%-of-charges band is 201-250%, 50% band "
+        "is 251-300% -- collapsed to a single 'discounted' ceiling here). "
+        "Large hospital systems (3+ acute hospitals in the system, or "
+        "300+ beds in the state's most populous county, or 200+ beds in a "
+        "border county over 450k population) get a higher floor -- see "
+        "STATE_FLOORS['WA_LARGE_SYSTEM']; this default assumes NOT a large "
+        "system when classification is unknown, the conservative-by-count "
+        "reading (most individual WA hospitals are not part of a "
+        "qualifying large system).",
+    ),
+    "WA_LARGE_SYSTEM": StateFloor(
+        free_pct=300,
+        discounted_pct=400,
+        citation="Wash. Rev. Code §70.170.060(5) (large-system hospital tier)",
+        note="Large-system WA hospital floor: 100% charity <=300% FPL, some "
+        "discount <=400% FPL (75% band 301-350%, 50% band 351-400%, "
+        "collapsed here).",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class _ElevatedFloor:
+    """Wiring for a state whose floor depends on a hospital classification.
+
+    `hospital_key` is the boolean field on the `hospitals/{ein}` record (not
+    yet in contract §3.1 -- see the HANDOFF note above `STATE_FLOORS`) that,
+    when True, switches `screen_eligibility` from `STATE_FLOORS[state]` (the
+    base-rate default) to `STATE_FLOORS[elevated_state_key]`.
+    """
+
+    hospital_key: str
+    elevated_state_key: str
+    applied_note: str
+
+
+_STATE_FLOOR_ELEVATED: dict[str, _ElevatedFloor] = {
+    "IL": _ElevatedFloor(
+        "rural_or_critical_access", "IL_RURAL", "rural/critical-access hospital tier applied"
+    ),
+    "WA": _ElevatedFloor("large_system", "WA_LARGE_SYSTEM", "large-system hospital tier applied"),
 }
 
 
@@ -122,6 +234,38 @@ def _threshold(raw: int | None, tier: str, notes: list[str]) -> int | None:
     return raw
 
 
+def _resolve_state_floor(state: str, hospital: dict, notes: list[str]) -> StateFloor | None:
+    """Pick the base-rate or elevated `StateFloor` for `state`.
+
+    Some states' floors depend on a hospital classification
+    (`_STATE_FLOOR_ELEVATED`) this codebase cannot always confirm -- see the
+    HANDOFF note above `STATE_FLOORS`. `hospital[hospital_key] is True`
+    switches to the elevated tier; anything else (missing, False, or None)
+    keeps the base-rate default and, when the key is simply absent, notes the
+    assumption so it doesn't read as a confirmed fact.
+    """
+    key = state.strip().upper()
+    floor = STATE_FLOORS.get(key)
+    if floor is None:
+        return None
+
+    elevated = _STATE_FLOOR_ELEVATED.get(key)
+    if elevated is None:
+        return floor
+
+    classification = hospital.get(elevated.hospital_key)
+    if classification is True:
+        notes.append(elevated.applied_note)
+        return STATE_FLOORS[elevated.elevated_state_key]
+    if classification is None:
+        notes.append(
+            f"hospital record does not say whether {elevated.hospital_key!r} applies; "
+            f"assuming the more common class ({key} base-rate floor) -- confirm before relying "
+            "on this for an atypical hospital"
+        )
+    return floor
+
+
 def screen_eligibility(
     income_cents: int,
     household: int,
@@ -137,7 +281,11 @@ def screen_eligibility(
         household: household size, >= 1.
         state: two-letter state code.
         hospital: a `hospitals/{ein}` record (contract §3.1). Recognized keys:
-            `free_care_max_fpl_pct`, `discounted_care_max_fpl_pct`, `nonprofit`.
+            `free_care_max_fpl_pct`, `discounted_care_max_fpl_pct`, `nonprofit`,
+            plus two keys NOT YET part of contract §3.1 (see the HANDOFF note
+            above `STATE_FLOORS`) that this function reads defensively via
+            `.get()` and treats as unknown when absent: `rural_or_critical_access`
+            (IL) and `large_system` (WA).
         year: FPL guideline year.
 
     Returns:
@@ -153,7 +301,7 @@ def screen_eligibility(
 
     # A state floor raises whatever the hospital published. 26 CFR 1.501(r)
     # leaves the numbers to the hospital; state law can set a minimum.
-    floor = STATE_FLOORS.get(state.strip().upper())
+    floor = _resolve_state_floor(state, hospital, notes)
     if floor is not None:
         nonprofit = hospital.get("nonprofit", True)
         if nonprofit or floor.applies_to_for_profit:

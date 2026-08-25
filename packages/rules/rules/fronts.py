@@ -18,15 +18,23 @@ and possibly none of it should even be *sent* -- until that resolves. See
 
 Front-by-front basis:
 
-  * PPDR ................. 45 CFR 149.620(b) (>= $400 "substantially in
-    excess" of the Good Faith Estimate) and (c) (120-day window); gated on
+  * PPDR ................. 45 CFR 149.620(a)(2)(ii) (>= $400 "substantially in
+    excess" of the Good Faith Estimate) and (c)(1) (120-day window); gated on
     uninsured/self-pay, per 45 CFR 149.610(a) (definition of an "uninsured
-    (or self-pay) individual").
+    (or self-pay) individual"). CORRECTED 2026-08-25 (STATUTE, wo6 citation
+    audit): previously cited (b) and (c); verified against
+    law.cornell.edu/cfr/text/45/149.620 -- the $400 definition sits in the
+    definitions paragraph at (a)(2)(ii), and the 120-day filing requirement
+    at (c)(1) specifically.
   * Charity care ......... 26 CFR 1.501(r)-4(b)(2) (hospital's own published
     FPL thresholds, screened by `eligibility.screen_eligibility`) and the FAP
-    application window from `deadlines.compute_deadlines`. A for-profit
-    hospital owes no 1.501(r) duty at all -- 26 CFR 1.501(r)-1(b)(20) limits
-    the whole subchapter to a "hospital organization" as there defined.
+    application window from `deadlines.compute_deadlines` (26 CFR
+    1.501(r)-1(b)(3), not -4(b)(1)(iv) -- see that module's docstring for the
+    correction). A for-profit hospital owes no 1.501(r) duty at all -- 26 CFR
+    1.501(r)-1(b)(18) limits the whole subchapter to a "hospital
+    organization" as there defined. CORRECTED 2026-08-25: previously cited
+    (b)(20); verified against law.cornell.edu/cfr/text/26/1.501(r)-1 -- the
+    "hospital organization" definition is at (b)(18).
   * Debt validation ...... 12 CFR 1006.34(b); 15 USC 1692g(a) -- 30 days from
     the validation notice, and it runs FIRST (above).
   * Audit ................ 42 USC 1395b-7(b) (itemized statement) and 45 CFR
@@ -115,7 +123,7 @@ def _select_charity_care(case: dict, today: date) -> FrontDecision:
             "charity_care",
             False,
             "hospital is for-profit; no 26 CFR 1.501(r) charity-care obligation applies",
-            "26 CFR 1.501(r)-1(b)(20)",
+            "26 CFR 1.501(r)-1(b)(18)",
         )
 
     income = _income_cents(patient)
@@ -134,9 +142,7 @@ def _select_charity_care(case: dict, today: date) -> FrontDecision:
     window_open = due is None or not fap_deadline.is_expired(
         today
     )  # None due => no deadline exists
-    fap_citation = (
-        fap_deadline.citation if fap_deadline is not None else "26 CFR 1.501(r)-4(b)(1)(iv)"
-    )
+    fap_citation = fap_deadline.citation if fap_deadline is not None else "26 CFR 1.501(r)-1(b)(3)"
 
     if elig.determination == "unknown":
         return FrontDecision(
@@ -183,7 +189,7 @@ def _select_ppdr(case: dict, today: date) -> FrontDecision:
             "ppdr",
             False,
             "no Good Faith Estimate on file to compare against the bill",
-            "45 CFR 149.620(b)",
+            "45 CFR 149.620(a)(2)(ii)",
         )
 
     delta = amount - gfe
@@ -193,7 +199,7 @@ def _select_ppdr(case: dict, today: date) -> FrontDecision:
             False,
             f"billed amount exceeds the GFE by ${delta / 100:,.2f}, "
             "below the $400 'substantially in excess' floor",
-            "45 CFR 149.620(b)",
+            "45 CFR 149.620(a)(2)(ii)",
         )
 
     ppdr_deadline = _first_deadline(bill, state, "ppdr", None, insured)
@@ -202,7 +208,7 @@ def _select_ppdr(case: dict, today: date) -> FrontDecision:
             "ppdr",
             False,
             "no initial-bill date on file; cannot start the 120-day PPDR clock",
-            "45 CFR 149.620(c)",
+            "45 CFR 149.620(c)(1)",
         )
     if ppdr_deadline.is_expired(today):
         return FrontDecision(
@@ -217,7 +223,7 @@ def _select_ppdr(case: dict, today: date) -> FrontDecision:
         "ppdr",
         True,
         f"uninsured with a bill ${delta / 100:,.2f} above the Good Faith Estimate (>= $400 floor)",
-        "45 CFR 149.620(b), (c)",
+        "45 CFR 149.620(a)(2)(ii), (c)(1)",
         ppdr_deadline.due,
     )
 
