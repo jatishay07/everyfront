@@ -105,7 +105,7 @@
   },
   "notes": "Income is ~231% of FPL for a household of 2 -- at or under the IL statutory 300% discount floor (210 ILCS 89/10; eligibility.py STATE_FLOORS['IL'] applies to for-profits), so screen_eligibility correctly returns 'discounted' via the state floor alone even though hospital.nonprofit is False and the hospital publishes no threshold of its own. discharge_date is included because IL's state discount clock runs from the latest of discharge/service/screening/public-program-denial, not from the billing statement.",
   "patient": {
-    "annual_income": 5000000,
+    "annual_income_cents": 5000000,
     "household_size": 2,
     "insured": false,
     "name": "Marcus Whitfield",
