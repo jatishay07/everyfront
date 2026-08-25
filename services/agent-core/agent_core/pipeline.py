@@ -280,12 +280,25 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
         [],
     )
 
+    # DEFECT (persona 5 WO6, idempotency): this used to be
+    # `(case.get(...) or 0) + combined_cents` -- an ACCUMULATION, not a
+    # recomputation. §2.3 requires every handler tolerate Pub/Sub redelivery,
+    # and `_run_cascade` is exactly the kind of handler that can run twice for
+    # the same case (a redelivered `case.document.added`, or simply a second
+    # document arriving on `on_document_added`'s one-cascade-per-document
+    # path): each run above already recomputes `combined_cents`/`audit_cents`
+    # from the CURRENT, COMPLETE state of every document and the case's own
+    # patient/bill/hospital fields (`_all_line_items` scans every document on
+    # file, `_charity_care_erasure_cents` reads the case fresh) -- so it is
+    # already the right total, not a delta. Adding it to whatever was stored
+    # before double-counts on redelivery and inflates further with every extra
+    # document. A straight assignment is the idempotent, honest number.
     case_patch = {
         "status": "strategy_ready",
-        "savings_found_cents": (case.get("savings_found_cents") or 0) + combined_cents,
+        "savings_found_cents": combined_cents,
         # §3.1's own field for this repo's audit findings specifically (not
         # the combined savings figure above).
-        "audit_findings_cents": (case.get("audit_findings_cents") or 0) + audit_cents,
+        "audit_findings_cents": audit_cents,
     }
     # denial_flag: contract §3.1 amendment says `bool`; CANVAS's already-merged
     # web/lib/types.ts types it as `{violated, reason, citation} | null` so
@@ -428,7 +441,29 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
         config.TOPIC_FILING_REQUESTED, {"case_id": case_id, "front": front, "filing_id": filing_id}
     )
 
-    filer_result = await run_filer(case_id, front, filing_id)
+    # BUG (persona 5 WO6 task 1, found live 2026-08-25): a Filer failure
+    # (e.g. the missing-pypdf deploy defect this same task fixed) used to
+    # leave the front stuck in "filing" forever -- `matched["status"]` was
+    # set above and never reverted, so every retry after a transient/
+    # deploy-time failure hit "front ... is not open (status=filing)" even
+    # once the underlying problem was fixed. Mirror the Verifier-reject path
+    # just above: revert to "open" and log the failure, then let the
+    # exception still propagate (a filing that did not happen must not be
+    # reported as if it succeeded), so the case is left retryable rather than
+    # wedged.
+    try:
+        filer_result = await run_filer(case_id, front, filing_id)
+    except Exception as exc:  # noqa: BLE001 -- revert state, log, then re-raise honestly
+        matched["status"] = "open"
+        store.upsert_front(case_id, matched)
+        _log(
+            case_id,
+            "filer",
+            "file_failed",
+            f"filing {front!r} failed before completion ({type(exc).__name__}: {exc}); "
+            "front reverted to open for retry",
+        )
+        raise
     return {"ok": True, "front": matched, "filer": filer_result}
 
 
@@ -444,8 +479,12 @@ async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
         "filer",
         "file",
         filer_turn["answer"]
-        or f"filed {front!r} via {ff['channel']} (vendor_id={ff['vendor_id']}, "
-        f"{'SIMULATED' if ff['simulated'] else 'live'})",
+        or (
+            f"filed {front!r} via {ff['channel']} (vendor_id={ff['vendor_id']}, "
+            f"{'SIMULATED' if ff['simulated'] else 'live'}); real-world destination would be "
+            f"{ff.get('real_destination')!r}; generated PDF saved as document "
+            f"{ff.get('doc_id')} ({ff.get('gcs_uri') or 'no GCS bucket configured'})"
+        ),
     )
 
     fronts = case.get("fronts") or []

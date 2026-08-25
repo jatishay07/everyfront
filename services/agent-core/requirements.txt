@@ -14,10 +14,27 @@ uvicorn[standard]==0.52.4
 google-cloud-firestore==2.29.0
 google-cloud-pubsub==2.39.2
 
-# LEDGER WO6: `infra/deploy.sh`'s `pkgs_for agent-core` now bundles
-# packages/datapipes (mrf_cache's live MRF fetch, ncci_cache's bundled NCCI
-# snapshot) -- both `datapipes.mrf` and `datapipes.ncci` import these
-# unconditionally at module load, same pinned versions as
-# packages/datapipes/requirements.txt.
-requests==2.34.2
+# --- packages/delivery's runtime deps (SWARM WO6, found live 2026-08-25) ---
+# `infra/deploy.sh` stages packages/delivery's SOURCE into this build context,
+# but this Dockerfile only installs THIS file -- RELAY's own requirements.txt is
+# never installed here. Locally it never surfaced: pypdf/reportlab were already
+# in the dev venv from working in the monorepo, so every test rendered real PDFs
+# fine. The deployed container had `delivery.pdf.engine` importable with its
+# actual dependencies entirely absent, and the imports are lazy, so nothing
+# failed until the FIRST real filing: ModuleNotFoundError inside _fill_acroform,
+# 500ing every approve_filing.
+pypdf==6.16.2
+reportlab==5.0.1
+google-cloud-storage==3.13.1
+
+# --- packages/datapipes' runtime deps (LEDGER WO6) ---
+# deploy.sh's `pkgs_for agent-core` now also bundles packages/datapipes, for
+# mrf_cache's cash-price lookup and ncci_cache's bundled NCCI snapshot. Both
+# `datapipes.mrf` and `datapipes.ncci` import these unconditionally at module
+# load, so a missing pin here is an import-time crash, not a lazy one.
 ijson==3.5.1
+
+# Shared by both of the above. Versions match each package's own
+# requirements.txt exactly -- duplicated here only because Docker has no
+# cross-service install, so those files remain the single source of truth.
+requests==2.34.2

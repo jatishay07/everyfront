@@ -40,3 +40,16 @@ TOPIC_FILING_COMPLETED = os.environ.get("TOPIC_FILING_COMPLETED", "filing.comple
 # Demo/day-to-day tolerance knobs, named here so they are not magic numbers
 # buried in agents/verifier.py.
 VERIFIER_INCOME_TOLERANCE_PCT = float(os.environ.get("VERIFIER_INCOME_TOLERANCE_PCT", "15"))
+
+# Contract §3.1's `cases/{id}/documents/{doc_id}.gcs_uri` for
+# `generated_application`/`generated_letter` docs (agent_core/document_storage.py,
+# persona 5 WO6 task 2). `infra/setup.sh` names this bucket `ef-documents-<project>`
+# but never actually wires `GCS_DOCUMENTS_BUCKET` into any service's deploy env
+# (not even services/intake, which reads the same var) -- rather than block on
+# an infra/ change outside this persona's owned paths, default to the exact
+# name setup.sh already creates so this works the moment PROJECT_ID is set,
+# same convention `packages/delivery/vendors/filing.py` (RELAY) already reads
+# this same env var by.
+GCS_DOCUMENTS_BUCKET = os.environ.get("GCS_DOCUMENTS_BUCKET") or (
+    f"ef-documents-{PROJECT_ID}" if PROJECT_ID else ""
+)

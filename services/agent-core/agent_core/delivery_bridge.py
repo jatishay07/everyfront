@@ -1,96 +1,104 @@
-"""Bridge to packages/delivery (owned by RELAY, persona 4).
+"""Bridge from the Filer agent to RELAY's real delivery package.
 
-As of this work order, `packages/delivery/delivery/__init__.py` is an empty
-stub -- RELAY has not started WO2-4 (PDF engine, Phaxio, Lob) yet. The Filer
-agent still needs *something* to call so the human-in-the-loop approval path
-is demoable end-to-end today, so this module probes for RELAY's real
-interface first and falls back to a clearly-labeled SIMULATED sender that
-returns the same shape (`vendor_id`, `status`) the real one will.
+WHY THIS FILE WAS REWRITTEN (FORGE, integration pass 2026-08-25)
+---------------------------------------------------------------
+SWARM wrote this bridge while `packages/delivery` was still an empty stub, so
+it guessed the module layout: `delivery.fax`, `delivery.mail`,
+`delivery.calendar`. RELAY then shipped `delivery.vendors.fax`,
+`delivery.vendors.mail` and `delivery.calendar_sync`.
 
-Every simulated send is logged as SIMULATED in the case's events -- never
-silently indistinguishable from a real Phaxio/Lob call -- and the guardrail in
-BUILD_PLAYBOOK.md §4 persona 4 ("never send to a real hospital fax/address")
-is upheld trivially because the fallback never contacts a network at all.
+Neither guessed wrong on purpose and neither was at fault. But the probe was a
+try/except ImportError, so the mismatch failed SILENTLY: every filing fell
+through to a simulated vendor ID and the case looked fine. RELAY's entire
+package -- five real filled forms including the actual CMS PPDR form and two
+hospitals' own FAP applications, plus the vendor allowlist -- sat unused while
+the product reported "sent".
 
-HANDOFF -> RELAY: expected interface, so swapping this out is a one-line diff
-in `_probe_fax`/`_probe_mail`/`_probe_calendar` below --
+That is the parallel-agent failure mode in one file: both halves correct, the
+seam between them never joined, and a fallback that hid it. The product's whole
+claim is that it FILES THE REAL FORMS; without this wiring it only advises.
 
-    fax.send(filing_id: str, pdf_bytes: bytes, to_number: str) -> dict
-        return {"vendor_id": ..., "status": ...}
-    mail.send(filing_id: str, pdf_bytes: bytes, to_address: dict) -> dict
-        return {"vendor_id": ..., "status": ..., "tracking": ...}
-    calendar.add_deadline(summary: str, due: date, citation: str, color: str) -> str
-        returns an event id
+Import paths are now direct and NOT wrapped in try/except -- if RELAY's package
+moves, this must fail loudly at deploy rather than quietly degrade to
+simulation. `infra/deploy.sh` stages packages/delivery into agent-core's image.
 """
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
+from delivery.pdf.engine import fill_form
+from delivery.vendors.filing import send_filing
 
-def _probe_fax():
-    try:
-        from delivery.fax import send  # type: ignore[import-not-found]
+# front -> the form RELAY renders for it (delivery/pdf/forms.py FORM_REGISTRY).
+# charity_care resolves per hospital: a hospital's own FAP application is the
+# form it actually accepts, and 26 CFR 1.501(r)-4(b)(1)(iv) requires the FAP to
+# say which that is.
+_FRONT_FORMS: dict[str, str] = {
+    "ppdr": "cms_ppdr",
+    "debt_validation": "debt_validation_letter",
+    "audit": "records_request_letter",
+}
+_CHARITY_FORMS_BY_EIN: dict[str, str] = {
+    "94-0562680": "sutter_fap",  # Sutter Bay Hospitals
+    "940562680": "sutter_fap",
+    "36-2169147": "advocate_fap",  # Advocate Health and Hospitals
+    "362169147": "advocate_fap",
+}
+_CHARITY_DEFAULT_FORM = "sutter_fap"
 
-        return send, "delivery.fax.send (RELAY)"
-    except ImportError:
-        return None, "SWARM fallback -- RELAY's Phaxio client not yet available"
-
-
-def _probe_mail():
-    try:
-        from delivery.mail import send  # type: ignore[import-not-found]
-
-        return send, "delivery.mail.send (RELAY)"
-    except ImportError:
-        return None, "SWARM fallback -- RELAY's Lob client not yet available"
-
-
-def _probe_calendar():
-    try:
-        from delivery.calendar import add_deadline  # type: ignore[import-not-found]
-
-        return add_deadline, "delivery.calendar.add_deadline (RELAY)"
-    except ImportError:
-        return None, "SWARM fallback -- RELAY's Calendar client not yet available"
-
-
-_fax_send, FAX_SOURCE = _probe_fax()
-_mail_send, MAIL_SOURCE = _probe_mail()
-_calendar_add, CALENDAR_SOURCE = _probe_calendar()
+# A front is filed on the channel its authority actually contemplates.
+# Debt validation must be provable delivery -- 15 USC 1692g gives the consumer
+# 30 days and the burden of showing the dispute was sent is theirs.
+_FRONT_CHANNELS: dict[str, str] = {
+    "ppdr": "fax",  # CMS routes PPDR to C2C by fax
+    "charity_care": "mail",
+    "debt_validation": "mail",  # certified, with tracking
+    "audit": "mail",
+}
 
 
-def send_fax(filing_id: str, pdf_bytes: bytes, to_number: str) -> dict[str, Any]:
-    if _fax_send is not None:
-        return _fax_send(filing_id, pdf_bytes, to_number)
-    return {
-        "vendor_id": f"SIMULATED-FAX-{uuid.uuid4().hex[:12]}",
-        "status": "sent",
-        "simulated": True,
-        "to_number": to_number,
-        "bytes": len(pdf_bytes),
-    }
+def form_for_front(front: str, case: dict) -> str:
+    """Which of RELAY's forms this front is filed on."""
+    if front != "charity_care":
+        return _FRONT_FORMS.get(front, "records_request_letter")
+    ein = str((case.get("bill") or {}).get("hospital_ein") or "").strip()
+    return _CHARITY_FORMS_BY_EIN.get(ein, _CHARITY_DEFAULT_FORM)
 
 
-def send_mail(filing_id: str, pdf_bytes: bytes, to_address: dict) -> dict[str, Any]:
-    if _mail_send is not None:
-        return _mail_send(filing_id, pdf_bytes, to_address)
-    return {
-        "vendor_id": f"SIMULATED-LOB-{uuid.uuid4().hex[:12]}",
-        "status": "sent",
-        "tracking": f"SIMULATED-TRACK-{uuid.uuid4().hex[:10].upper()}",
-        "simulated": True,
-        "to_address": to_address,
-        "bytes": len(pdf_bytes),
-    }
+def channel_for_front(front: str) -> str:
+    return _FRONT_CHANNELS.get(front, "mail")
 
 
-def add_calendar_deadline(summary: str, due, citation: str, color: str = "default") -> str:
-    if _calendar_add is not None:
-        return _calendar_add(summary, due, citation, color)
-    return f"SIMULATED-CAL-{uuid.uuid4().hex[:8]}"
+def render_filing_pdf(front: str, case: dict, extra: dict | None = None) -> tuple[bytes, str]:
+    """Render the real filled PDF for `front`. Returns (pdf_bytes, form_id)."""
+    form_id = form_for_front(front, case)
+    return fill_form(form_id, case, extra or {}), form_id
 
 
-def bridge_sources() -> dict[str, str]:
-    return {"fax": FAX_SOURCE, "mail": MAIL_SOURCE, "calendar": CALENDAR_SOURCE}
+def deliver(
+    *,
+    filing_id: str,
+    case_id: str,
+    front: str,
+    pdf: bytes,
+    destination: Any,
+    channel: str | None = None,
+) -> dict[str, Any]:
+    """Send a rendered filing through RELAY's vendor interface.
+
+    RELAY enforces a destination allowlist IN CODE (delivery/vendors/allowlist.py),
+    so this cannot reach a real hospital fax line or address even by mistake --
+    the §4 persona 4 guardrail. Without live vendor credentials RELAY's own
+    FakeFaxVendor/FakeMailVendor record the send and return a vendor id; that
+    fallback is RELAY's, is labelled as such, and still exercises the real
+    rendering and allowlist path rather than skipping them.
+    """
+    return send_filing(
+        filing_id=filing_id,
+        case_id=case_id,
+        front=front,
+        channel=channel or channel_for_front(front),
+        pdf=pdf,
+        destination=destination,
+    )
