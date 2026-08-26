@@ -91,8 +91,21 @@ async def run(case_id: str, case: dict, front: str) -> dict:
         "Return whether this case+front passes pre-filing verification, and why not if it fails.",
         fact,
     )
+    # DEFECT found live 2026-08-25 (SWARM WO7, "events leak across cases"):
+    # this used to be f"Verify case {case_id}'s {front!r} front before
+    # filing." -- the model reliably echoed the raw case_id back into its
+    # narration ("The 'audit' front for case `demo-case_02_...` has passed
+    # ..."), which `_log` copies verbatim into `events/{id}.detail`. PROOF's
+    # demo_reset.py runs each background fixture through this live pipeline
+    # under a throwaway `demo-{fixture}-{uuid}` id and only renames the case
+    # to its human-plausible `ef-2026-000N` id AFTERWARDS (rename_case);
+    # rename only rewrites each event's *structured* `case_id` field, not
+    # prose an LLM chose to compose that happens to contain the old one. An
+    # audit trail that names the wrong case is worse than no audit trail --
+    # this is the log a judge reads and a hospital would receive. `front` is
+    # safe to keep: it is never renamed and names no case.
     prompt = (
-        f"Verify case {case_id}'s {front!r} front before filing. Call get_verifier_result first."
+        f"Verify the {front!r} front on this case before filing. Call get_verifier_result first."
     )
     turn = await common.run_agent_turn(NAME, config.GEMINI_MODEL, INSTRUCTION, [tool], prompt)
     return {"fact": fact, **turn}

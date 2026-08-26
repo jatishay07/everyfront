@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from rules.audit import AuditFinding, total_savings_cents
+
 from fixtures.cases_data import CASES
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -73,7 +75,7 @@ def _recompute_stats() -> dict:
             stats["ppdr_eligible"] += 1
 
         denial = data["expected"]["denial_check_reference_model"]
-        if denial and denial["unlawful"]:
+        if denial and denial["violation"]:
             stats["unlawful_denials_flagged"] += 1
 
         stats["audit_findings_cents"] += data["expected"]["audit_findings_cents_total"]
@@ -115,13 +117,29 @@ class TestStatsAddUp:
         )
         assert stats["total_billed_cents"] == total
 
-    def test_audit_findings_is_the_literal_sum_of_seeded_findings(self):
+    def test_audit_findings_is_the_deduped_total_of_seeded_findings(self):
+        """NOT a naive `sum(...)` over every finding's `potential_savings_cents`
+        -- `rules.audit.total_savings_cents`'s own docstring explains why: a
+        line named by more than one theory (e.g. case_07's repeated 80053
+        line is both an exact-duplicate AND a cash-price-delta) must report
+        only its single largest substantiated theory, never the sum of both,
+        or the corpus over-claims exactly the way WO7 task 3's "a judge doing
+        arithmetic on screen must not catch a discrepancy" forbids."""
         stats = json.loads((GENERATED / "expected_stats.json").read_text())
-        total = sum(
-            f["amount_cents"]
-            for c in CASES
-            for f in _load(c.case_id)["expected"]["audit_findings_reference_model"]
-        )
+        total = 0
+        for c in CASES:
+            findings = [
+                AuditFinding(
+                    kind=f["kind"],
+                    codes=tuple(f["codes"]),
+                    description=f["description"],
+                    citation=f["citation"],
+                    lines=tuple(f["lines"]),
+                    potential_savings_cents=f["potential_savings_cents"],
+                )
+                for f in _load(c.case_id)["expected"]["audit_findings_reference_model"]
+            ]
+            total += total_savings_cents(findings)
         assert stats["audit_findings_cents"] == total
 
     def test_unparseable_case_contributes_zero_confirmed_dollars(self):

@@ -40,6 +40,9 @@ async def run(case_id: str, case: dict) -> dict:
         "Return every statutory deadline computed for this case's bill.",
         fact,
     )
-    prompt = f"Report the deadlines for case {case_id}. Call get_clock_result first."
+    # No raw case_id in the prompt -- see reader.py's docstring note (bug
+    # found live 2026-08-25): an LLM's freeform narration lands verbatim in
+    # `events/{id}.detail`, which a case rename cannot scrub after the fact.
+    prompt = "Report the deadlines for this case. Call get_clock_result first."
     turn = await common.run_agent_turn(NAME, config.GEMINI_MODEL, INSTRUCTION, [tool], prompt)
     return {"fact": fact, **turn}

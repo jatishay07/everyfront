@@ -128,8 +128,18 @@ async def run(case_id: str, doc_id: str, doc_text: str, doc_type_hint: str | Non
         "Return this document's Gemma classification and Gemini structured extraction.",
         fact,
     )
+    # Deliberately does NOT interpolate `case_id` into the prompt (bug found
+    # live 2026-08-25, cross-case leakage): PROOF's demo_reset.py reseeds each
+    # case through the live pipeline under a throwaway `demo-{fixture}-{uuid}`
+    # id and only renames it to the human-plausible `ef-2026-000N` id
+    # AFTERWARDS. An agent's freeform narration is copied verbatim into
+    # `events/{id}.detail` (store.append_event) and rename_case only rewrites
+    # each event's *structured* `case_id` field -- it cannot scrub a raw id an
+    # LLM chose to echo back into prose. An audit trail that names the wrong
+    # case is worse than no audit trail. `doc_id` is safe: it is never
+    # renamed, so nothing in this prompt can name a case that isn't this one.
     prompt = (
-        f"A new document (id={doc_id}) was added to case {case_id}. "
+        f"A new document (id={doc_id}) was just added. "
         "Call get_reader_result and summarize what was found."
     )
     turn = await common.run_agent_turn(NAME, model, INSTRUCTION, [tool], prompt)
