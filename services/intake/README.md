@@ -8,6 +8,14 @@ Gmail push webhook -> Pub/Sub -> GCS. Publishes case.document.added.
 
 ## Making Gmail intake live (WO7)
 
+**WO8 update:** this section's numbered runbook now also lives at
+`infra/OAUTH.md`, written as the canonical doc since the same refresh token
+this section mints also gates Calendar sync and Drive mirroring
+(`packages/delivery`) -- both `google_auth.py`'s `MissingCredentialsError`
+messages point there. The steps below are unchanged and still accurate; see
+`infra/OAUTH.md` for the same steps in one place plus how to verify Calendar
+and Drive specifically once the token exists.
+
 Everything below EXCEPT step 1 is scriptable and this repo does it for you.
 Step 1 cannot be: minting an OAuth refresh token for a real Google account
 requires a human, logged into that account's browser, clicking "Allow" on a
