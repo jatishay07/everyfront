@@ -756,3 +756,87 @@ def test_reanalysis_triggered_by_a_filing_does_not_reopen_the_filed_front(monkey
     front = s.get_case("c1")["fronts"][0]
     assert front["status"] == "filed", "re-analysis reopened a front that was already filed"
     assert front["reason"] == "nonprofit hospital"  # analysis still owns everything else
+
+
+def test_a_generated_filing_does_not_re_run_the_analysis(monkeypatch):
+    """FIX 1 (the re-analysis storm). The Filer stores every filled form it
+    sends as a case document, so filing three fronts adds three documents and
+    -- before this -- three more full Lookup/Clock/Auditor/Strategist
+    cascades, each re-logging its entire event set. Measured live against the
+    deployed system on 2026-08-26: `ef-2026-0007`'s flagship audit finding
+    ("80053 billed at $220.00 vs the hospital's attested cash price...") was
+    in the activity feed 14 times, `ef-2026-0001`'s `lookup/resolve_hospital`
+    6 times.
+
+    A letter we produced is not new evidence about the bill. The
+    counter-property -- a genuinely new INCOMING document must still re-run
+    everything -- is
+    `test_a_newly_uploaded_income_proof_still_re_runs_the_analysis` below;
+    the two have to hold together or this fix has broken the product.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    bill = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", bill))
+    events_after_the_bill = len(s.list_events("c1"))
+
+    for doc_type in ("generated_application", "generated_letter"):
+        generated = s.add_document("c1", {"type": doc_type, "gcs_uri": "gs://x/y.pdf"})
+        result = asyncio.run(pipeline.on_document_added("c1", generated))
+        assert "skipped" in result, result
+
+    assert len(s.list_events("c1")) == events_after_the_bill, (
+        "filing re-ran the analysis and re-logged the whole audit trail"
+    )
+
+
+def test_a_newly_uploaded_income_proof_still_re_runs_the_analysis(monkeypatch):
+    """The guard on FIX 1: only documents THIS SYSTEM generated are inert. A
+    document that genuinely arrives later -- an income proof the patient
+    uploads, a denial letter that shows up in week three -- must still re-run
+    the whole cascade. That is the product working as designed, not the bug.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    bill = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", bill))
+
+    cascades = []
+    monkeypatch.setattr(pipeline, "_run_cascade", _counting_cascade(cascades))
+    later = s.add_document("c1", {"raw_text": "2025 W-2", "type": "income_proof"})
+    result = asyncio.run(pipeline.on_document_added("c1", later))
+
+    assert "skipped" not in result
+    assert cascades == ["c1"], "a genuinely new document no longer re-runs the analysis"
+
+
+def _counting_cascade(sink: list):
+    async def _cascade(case_id, case):
+        sink.append(case_id)
+        return {}
+
+    return _cascade
+
+
+def test_a_batch_of_only_generated_documents_runs_no_cascade(monkeypatch):
+    """Same rule on the batch route (`/internal/process_documents`)."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    cascades = []
+    monkeypatch.setattr(pipeline, "_run_cascade", _counting_cascade(cascades))
+
+    s.create_case("c1", {"patient": {}})
+    generated = s.add_document("c1", {"type": "generated_letter", "gcs_uri": "gs://x/y.pdf"})
+    result = asyncio.run(pipeline.process_case_documents("c1", [generated]))
+
+    assert "skipped" in result
+    assert cascades == []
