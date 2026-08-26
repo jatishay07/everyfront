@@ -82,7 +82,9 @@ class CaseStore:
         self._events: dict[str, list[dict]] = {}
         self._hospitals: dict[str, dict] = {}
         self._filings: dict[str, dict] = {}
-        self._processed: set[str] = set()
+        # key -> {"status": "in_progress"|"done", ...}; see the message
+        # idempotency section at the bottom of this class.
+        self._processed: dict[str, dict] = {}
 
     @property
     def backend(self) -> str:
@@ -498,27 +500,117 @@ class CaseStore:
             return [v for v in vals if case_id is None or v.get("case_id") == case_id]
 
     # ------------------------------------------------- message idempotency
-    def has_processed_message(self, message_id: str) -> bool:
-        """§2.3: every Pub/Sub handler must tolerate redelivery.
+    #
+    # `_processed_messages/{key}` holds one of two states:
+    #
+    #   {"status": "in_progress", "claimed_at": ...}   someone is working on it
+    #   {"status": "done", "processed_at": ...}        the work finished
+    #
+    # A record written before this lease existed carries only `processed_at`
+    # and no `status`; those were only ever written on completion, so a missing
+    # status reads as "done" and the live registry needs no migration.
 
-        Returns True (and does NOT record it) if already seen, so the caller
-        can short-circuit before doing any work; the caller must then call
-        `mark_message_processed` only once handling actually completes, so a
-        crash mid-handler is retried rather than silently dropped.
+    #: How long a claim is honoured before another delivery may take it over.
+    #: A Cloud Run instance that dies mid-cascade cannot release its own claim,
+    #: and a document nothing may ever touch again is a worse failure than a
+    #: rare duplicate run. Comfortably longer than `infra/deploy.sh`'s
+    #: `--timeout=300`, so a claim can only expire after the holder is
+    #: certainly gone.
+    CLAIM_LEASE_SECONDS = 900
+
+    def has_processed_message(self, message_id: str) -> bool:
+        """True only if this key's work COMPLETED. A claim still in flight is
+        not "processed" -- see `claim_message`."""
+        if self._client is not None:
+            snap = self._client.collection("_processed_messages").document(message_id).get()
+            return snap.exists and (snap.to_dict() or {}).get("status") != "in_progress"
+        with self._lock:
+            record = self._processed.get(message_id)
+            return record is not None and record.get("status") != "in_progress"
+
+    def claim_message(self, message_id: str) -> bool:
+        """Atomically take this key for the caller. True if the caller now owns
+        the work and must finish it with `mark_message_processed` (or hand it
+        back with `release_message_claim`); False if someone else got there
+        first, or it is already done.
+
+        WHY A CLAIM AND NOT A MARK-WHEN-FINISHED. `has_processed_message` +
+        `mark_message_processed` leaves the entire duration of the work
+        unguarded, and the work here is a full LLM cascade that takes 60-130
+        seconds. Two things exploit that window, and between them they are most
+        of the live duplication:
+
+        1. `ef-document-added` has a 60-second ack deadline and
+           `--max-delivery-attempts=5` (infra/setup.sh). A cascade that outruns
+           the deadline is REDELIVERED while it is still running, the check
+           passes because nothing has been marked yet, and the redelivery
+           starts a second concurrent cascade -- which is also slow, so it
+           happens again. Up to five concurrent runs of the same document.
+        2. `/demo/inject_bill` reaches agent-core twice for every document (a
+           published `case.document.added` and the synchronous
+           `/internal/process_documents` batch). Only the push handler ever
+           wrote the `doc:` key, so the two routes never saw each other.
+
+        Both are now excluded by taking the key BEFORE the work rather than
+        after it. Firestore's `create()` fails with AlreadyExists rather than
+        overwriting, which is what makes this a genuine mutual exclusion and
+        not a check-then-act.
+        """
+        now = datetime.now(UTC)
+        payload = {"status": "in_progress", "claimed_at": now.isoformat()}
+        if self._client is not None:
+            from google.api_core import exceptions as gexc
+
+            ref = self._client.collection("_processed_messages").document(message_id)
+            try:
+                ref.create(payload)
+            except gexc.Conflict:  # AlreadyExists subclasses Conflict -- catch both
+                if not self._claim_is_stale(ref.get(), now):
+                    return False
+                ref.set(payload)
+            return True
+
+        with self._lock:
+            existing = self._processed.get(message_id)
+            if existing is not None and not self._claim_is_stale(existing, now):
+                return False
+            self._processed[message_id] = payload
+        return True
+
+    def _claim_is_stale(self, record, now: datetime) -> bool:
+        """True if `record` is an in-flight claim whose holder is certainly
+        gone (see `CLAIM_LEASE_SECONDS`). A completed record is never stale."""
+        data = record.to_dict() or {} if hasattr(record, "to_dict") else (record or {})
+        if not data or data.get("status") != "in_progress":
+            return False
+        try:
+            claimed_at = datetime.fromisoformat(data["claimed_at"])
+        except (KeyError, TypeError, ValueError):
+            return True  # a claim we cannot date is a claim we cannot trust
+        return (now - claimed_at).total_seconds() > self.CLAIM_LEASE_SECONDS
+
+    def release_message_claim(self, message_id: str) -> None:
+        """Hand back a claim whose work FAILED, so a redelivery retries it.
+
+        Without this, "claim before the work" would recreate the defect
+        `swarm/gmail-case-autocreate-2` just fixed from the other direction: a
+        document whose first attempt failed would be marked forever and never
+        read. A claim is released only by the holder, and only on failure --
+        success calls `mark_message_processed` instead.
         """
         if self._client is not None:
-            return self._client.collection("_processed_messages").document(message_id).get().exists
-        with self._lock:
-            return message_id in self._processed
-
-    def mark_message_processed(self, message_id: str) -> None:
-        if self._client is not None:
-            self._client.collection("_processed_messages").document(message_id).set(
-                {"processed_at": _now_iso()}
-            )
+            self._client.collection("_processed_messages").document(message_id).delete()
         else:
             with self._lock:
-                self._processed.add(message_id)
+                self._processed.pop(message_id, None)
+
+    def mark_message_processed(self, message_id: str) -> None:
+        payload = {"status": "done", "processed_at": _now_iso()}
+        if self._client is not None:
+            self._client.collection("_processed_messages").document(message_id).set(payload)
+        else:
+            with self._lock:
+                self._processed[message_id] = payload
 
 
 # Module-level singleton -- one store per process, matching how a Cloud Run
