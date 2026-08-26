@@ -102,6 +102,26 @@ def send_filing(
         "status": result.status,
         "proof": result.proof,
         "sent_at": result.sent_at.isoformat(),
+        # BUG FOUND live (RELAY WO8, item 2 spot-check): `agent_core.agents.filer`
+        # (services/agent-core) has read `vendor_result.get("simulated")` since
+        # persona 5 WO6 -- both to build `filings/{filing_id}`'s own `simulated`
+        # flag and to pick "SIMULATED" vs "live" in the human-readable event
+        # narration (`pipeline.py`'s `run_filer`) -- but this dict never
+        # actually carried a `"simulated"` key, so `.get("simulated")` was
+        # always `None` -> `bool(None)` == `False`. Every filing that fell back
+        # to `FakeFaxVendor`/`FakeMailVendor` (i.e. every filing, absent real
+        # Phaxio/Lob keys -- see this package's README) was therefore logged
+        # and stored as `simulated: false` / narrated as "live" even though
+        # `vendor == "fake"` right there in the same dict said otherwise. This
+        # is the exact "reports success while it's actually a placeholder"
+        # failure mode BUILD_PLAYBOOK.md's WO8 brief calls out by name -- the
+        # two facts (`vendor` and `simulated`) had simply never been made to
+        # agree. `vendor` is the one fact this function actually computes
+        # (`result.vendor` comes straight from whichever `VendorClient` ran,
+        # "fake" | "phaxio" | "lob"); `simulated` is now derived from it
+        # instead of being a second, independently-settable value that could
+        # drift from the first.
+        "simulated": result.vendor == "fake",
     }
 
 

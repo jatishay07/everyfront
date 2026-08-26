@@ -1,20 +1,26 @@
-"""agent_core.rules_bridge -- the defensive bridge to packages/rules.
+"""agent_core.rules_bridge -- direct re-export of packages/rules.
 
-STATUTE's select_fronts / audit_line_items / check_denial_lawfulness have
-since shipped and merged, so these tests now exercise the REAL functions
-(`bridge_sources()` reports "(STATUTE)", not "SWARM fallback") -- see
-`test_bridge_actually_resolves_to_statute_not_the_vendored_fallback` below,
-added after this bridge was found silently running its own fallback logic
-during a test run because of a sys.path ordering trap (see conftest.py).
-These tests intentionally overlap with STATUTE's own suite (tests/test_fronts.py
-etc.) -- that overlap IS the point: it proves agent_core is wired to the real
-package, not just that the package works in isolation.
+REWRITTEN 2026-08-26 (FORGE directive, persona 5 WO8): this module used to
+carry its own fallback reimplementation of select_fronts/audit_line_items/
+check_denial_lawfulness (used only if the real `rules.*` import ever
+failed) -- and that fallback independently carried the exact "unresolved
+hospital defaults to nonprofit=True" bug STATUTE fixed in the real
+`rules.fronts` (ef-2026-0006, commit 69f4531). §2.1 ("all front-selection
+logic lives in packages/rules") means a second copy here, however
+defensive, is a liability, not a safety net -- it can only ever be wrong in
+the same way a real bug was right. `rules_bridge` now just imports and
+re-exports STATUTE's real functions directly, so these tests exercise the
+REAL functions unconditionally. They intentionally overlap with STATUTE's
+own suite (tests/test_fronts.py etc.) -- that overlap IS the point: it
+proves agent_core is wired to the real package, not just that the package
+works in isolation.
 """
 
 from __future__ import annotations
 
 from datetime import date
 
+import rules.fronts
 from agent_core import rules_bridge
 
 
@@ -27,9 +33,7 @@ def test_bridge_sources_names_every_bridged_function():
         "total_savings_cents",
     }
     for source in sources.values():
-        # Either STATUTE's real function landed, or we're honestly on the
-        # fallback -- never silent about which.
-        assert "STATUTE" in source or "fallback" in source
+        assert "STATUTE" in source
 
 
 def test_select_fronts_debt_validation_first_when_in_collections():
@@ -119,17 +123,27 @@ def test_check_denial_lawfulness_all_listed_is_lawful():
     assert result.unlisted_docs == ()
 
 
-def test_bridge_actually_resolves_to_statute_not_the_vendored_fallback():
-    """Regression guard for the sys.path ordering trap this module's
-    docstring and conftest.py both describe: services/agent-core ships a
-    VENDORED copy of packages/rules (for Cloud Build's per-service context),
-    and it is easy to end up silently testing that stale copy's absence of
-    fronts.py/audit.py/denial.py instead of STATUTE's real, merged package.
-    """
-    sources = rules_bridge.bridge_sources()
-    for source in sources.values():
-        assert "STATUTE" in source, (
-            f"bridge fell back to a placeholder ({source!r}) -- either STATUTE's "
-            "module moved, or sys.path is resolving `rules` to the vendored copy "
-            "in services/agent-core/rules instead of packages/rules"
-        )
+def test_select_fronts_unresolved_hospital_no_charity_care():
+    """The ef-2026-0006 regression, exercised through the real function this
+    bridge now re-exports directly (STATUTE's fix, commit 69f4531): an
+    unresolved hospital (`{}`, no `nonprofit` key) must not default to
+    "nonprofit" -- `nonprofit` must be the literal `True` to proceed."""
+    case = {"bill": {}, "patient": {}, "hospital": {}}
+    cc = next(d for d in rules_bridge.select_fronts(case) if d.front == "charity_care")
+    assert cc.applicable is False
+    assert "not established" in cc.reason
+
+
+def test_select_fronts_missing_hospital_key_no_charity_care():
+    case = {"bill": {}, "patient": {}}
+    cc = next(d for d in rules_bridge.select_fronts(case) if d.front == "charity_care")
+    assert cc.applicable is False
+
+
+def test_bridge_re_exports_are_identical_to_the_real_functions():
+    """This bridge no longer wraps or reimplements anything (see module
+    docstring) -- it must be the literal same function object as
+    `rules.fronts.select_fronts`, not a lookalike, and not a stale vendored
+    copy shadowing it via sys.path (the historical trap conftest.py's own
+    docstring describes)."""
+    assert rules_bridge.select_fronts is rules.fronts.select_fronts

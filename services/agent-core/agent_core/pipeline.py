@@ -121,6 +121,21 @@ async def _run_reader(case_id: str, doc_id: str) -> dict:
         "classify_and_extract",
         reader_turn["answer"] or f"classified as {rf['label']}",
     )
+    # Defect fix (persona 5 WO8, "never invent, always say so"): reader.py's
+    # `_scrub_ungrounded` discards any extracted value that matched a known
+    # fabrication pattern (a fake EIN, an epoch date, an "Unknown" name --
+    # exactly what ef-2026-0006's deliberately-corrupted bill.pdf used to
+    # produce). When that happens the case's own audit trail must say so
+    # plainly -- "we could not read this" is an honest outcome; silence is not.
+    if rf.get("scrubbed_fields"):
+        _log(
+            case_id,
+            "reader",
+            "extraction_scrubbed",
+            f"discarded {len(rf['scrubbed_fields'])} implausible placeholder value(s) instead of "
+            f"reporting them as facts: {', '.join(rf['scrubbed_fields'])}. This document could not "
+            "be fully read; those fields are treated as unknown, not zero/epoch/placeholder.",
+        )
     return reader_turn
 
 
@@ -323,9 +338,9 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     # document arriving on `on_document_added`'s one-cascade-per-document
     # path): each run above already recomputes `combined_cents`/`audit_cents`
     # from the CURRENT, COMPLETE state of every document and the case's own
-    # patient/bill/hospital fields (`_all_line_items` scans every document on
-    # file, `_charity_care_erasure_cents` reads the case fresh) -- so it is
-    # already the right total, not a delta. Adding it to whatever was stored
+    # patient/bill/hospital fields (`auditor.all_line_items` scans every
+    # document on file, `_charity_care_erasure_cents` reads the case fresh) --
+    # so it is already the right total, not a delta. Adding it to whatever was stored
     # before double-counts on redelivery and inflates further with every extra
     # document. A straight assignment is the idempotent, honest number.
     case_patch = {

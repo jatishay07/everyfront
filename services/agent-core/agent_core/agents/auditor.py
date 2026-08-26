@@ -64,7 +64,15 @@ INSTRUCTION = (
 )
 
 
-def _all_line_items(case_id: str) -> list[dict]:
+def all_line_items(case_id: str) -> list[dict]:
+    """Every line item extracted across every document on file for this case.
+
+    Public (persona 5 WO8): `verifier.py` reuses this exact scan to decide
+    whether an `audit` filing has anything real behind it before letting it
+    go out -- see that module's docstring for why "zero line items" must
+    block the filing rather than let it send a records-request letter with
+    nothing to actually request.
+    """
     items: list[dict] = []
     for doc in store.list_documents(case_id):
         items.extend((doc.get("extracted") or {}).get("line_items") or [])
@@ -142,7 +150,7 @@ async def _cash_price_lookup(hospital: dict, codes: list[str]):
 
 
 async def _facts(case_id: str, case: dict) -> dict:
-    items = _all_line_items(case_id)
+    items = all_line_items(case_id)
     hospital = case.get("hospital") or {}
     cash_price_lookup = None
     cash_price_source = "no items to audit"

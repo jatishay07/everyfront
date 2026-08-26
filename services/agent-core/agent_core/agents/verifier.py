@@ -10,13 +10,32 @@ The cat-photo check rides on Reader's `is_income_proof` extraction field
 extraction already looked at the document and was asked to flag exactly this
 case, so a second model call to ask the same question again would just be
 burning quota for no new signal.
+
+DEFECT FIX (persona 5 WO8, "never file a case whose facts were never
+established"): two more checks, both traced live on `ef-2026-0006` (PROOF's
+deliberately-unparseable-bill fixture), whose corrupted PDF left Reader with
+nothing real to extract:
+
+  1. `filer.py` addresses every non-fax filing (charity_care, debt_validation,
+     audit) to `(case["hospital"] or {}).get("name", "unknown hospital")` --
+     a records-request letter or a FAP application literally addressed to
+     "unknown hospital" is not a graceful degradation, it is paperwork sent
+     against a party this system never identified. Any front whose channel
+     is not fax now requires a resolved hospital to pass Verifier.
+  2. `audit` was applicable, approved, and FILED on ef-2026-0006 despite zero
+     line items ever being extracted from any document -- there was nothing
+     for the records-request letter to actually request. `audit` now also
+     requires at least one real line item on file.
+
+Both are genuine "insufficient data" outcomes, not false positives: a case
+with a resolved hospital and real line items is completely unaffected.
 """
 
 from __future__ import annotations
 
-from .. import config
+from .. import config, delivery_bridge
 from ..store import store
-from . import common
+from . import auditor, common
 
 NAME = "verifier"
 
@@ -28,6 +47,11 @@ INSTRUCTION = (
 )
 
 
+def _hospital_resolved(case: dict) -> bool:
+    hospital = case.get("hospital")
+    return isinstance(hospital, dict) and bool(hospital)
+
+
 def _facts(case_id: str, case: dict, front: str) -> dict:
     patient = case.get("patient") or {}
     # §3.1 renamed annual_income -> annual_income_cents (2026-08-25); accept
@@ -36,6 +60,29 @@ def _facts(case_id: str, case: dict, front: str) -> dict:
     stated_income = patient.get("annual_income_cents") or patient.get("annual_income")
     stated_household = patient.get("household_size")
     issues: list[str] = []
+
+    # Check 1 (persona 5 WO8): `filer.py` addresses every mail-channel filing
+    # to the resolved hospital's name -- never fax, which routes to CMS's C2C
+    # contractor regardless of which hospital this is. A mail-channel front
+    # with no resolved hospital would file paperwork addressed to a party
+    # this system never identified (live: "unknown hospital" on
+    # ef-2026-0006's audit filing).
+    if delivery_bridge.channel_for_front(front) != "fax" and not _hospital_resolved(case):
+        issues.append(
+            f"no hospital could be resolved for this case -- the {front!r} filing would be "
+            "addressed to an unconfirmed hospital, which this system will not send"
+        )
+
+    # Check 2 (persona 5 WO8): an `audit` filing with zero real line items on
+    # file has nothing to actually request -- exactly ef-2026-0006's
+    # unparseable bill, where `audit` still came back applicable (a document
+    # was CLASSIFIED as an itemized bill) and got filed even though nothing
+    # was ever actually extracted from it.
+    if front == "audit" and not auditor.all_line_items(case_id):
+        issues.append(
+            "no line items were ever extracted for this case -- there is nothing on file "
+            "for an audit filing to report"
+        )
 
     if front == "charity_care":
         income_docs = [d for d in store.list_documents(case_id) if d.get("type") == "income_proof"]

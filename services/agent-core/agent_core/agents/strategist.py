@@ -74,6 +74,17 @@ def _facts(case_id: str, case: dict) -> dict:
     # (from compute_deadlines) and, for charity_care, bakes the eligibility
     # screen's explanation straight into `.reason` -- there is nothing left
     # for the Strategist to recompute here; it is pure orchestration.
+    #
+    # REMOVED 2026-08-26 (FORGE directive, persona 5 WO8): this used to also
+    # run a local `_veto_charity_care_without_a_resolved_hospital` here, a
+    # stopgap for a real bug in `rules.fronts._select_charity_care`
+    # (unresolved hospital defaulted to nonprofit=True, ef-2026-0006) that
+    # this persona could not edit directly. STATUTE has since fixed that bug
+    # in `rules.fronts` itself (commit 69f4531) -- `select_fronts` now
+    # already refuses charity_care correctly for an unresolved hospital, so
+    # a second copy of that same check here would be exactly the kind of
+    # duplicated, driftable logic §2.1 forbids ("all front-selection logic
+    # lives in packages/rules"). Deleted rather than left dormant.
     decisions = _sequence(rules_bridge.select_fronts(case))
 
     fronts = []

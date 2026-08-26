@@ -29,6 +29,11 @@ def test_fake_fax_send_records_and_returns_realistic_proof():
     assert result["vendor"] == "fake"
     assert result["status"] == "sent"
     assert result["proof"]["phaxio_id"] == result["vendor_id"]
+    # Regression (RELAY WO8): `agent_core.agents.filer` reads this exact key
+    # to decide "SIMULATED" vs "live" in the audit trail -- it must be True
+    # whenever the fake vendor is what actually ran, not just implied by
+    # `vendor == "fake"` elsewhere and left unpopulated here.
+    assert result["simulated"] is True
     assert len(vendor.sent) == 1
     assert vendor.sent[0]["destination"] == FAX_OK
 
@@ -47,6 +52,33 @@ def test_fake_mail_send_records_and_returns_tracking():
     assert result["vendor"] == "fake"
     assert "tracking" in result["proof"]
     assert vendor.sent[0]["destination"] == MAIL_OK
+    assert result["simulated"] is True  # regression, see the fax test above
+
+
+def test_send_filing_marks_a_non_fake_vendor_as_not_simulated():
+    """`simulated` must track whichever vendor actually ran, not always be
+    True -- a real Phaxio/Lob send (vendor name != "fake") must report
+    `simulated: False` so the audit trail can tell the two apart."""
+
+    class _StubRealVendor:
+        channel = "fax"
+
+        def send(self, filing_id, pdf, destination):
+            from delivery.vendors.base import VendorResult
+
+            return VendorResult(vendor="phaxio", vendor_id="real-123", status="sent")
+
+    result = send_filing(
+        filing_id="fil_5",
+        case_id="case_1",
+        front="ppdr",
+        channel="fax",
+        pdf=b"%PDF fake",
+        destination=FAX_OK,
+        fax_client=_StubRealVendor(),
+    )
+    assert result["vendor"] == "phaxio"
+    assert result["simulated"] is False
 
 
 def test_send_filing_refuses_unsafe_fax_destination():

@@ -290,6 +290,67 @@ class TestIllinoisUninsuredDiscount:
         assert d.due is None
 
 
+class TestImplausibleBasisDates:
+    """STATUTE wo7 (ef-2026-0006): a failed extraction backfilled
+    `first_statement_date`/`service_date` to 1970-01-01 (the Unix epoch), and
+    this engine used to compute a fully-cited, confidently-wrong deadline
+    from it. An implausible basis date must now degrade exactly like a
+    missing one -- see `_valid_basis_date`."""
+
+    EPOCH = date(1970, 1, 1)
+
+    def test_epoch_first_statement_date_yields_no_federal_deadline(self):
+        b = _bill(first_statement_date=self.EPOCH)
+        d = _front(compute_deadlines(b, "TX"), "Charity care")
+        assert d.due is None
+        assert d.basis_date is None
+
+    def test_epoch_first_statement_date_yields_no_eca_deadline(self):
+        b = _bill(first_statement_date=self.EPOCH)
+        names = [d.name for d in compute_deadlines(b, "TX")]
+        assert not any("Extraordinary collection" in n for n in names)
+
+    def test_epoch_first_statement_date_yields_no_ppdr_deadline(self):
+        b = _bill(first_statement_date=self.EPOCH)
+        names = [d.name for d in compute_deadlines(b, "TX")]
+        assert not any("dispute resolution" in n for n in names)
+
+    def test_epoch_validation_notice_date_yields_no_validation_deadline(self):
+        b = _bill(validation_notice_date=self.EPOCH)
+        names = [d.name for d in compute_deadlines(b, "TX")]
+        assert not any("Written dispute" in n for n in names)
+
+    def test_a_plausible_date_just_inside_the_floor_is_accepted(self):
+        b = _bill(first_statement_date=date(2000, 1, 1))
+        d = _front(compute_deadlines(b, "TX"), "Charity care")
+        assert d.due == date(2000, 1, 1) + __import__("datetime").timedelta(days=FAP_WINDOW_DAYS)
+
+    def test_a_date_one_day_before_the_floor_is_rejected(self):
+        b = _bill(first_statement_date=date(1999, 12, 31))
+        d = _front(compute_deadlines(b, "TX"), "Charity care")
+        assert d.due is None
+
+    def test_implausible_date_is_excluded_from_latest_of_in_favor_of_a_real_one(self):
+        """IL's four-trigger 'latest of' must skip a garbage date rather than
+        let it win just for being numerically the largest-looking value."""
+        b = _bill(discharge_date=date(2026, 1, 12), screening_date=self.EPOCH)
+        d = _front(compute_deadlines(b, "IL", insured=False), "uninsured discount")
+        assert d.basis_field == "discharge_date"
+        assert d.basis_date == date(2026, 1, 12)
+
+    def test_latest_of_with_every_trigger_implausible_yields_no_guess(self):
+        STATE_FAP_WINDOWS["ZU"] = StateFAPRule(
+            365, "test-only", runs_from_latest_of=("discharge_date", "screening_date")
+        )
+        try:
+            b = _bill(discharge_date=self.EPOCH, screening_date=self.EPOCH)
+            d = _front(compute_deadlines(b, "ZU"), "Charity care")
+            assert d.due is None
+            assert d.basis_field == ""
+        finally:
+            del STATE_FAP_WINDOWS["ZU"]
+
+
 def test_a_shorter_state_fap_window_cannot_narrow_the_federal_floor():
     """26 CFR 1.501(r) is a minimum. A state may extend it, never shrink it.
 

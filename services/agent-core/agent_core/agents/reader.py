@@ -15,6 +15,10 @@ that returns that already-computed result and narrate it for the audit log.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
+from datetime import date
+
 from .. import config, genai_client
 from . import common
 
@@ -34,21 +38,40 @@ INSTRUCTION = (
 EXTRACTION_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "provider_name": {"type": "string"},
-        "hospital_ein": {"type": "string"},
-        "hospital_ccn": {"type": "string"},
+        # `nullable: True` on every scalar field below (added post-live-defect,
+        # see this module's docstring extension and _scrub_ungrounded): the
+        # original schema gave the model no formally valid way to say "this
+        # concept exists but I could not read it" other than the prose
+        # instruction "use null/omit fields you cannot find" -- for a
+        # `type: string`/`type: integer` field with no null alternative,
+        # structured-output decoding can only emit a value of that type, so a
+        # model that "cannot find" an EIN or a date sometimes filled the slot
+        # with a plausible-looking placeholder instead of leaving it out.
+        # `nullable` gives it a real JSON `null` to emit instead.
+        "provider_name": {"type": "string", "nullable": True},
+        "hospital_ein": {"type": "string", "nullable": True},
+        "hospital_ccn": {"type": "string", "nullable": True},
         "amount_cents": {
             "type": "integer",
+            "nullable": True,
             "description": "The single TOTAL amount due, e.g. a line reading 'TOTAL: $2,625.00' "
             "-> 262500. This is separate from, and in addition to, every individual line_items "
             "row -- always extract both when the document has a line-item table.",
         },
-        "service_date": {"type": "string", "description": "ISO-8601 date"},
-        "first_statement_date": {"type": "string", "description": "ISO-8601 date"},
-        "gfe_amount_cents": {"type": "integer"},
-        "in_collections": {"type": "boolean"},
-        "collector_name": {"type": "string"},
-        "validation_notice_date": {"type": "string", "description": "ISO-8601 date"},
+        "service_date": {"type": "string", "nullable": True, "description": "ISO-8601 date"},
+        "first_statement_date": {
+            "type": "string",
+            "nullable": True,
+            "description": "ISO-8601 date",
+        },
+        "gfe_amount_cents": {"type": "integer", "nullable": True},
+        "in_collections": {"type": "boolean", "nullable": True},
+        "collector_name": {"type": "string", "nullable": True},
+        "validation_notice_date": {
+            "type": "string",
+            "nullable": True,
+            "description": "ISO-8601 date",
+        },
         "line_items": {
             "type": "array",
             "description": "Every row of an itemized statement's billing table -- one entry per "
@@ -75,10 +98,11 @@ EXTRACTION_SCHEMA: dict = {
             "items": {"type": "string"},
             "description": "Documents a denial letter says are missing/required.",
         },
-        "household_size": {"type": "integer"},
-        "annual_income_cents": {"type": "integer"},
+        "household_size": {"type": "integer", "nullable": True},
+        "annual_income_cents": {"type": "integer", "nullable": True},
         "is_income_proof": {
             "type": "boolean",
+            "nullable": True,
             "description": "False for the cat-photo case: an upload that is not "
             "actually an income document at all.",
         },
@@ -93,11 +117,90 @@ EXTRACTION_INSTRUCTION = (
     "you MUST populate line_items with one entry per row, in order, including exact duplicate "
     "rows verbatim -- AND separately extract the aggregate fields (amount_cents, service_date, "
     "first_statement_date, provider_name, hospital_ein) that appear elsewhere on the same "
-    "document; extracting the table does not excuse skipping those. Use null/omit fields you "
-    "genuinely cannot find. Dates must be ISO-8601 (YYYY-MM-DD). Money fields are integer cents. "
-    "If this document is clearly not a real income document (e.g. a photo of a pet, a screenshot "
-    "unrelated to income), set is_income_proof to false."
+    "document; extracting the table does not excuse skipping those. Use JSON null for any field "
+    "you genuinely cannot find -- every field in this schema accepts null. NEVER invent a "
+    "plausible-looking placeholder instead: not '00-0000000' or any other made-up EIN/CCN, not "
+    "'Unknown'/'N/A' as a name, not 1970-01-01 (Unix epoch) or any other guessed date. If a "
+    "document is corrupted, unreadable, or truncated, it is far better to return null for every "
+    "field than to fabricate a plausible-sounding one. Dates must be ISO-8601 (YYYY-MM-DD). Money "
+    "fields are integer cents. If this document is clearly not a real income document (e.g. a "
+    "photo of a pet, a screenshot unrelated to income), set is_income_proof to false."
 )
+
+# Belt-and-suspenders for the instruction above: even a well-instructed,
+# schema-nullable model can still emit a plausible-looking sentinel instead of
+# null (this is exactly what happened live on ef-2026-0006, PROOF's
+# deliberately-unparseable-bill fixture -- see fixtures/generated/cases/
+# case_06_unparseable_bill/case.json's own docstring-equivalent `notes` field).
+# `_scrub_ungrounded` is the actual guarantee: it runs on every extraction,
+# regardless of model behavior, and removes values that match known
+# fabrication patterns rather than trusting the prompt to have worked.
+_MIN_PLAUSIBLE_DATE = date(2000, 1, 1)  # no bill in this system predates this era
+_PLACEHOLDER_NAME_STRINGS = {
+    "unknown",
+    "n/a",
+    "na",
+    "none",
+    "not available",
+    "not applicable",
+    "unavailable",
+    "not provided",
+    "tbd",
+    "redacted",
+}
+_DIGITS_RE = re.compile(r"\d")
+
+
+def _all_same_digit(value: str) -> bool:
+    """True for '00-0000000', '000000', '111111', etc -- a real IRS EIN or CMS
+    CCN is never every digit identical; a model reaching for *a* plausible ID
+    when it has none tends to reach for exactly this shape.
+    """
+    digits = _DIGITS_RE.findall(value)
+    return len(digits) >= 2 and len(set(digits)) == 1
+
+
+def _is_epoch_or_implausible_date(value: str) -> bool:
+    try:
+        parsed = date.fromisoformat(value[:10])
+    except (ValueError, TypeError):
+        return False
+    return parsed < _MIN_PLAUSIBLE_DATE
+
+
+# (schema field -> implausibility check) for every scalar field a fabricated
+# placeholder has actually been observed in, live, on ef-2026-0006.
+_STRING_SCRUB_RULES: dict[str, Callable[[str], bool]] = {
+    "hospital_ein": _all_same_digit,
+    "hospital_ccn": _all_same_digit,
+    "provider_name": lambda v: v.strip().lower() in _PLACEHOLDER_NAME_STRINGS,
+    "service_date": _is_epoch_or_implausible_date,
+    "first_statement_date": _is_epoch_or_implausible_date,
+    "validation_notice_date": _is_epoch_or_implausible_date,
+}
+
+
+def _scrub_ungrounded(extraction: dict) -> tuple[dict, list[str]]:
+    """Strip fields whose value matches a known fabrication pattern rather
+    than trusting the model to have honored the "use null" instruction.
+
+    Returns (cleaned_extraction, names_of_scrubbed_fields). A scrubbed field
+    is DROPPED from the dict entirely (equivalent to the model never having
+    reported it) -- downstream code (`pipeline._merge_bill_fields`,
+    `casedata.parse_bill_dates`) already treats an absent field as "unknown",
+    never as zero/epoch/empty-string, so dropping is the correct degrade.
+    """
+    if not isinstance(extraction, dict) or "_extraction_error" in extraction:
+        return extraction, []
+
+    cleaned = dict(extraction)
+    scrubbed: list[str] = []
+    for field, is_implausible in _STRING_SCRUB_RULES.items():
+        value = cleaned.get(field)
+        if isinstance(value, str) and value.strip() and is_implausible(value):
+            del cleaned[field]
+            scrubbed.append(field)
+    return cleaned, scrubbed
 
 
 async def run(case_id: str, doc_id: str, doc_text: str, doc_type_hint: str | None = None) -> dict:
@@ -108,9 +211,10 @@ async def run(case_id: str, doc_id: str, doc_text: str, doc_type_hint: str | Non
     """
     model = config.GEMINI_MODEL
     classification = genai_client.gemma_classify(doc_text)
-    extraction = genai_client.gemini_extract_json(
+    raw_extraction = genai_client.gemini_extract_json(
         doc_text, EXTRACTION_SCHEMA, EXTRACTION_INSTRUCTION
     )
+    extraction, scrubbed_fields = _scrub_ungrounded(raw_extraction)
     label = doc_type_hint or classification["label"]
 
     fact = {
@@ -121,6 +225,12 @@ async def run(case_id: str, doc_id: str, doc_text: str, doc_type_hint: str | Non
         "gemma_error": classification["error"],
         "gemma_fallback_used": classification.get("fallback_model_used", False),
         "extraction": extraction,
+        # Defect fix (persona 5 WO8, "graceful degradation, not fabrication"):
+        # names every field this run discarded as an implausible placeholder
+        # (see `_scrub_ungrounded`) so the case's own event log -- not just
+        # this module's internals -- says plainly why a fact is missing
+        # rather than looking like the document simply never mentioned it.
+        "scrubbed_fields": scrubbed_fields,
         "citations": [],
     }
     tool = common.make_fact_tool(
