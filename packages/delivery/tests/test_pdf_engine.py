@@ -155,11 +155,57 @@ def test_debt_validation_letter_cites_the_statute_and_amount():
     assert "SYNTHETIC" in text  # watermark convention, agreement item 6
 
 
+def test_debt_validation_letter_carries_the_patients_own_name_and_address():
+    """Regression (RELAY WO8, item 4 spot-check): this letter used to read
+    `patient["first_name"]`/`patient["last_name"]` (keys that do not exist in
+    contract §3.1 -- `patient` carries one `name` field) and
+    `patient["address"]` (also not a §3.1 key -- an address is passed as
+    `extra["patient_address"]`, same convention as `forms.py`). Both silently
+    rendered blank instead of raising, in both the greeting and the
+    signature, for every case ever filed on this letter. Assert every one of
+    those four spots actually carries this case's own data."""
+    pdf_bytes = fill_form("debt_validation_letter", CASE, EXTRA)
+    text = _text(pdf_bytes)
+    assert text.count("Maria Gonzalez") == 2  # greeting AND signature
+    assert "742 Evergreen Ter" in text
+    assert "Chicago, IL 60601" in text
+
+
 def test_records_request_letter_default_citation():
     pdf_bytes = fill_form("records_request_letter", CASE, EXTRA)
     text = _text(pdf_bytes)
     assert "42 USC 1395b-7(b)" in text
     assert "2560.503-1" not in text  # ERISA cite only added when applicable
+
+
+def test_records_request_letter_carries_the_patients_own_name_and_address():
+    """Same regression as the debt-validation letter above, for this letter's
+    identical greeting/signature/address construction."""
+    pdf_bytes = fill_form("records_request_letter", CASE, EXTRA)
+    text = _text(pdf_bytes)
+    assert text.count("Maria Gonzalez") == 2  # greeting AND signature
+    assert "742 Evergreen Ter" in text
+
+
+def test_letters_do_not_leak_one_case_patient_into_another():
+    """Item 4's actual warning ('a form filled with another case's patient
+    would be far worse than an empty one'): render the same letter for two
+    different cases back to back and confirm each PDF carries only its own
+    patient's name, never the other's -- e.g. a stale module-level default
+    or an accidentally-shared mutable dict would show up here as bleed."""
+    other_case = {
+        **CASE,
+        "patient": {**CASE["patient"], "name": "Denise Okafor"},
+    }
+    other_extra = {**EXTRA, "patient_address": {"street": "9 Other St", "city": "Other City"}}
+
+    mine = _text(fill_form("debt_validation_letter", CASE, EXTRA))
+    theirs = _text(fill_form("debt_validation_letter", other_case, other_extra))
+
+    assert "Maria Gonzalez" in mine and "Denise Okafor" not in mine
+    assert "Denise Okafor" in theirs and "Maria Gonzalez" not in theirs
+    assert "742 Evergreen Ter" in mine and "9 Other St" not in mine
+    assert "9 Other St" in theirs and "742 Evergreen Ter" not in theirs
 
 
 def test_records_request_letter_adds_erisa_citation_when_denied_claim():
