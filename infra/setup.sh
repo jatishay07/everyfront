@@ -411,14 +411,75 @@ else
     if [[ -n "$CHANNEL_NAME" ]]; then
       ok "notification channel -> $ALERT_EMAIL"
     else
-      printf '    \033[33mwarn\033[0m could not create a notification channel (needs monitoring.notificationChannels.create) -- dead-letter alert skipped\n'
+      warn "could not create a notification channel (needs monitoring.notificationChannels.create)"
     fi
   fi
+fi
 
+# ---------------------------------------------------------------- budget guard
+# §6, amended 2026-08-21: $150 balance with tripwires at 33/66/90/100%.
+#
+# Two things the original create missed, both confirmed against the live budget
+# 2026-08-26. (1) `notificationsRule: {}` -- no channel was ever attached, see
+# the section above. (2) `budgetFilter` carried only calendarPeriod and credit
+# treatment, so the budget measured the WHOLE billing account, not this project;
+# on a shared billing account another project's spend would trip our alert and
+# ours would hide under someone else's headroom. --filter-projects scopes it.
+#
+# Applied on the update path too, not just create: the budget already exists in
+# every project this has ever run against, so a create-only guard would skip
+# straight past the defect forever.
+log "Budget alerts"
+_budget_flags=(
+  --budget-amount=150USD
+  --filter-projects="projects/${PROJECT_ID}"
+)
+if [[ -n "$CHANNEL_NAME" ]]; then
+  _budget_flags+=(--notifications-rule-monitoring-notification-channels="$CHANNEL_NAME")
+fi
+if [[ -n "$BILLING_ACCOUNT" ]]; then
+  BUDGET_ID="$(gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
+    --filter='displayName="everyfront-guard"' --format='value(name)' 2>/dev/null | head -1)"
+  if [[ -n "$BUDGET_ID" ]]; then
+    if gcloud billing budgets update "$BUDGET_ID" "${_budget_flags[@]}" >/dev/null 2>&1; then
+      ok "budget everyfront-guard reconciled (scoped to $PROJECT_ID${CHANNEL_NAME:+, -> $ALERT_EMAIL})"
+    else
+      warn "budget update failed (needs billing.budgets.update) -- check notificationsRule/budgetFilter in the console"
+    fi
+  else
+    if gcloud billing budgets create --billing-account="$BILLING_ACCOUNT" \
+         --display-name="everyfront-guard" "${_budget_flags[@]}" \
+         --threshold-rule=percent=0.33 --threshold-rule=percent=0.66 \
+         --threshold-rule=percent=0.90 --threshold-rule=percent=1.0 >/dev/null 2>&1; then
+      ok "budget alerts at 33/66/90/100% of \$150 (scoped to $PROJECT_ID)"
+    else
+      warn "budget create failed (needs billing.budgets.create) -- set it in the console"
+    fi
+  fi
+else
+  warn "BILLING_ACCOUNT unset, skipping budget alerts"
+fi
+
+# ---------------------------------------------------------------- dead-letter alerting
+# §2.3 requires handlers tolerate redelivery, but a poison message that
+# exhausts max-delivery-attempts (5, set above) and lands in `dead-letter`
+# must not then vanish silently. `ef-dead-letter` gives it somewhere to land;
+# without this alert nothing ever looks at that somewhere -- confirmed live
+# 2026-08-25: `ef-dead-letter` sat with zero subscribers reading it and zero
+# monitoring policies of any kind on the project, so a dead-lettered message
+# would sit unnoticed until its 7-day retention silently dropped it. This is
+# the "something would notice" half of WO4/WO6 task 4.
+#
+# The policy is only half the mechanism: the Pub/Sub service agent needs the
+# two IAM bindings granted in "Dead-letter delivery permissions" above or
+# nothing ever reaches `dead-letter` and this alert cannot fire, however
+# correct it looks in the console.
+log "Dead-letter alerting"
+if [[ -n "$CHANNEL_NAME" ]]; then
   if gcloud alpha monitoring policies list \
        --filter='displayName="everyfront-dead-letter-nonempty"' --format='value(name)' 2>/dev/null | grep -q .; then
     skip "alert policy everyfront-dead-letter-nonempty"
-  elif [[ -n "$CHANNEL_NAME" ]]; then
+  else
     _policy_json="$(mktemp)"
     cat > "$_policy_json" <<POLICY_EOF
 {
@@ -447,10 +508,12 @@ POLICY_EOF
          --notification-channels="$CHANNEL_NAME" >/dev/null 2>&1; then
       ok "alert: ef-dead-letter non-empty -> $ALERT_EMAIL"
     else
-      printf '    \033[33mwarn\033[0m could not create the dead-letter alert policy (needs monitoring.alertPolicies.create)\n'
+      warn "could not create the dead-letter alert policy (needs monitoring.alertPolicies.create)"
     fi
     rm -f "$_policy_json"
   fi
+else
+  warn "no notification channel -- dead-letter alert skipped, a poison message would go unnoticed"
 fi
 
 log "Setup complete for $PROJECT_ID"
