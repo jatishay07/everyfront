@@ -3,18 +3,34 @@
 #
 # WHAT THIS SCRIPT IS AND ISN'T
 # ------------------------------
-# `infra/setup.sh`/`infra/deploy.sh` (ATLAS's files -- this script does not
-# touch them) provision topics/subscriptions/service accounts/Cloud Run
-# services but never create a Secret Manager secret, never wire one into a
-# deployed service's env, never convert `ef-intake-email` from pull to push,
-# and never provision the Cloud Scheduler job WO1 calls for -- so as of this
-# work order a real email could arrive and NOTHING would happen: no push
-# delivery, no OAuth credentials, no GCS_DOCUMENTS_BUCKET even set. This
-# script closes every one of those gaps for `services/intake`'s own path by
-# operating on already-created infra (secrets, an already-deployed Cloud Run
-# service, an already-created subscription) with `gcloud`/`curl` -- it is
-# deliberately NOT a change to ATLAS's `setup.sh`/`deploy.sh` (outside RELAY's
-# owned paths; see the PR's HANDOFF for the equivalent permanent diff there).
+# OWNERSHIP, amended 2026-08-26 (FORGE). This header used to say that
+# `infra/setup.sh`/`infra/deploy.sh` never convert `ef-intake-email` from pull
+# to push and never provision the Cloud Scheduler job. That was true when this
+# script was written and became false one minute later, at commit `695ac88`:
+# `deploy.sh` now does both, and `setup.sh` now creates the secret NAMES with
+# per-secret IAM and grants gmail-api-push its publisher role on the topic.
+#
+# Stale ownership comments are not cosmetic here. This project's defect #2 was
+# exactly one: `setup.sh`'s comment promised `deploy.sh` would convert the
+# subscriptions to push, `deploy.sh` never did, and five subscriptions sat
+# PULL with no subscriber while every service reported success.
+#
+# So, explicitly, as of today:
+#   infra/setup.sh   OWNS  topics, subscriptions, service accounts, secret
+#                          NAMES + their per-secret IAM, the gmail-api-push
+#                          publisher grant, dead-letter IAM, budget.
+#   infra/deploy.sh  OWNS  Cloud Run services, their literal env vars
+#                          (including GCS_DOCUMENTS_BUCKET), push endpoints,
+#                          and the Cloud Scheduler renewal job.
+#   this script      OWNS  secret VALUES (the OAuth token and vendor keys),
+#                          wiring those secrets into the two services, and
+#                          starting the first Gmail watch.
+#
+# The overlap that remains is deliberate and idempotent: this script re-asserts
+# the push endpoint and the scheduler job because it must work even if someone
+# runs it against a project where only `setup.sh` has been run. Where it
+# overlaps it must not DRIFT -- note that its `jobs update http` omits
+# `--schedule`, so `deploy.sh` remains the source of truth for the cadence.
 #
 # IDEMPOTENT BY CONSTRUCTION, same convention as setup.sh: safe to re-run
 # after minting a new token, rotating a vendor key, or a fresh `deploy.sh
@@ -146,7 +162,9 @@ if _service_exists ef-intake; then
     warn "ef-intake: only GCS_DOCUMENTS_BUCKET wired -- no OAuth secrets were provided"
   fi
 else
-  warn "ef-intake not deployed yet -- run infra/deploy.sh intake first, then re-run this script"
+  die "ef-intake is not deployed, so its secrets cannot be wired.
+  Run:  PROJECT_ID=${PROJECT_ID} ./infra/deploy.sh intake
+  then re-run this script. Order matters: deploy FIRST, this script SECOND."
 fi
 
 if _service_exists ef-agent-core; then
@@ -161,7 +179,9 @@ if _service_exists ef-agent-core; then
     warn "ef-agent-core: only GCS_DOCUMENTS_BUCKET wired -- vendor/calendar/drive secrets stay off"
   fi
 else
-  warn "ef-agent-core not deployed yet -- run infra/deploy.sh agent-core first, then re-run"
+  die "ef-agent-core is not deployed, so its secrets cannot be wired.
+  Run:  PROJECT_ID=${PROJECT_ID} ./infra/deploy.sh agent-core
+  then re-run this script. Order matters: deploy FIRST, this script SECOND."
 fi
 
 # ------------------------------------------------------- Pub/Sub push wiring
@@ -186,7 +206,9 @@ if _service_exists ef-intake; then
       >/dev/null
     ok "ef-intake-email -> ${INTAKE_URL}/pubsub/gmail"
   else
-    warn "ef-intake-email subscription does not exist -- run infra/setup.sh first"
+    die "the ef-intake-email subscription does not exist, so Gmail pushes have
+  nowhere to land. Run:  PROJECT_ID=${PROJECT_ID} ./infra/setup.sh
+  then re-run this script."
   fi
 else
   warn "ef-intake not deployed -- cannot wire a push endpoint that doesn't exist yet"
@@ -221,17 +243,41 @@ if _service_exists ef-intake; then
   # the meantime.
   if [ -n "$INTAKE_SECRET_MAP" ]; then
     log "Starting the initial Gmail watch"
-    if curl -sS -X POST "${INTAKE_URL}/gmail/watch/renew" -o /tmp/watch_result.json -w '%{http_code}' \
-        | grep -q '^200$'; then
+    # THE pass/fail line for this entire script. `die`, not `warn`: everything
+    # above is preparation, and a failure here means the mailbox is not being
+    # watched at all -- the feature is dead, not degraded. This used to warn
+    # and let the script reach "Done." and exit 0, which is this project's
+    # signature failure: a green transcript over a feature that does nothing.
+    _watch_code="$(curl -sS -X POST "${INTAKE_URL}/gmail/watch/renew" \
+      -o /tmp/watch_result.json -w '%{http_code}' || true)"
+    if [ "$_watch_code" = "200" ]; then
       ok "watch started: $(cat /tmp/watch_result.json)"
     else
-      warn "watch call did not return 200 -- inspect: curl -X POST ${INTAKE_URL}/gmail/watch/renew"
+      # Echo the body. The old version discarded it, which mattered: the most
+      # likely failure is Gmail refusing the watch because
+      # gmail-api-push@system.gserviceaccount.com lacks pubsub.publisher on
+      # the topic, and that only says so in the response body.
+      die "watch call returned ${_watch_code:-no response}, not 200. Gmail is NOT watching the inbox.
+  Response body:
+$(sed 's/^/    /' /tmp/watch_result.json 2>/dev/null || echo '    (empty)')
+
+  If it mentions 'User not authorized to perform this action', the Gmail push
+  grant is missing -- infra/setup.sh now creates it, so re-run:
+    PROJECT_ID=${PROJECT_ID} ./infra/setup.sh
+  Then re-run this script. Retry the call alone with:
+    curl -sS -X POST ${INTAKE_URL}/gmail/watch/renew"
     fi
   else
-    warn "skipping the initial watch call -- no OAuth secrets were wired this run"
+    die "no OAuth secrets were wired this run, so the initial watch was skipped.
+  Gmail intake is NOT live. Set GOOGLE_OAUTH_CLIENT_ID / _SECRET / _REFRESH_TOKEN
+  (see infra/OAUTH.md) and re-run."
   fi
 else
-  warn "ef-intake not deployed -- cannot schedule renewal against a URL that doesn't exist yet"
+  die "ef-intake is not deployed, so there is no URL to watch against.
+  Run:  PROJECT_ID=${PROJECT_ID} ./infra/deploy.sh intake
+  then re-run this script. Deploy BEFORE this script, never after -- deploy.sh
+  sets the service's literal env vars and a later deploy would drop what this
+  script wired."
 fi
 
 log "Done. Verify with:"
