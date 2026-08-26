@@ -89,8 +89,8 @@ class CaseStore:
         return "firestore" if self._client is not None else "memory"
 
     # ---------------------------------------------------------------- cases
-    def create_case(self, case_id: str, data: dict) -> dict:
-        payload = {
+    def _new_case_payload(self, data: dict) -> dict:
+        return {
             "status": "intake",
             "fronts": [],
             "savings_found_cents": 0,
@@ -104,6 +104,9 @@ class CaseStore:
             "updated_at": _now_iso(),
             **data,
         }
+
+    def create_case(self, case_id: str, data: dict) -> dict:
+        payload = self._new_case_payload(data)
         if self._client is not None:
             self._client.collection("cases").document(case_id).set(payload)
         else:
@@ -112,6 +115,40 @@ class CaseStore:
                 self._documents.setdefault(case_id, {})
                 self._events.setdefault(case_id, [])
         return self.get_case(case_id)
+
+    def create_case_if_absent(self, case_id: str, data: dict) -> tuple[dict, bool]:
+        """Create `cases/{case_id}` ONLY if it does not exist yet. Returns
+        `(case, created)`.
+
+        `create_case` uses `.set()`, which overwrites: calling it for a case
+        that already exists silently discards its `fronts[]`, its status and
+        every field the cascade has written. That is fine for the two callers
+        that mint a fresh id (`POST /cases`, `/demo/inject_bill`) and unsafe
+        for the one that does NOT: agent-core's document-added push handler
+        derives the case id from the Gmail thread (`case-{thread_id}`), so two
+        attachments on one email -- or a Pub/Sub redelivery -- race on exactly
+        the same id. Firestore's `create()` fails with AlreadyExists rather
+        than clobbering, which makes the loser of that race a no-op instead of
+        a case reset to `intake` with no fronts.
+        """
+        if self._client is not None:
+            from google.api_core import exceptions as gexc
+
+            try:
+                self._client.collection("cases").document(case_id).create(
+                    self._new_case_payload(data)
+                )
+            except gexc.Conflict:  # AlreadyExists subclasses Conflict -- catch both
+                return self.get_case(case_id), False
+            return self.get_case(case_id), True
+
+        with self._lock:
+            created = case_id not in self._cases
+            if created:
+                self._cases[case_id] = copy.deepcopy(self._new_case_payload(data))
+                self._documents.setdefault(case_id, {})
+                self._events.setdefault(case_id, [])
+        return self.get_case(case_id), created
 
     def get_case(self, case_id: str) -> dict | None:
         if self._client is not None:
@@ -293,6 +330,41 @@ class CaseStore:
             with self._lock:
                 self._documents.setdefault(case_id, {})[doc_id] = copy.deepcopy(payload)
         return doc_id
+
+    def add_document_if_absent(self, case_id: str, doc_id: str, doc: dict) -> tuple[dict, bool]:
+        """Create `cases/{case_id}/documents/{doc_id}` ONLY if it does not
+        exist yet. Returns `(document, created)`.
+
+        Same hazard as `create_case_if_absent`, one level down: `add_document`
+        `.set()`s the whole document, so re-adding one that Reader has already
+        classified wipes its `type` and `extracted` back to the intake shape.
+        The Gmail intake path derives `doc_id` deterministically from
+        `(message_id, filename)` (services/intake/intake/pipeline.py), so a
+        Pub/Sub redelivery of an event whose handler previously failed reaches
+        this method with an id that already holds a fully-read document.
+        """
+        payload = {"verified": None, "verification_notes": "", "uploaded_at": _now_iso(), **doc}
+        if self._client is not None:
+            from google.api_core import exceptions as gexc
+
+            ref = (
+                self._client.collection("cases")
+                .document(case_id)
+                .collection("documents")
+                .document(doc_id)
+            )
+            try:
+                ref.create(payload)
+            except gexc.Conflict:  # AlreadyExists subclasses Conflict -- catch both
+                return self.get_document(case_id, doc_id), False
+            return self.get_document(case_id, doc_id), True
+
+        with self._lock:
+            bucket = self._documents.setdefault(case_id, {})
+            created = doc_id not in bucket
+            if created:
+                bucket[doc_id] = copy.deepcopy(payload)
+        return self.get_document(case_id, doc_id), created
 
     def get_document(self, case_id: str, doc_id: str) -> dict | None:
         if self._client is not None:

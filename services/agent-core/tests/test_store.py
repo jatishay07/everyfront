@@ -286,3 +286,42 @@ def test_writes_never_resurrect_a_purged_case():
     assert s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "open"}) is None
     assert s.upsert_front_from_analysis("c1", {"front": "audit", "applicable": True}) is None
     assert s.get_case("c1") is None
+
+
+def test_create_case_if_absent_creates_once_and_never_clobbers():
+    """Two Gmail attachments on one email derive the SAME `case-{thread_id}`
+    id, and a Pub/Sub redelivery reaches the same id again. `create_case`
+    `.set()`s, so a second call would reset the case to `intake` with no
+    fronts, discarding everything the first cascade wrote.
+    """
+    s = make_store()
+    case, created = s.create_case_if_absent("case-thread-1", {"patient": {}, "bill": {}})
+    assert created is True
+    assert case["status"] == "intake"
+
+    s.update_case("case-thread-1", {"status": "strategy_ready"})
+    s.upsert_front("case-thread-1", {"front": "audit", "applicable": True, "status": "filed"})
+
+    case, created = s.create_case_if_absent("case-thread-1", {"patient": {}, "bill": {}})
+    assert created is False
+    assert case["status"] == "strategy_ready"
+    assert [f["front"] for f in case["fronts"]] == ["audit"]
+    assert len(s.list_cases()) == 1
+
+
+def test_add_document_if_absent_preserves_what_reader_wrote():
+    """The same hazard one level down: a redelivered intake event must not
+    wipe the `type`/`extracted` Reader already wrote on that document."""
+    s = make_store()
+    s.create_case("c1", {})
+    doc, created = s.add_document_if_absent("c1", "d1", {"type": "", "raw_text": "a bill"})
+    assert created is True
+    assert doc["verified"] is None  # contract §3.1 default still applied
+
+    s.update_document("c1", "d1", {"type": "bill", "extracted": {"amount_cents": 262500}})
+
+    doc, created = s.add_document_if_absent("c1", "d1", {"type": "", "raw_text": "a bill"})
+    assert created is False
+    assert doc["type"] == "bill"
+    assert doc["extracted"] == {"amount_cents": 262500}
+    assert len(s.list_documents("c1")) == 1
