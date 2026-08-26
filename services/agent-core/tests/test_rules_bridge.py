@@ -119,6 +119,39 @@ def test_check_denial_lawfulness_all_listed_is_lawful():
     assert result.unlisted_docs == ()
 
 
+def test_fallback_select_fronts_unresolved_hospital_no_charity_care():
+    """persona 5 WO8: `_fallback_select_fronts` is only reachable if STATUTE's
+    real `rules.fronts` fails to import, but it must not carry the same
+    "unresolved hospital defaults to nonprofit=True" defect that live traffic
+    hit in `rules.fronts` itself (that real bug is STATUTE's file, out of this
+    persona's owned paths -- see strategist.py's HANDOFF). This bridge's OWN
+    fallback copy is ours to fix directly.
+    """
+    case = {"bill": {}, "patient": {}, "hospital": {}}
+    cc = next(d for d in rules_bridge._fallback_select_fronts(case) if d.front == "charity_care")
+    assert cc.applicable is False
+    assert "no hospital" in cc.reason.lower()
+
+
+def test_fallback_select_fronts_missing_hospital_key_no_charity_care():
+    case = {"bill": {}, "patient": {}}
+    cc = next(d for d in rules_bridge._fallback_select_fronts(case) if d.front == "charity_care")
+    assert cc.applicable is False
+
+
+def test_fallback_select_fronts_resolved_nonprofit_hospital_charity_care_ok():
+    case = {"bill": {}, "patient": {}, "hospital": {"nonprofit": True}}
+    cc = next(d for d in rules_bridge._fallback_select_fronts(case) if d.front == "charity_care")
+    assert cc.applicable is True
+
+
+def test_fallback_select_fronts_resolved_for_profit_hospital_no_charity_care():
+    case = {"bill": {}, "patient": {}, "hospital": {"nonprofit": False}}
+    cc = next(d for d in rules_bridge._fallback_select_fronts(case) if d.front == "charity_care")
+    assert cc.applicable is False
+    assert "for-profit" in cc.reason
+
+
 def test_bridge_actually_resolves_to_statute_not_the_vendored_fallback():
     """Regression guard for the sys.path ordering trap this module's
     docstring and conftest.py both describe: services/agent-core ships a

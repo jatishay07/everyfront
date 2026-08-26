@@ -20,6 +20,8 @@ inspectable, not just a docstring.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from google.adk.tools.agent_tool import AgentTool
 
 from .. import config, rules_bridge
@@ -69,12 +71,66 @@ def _sequence(decisions: list) -> list:
     return sorted(decisions, key=key)
 
 
+def _no_hospital_resolved(case: dict) -> bool:
+    hospital = case.get("hospital")
+    return not (isinstance(hospital, dict) and hospital)
+
+
+def _veto_charity_care_without_a_resolved_hospital(decisions: list, case: dict) -> list:
+    """HANDOFF -> STATUTE, `packages/rules/rules/fronts.py:121`
+    (`_select_charity_care`): `hospital.get("nonprofit", True) is False` reads
+    an UNRESOLVED hospital (`{}`, when Lookup could not match the bill to any
+    seeded record) exactly like a CONFIRMED nonprofit -- both skip past the
+    for-profit early-return and fall through to screening eligibility off the
+    patient's income alone. Live on `ef-2026-0006` (PROOF's deliberately-
+    unparseable-bill fixture) this let `charity_care` come back
+    `applicable: True`, with a real CA statutory citation, for a bill whose
+    hospital was never identified at all -- Lookup's own event on that same
+    case said plainly "could not be resolved." That is `packages/rules`,
+    which playbook §0 rule 2 forbids this persona from editing; STATUTE owns
+    the real fix (the one-line change is `hospital.get("nonprofit", True) if
+    hospital else False`, exactly what this bridge's OWN fallback copy in
+    `rules_bridge._fallback_select_fronts` was independently carrying the same
+    bug in, and got fixed here in this same PR).
+
+    Until that lands upstream, this is the boundary this persona DOES own:
+    the Strategist is the last stop before a front decision is written to
+    `fronts[]` and, eventually, filed. Overriding `charity_care` back to
+    not-applicable here, whenever Lookup never resolved a hospital for this
+    case, is a stopgap on this side of the contract -- not a silent
+    workaround, since it is loud in both this docstring and the front's own
+    `reason` string, and it is a no-op the moment STATUTE's real fix lands
+    (a resolved-hospital case is untouched either way).
+    """
+    if not _no_hospital_resolved(case):
+        return decisions
+    return [
+        (
+            replace(
+                d,
+                applicable=False,
+                reason=(
+                    "no hospital could be resolved for this bill -- a charity-care "
+                    "determination requires a confirmed nonprofit hospital, not an "
+                    "unresolved one (see strategist.py HANDOFF -> STATUTE, "
+                    "packages/rules/rules/fronts.py:121)"
+                ),
+                deadline=None,
+            )
+            if d.front == "charity_care" and d.applicable
+            else d
+        )
+        for d in decisions
+    ]
+
+
 def _facts(case_id: str, case: dict) -> dict:
     # select_fronts (rules.fronts) already computes each front's OWN deadline
     # (from compute_deadlines) and, for charity_care, bakes the eligibility
     # screen's explanation straight into `.reason` -- there is nothing left
     # for the Strategist to recompute here; it is pure orchestration.
     decisions = _sequence(rules_bridge.select_fronts(case))
+    decisions = _veto_charity_care_without_a_resolved_hospital(decisions, case)
 
     fronts = []
     for d in decisions:

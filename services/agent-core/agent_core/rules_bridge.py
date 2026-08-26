@@ -85,14 +85,27 @@ def _fallback_select_fronts(case: dict, *, today: date | None = None) -> list[Fr
         )
     )
 
-    nonprofit = hospital.get("nonprofit", True)
+    # Defect fix (persona 5 WO8): an UNRESOLVED hospital (`case["hospital"]`
+    # absent or `{}`, e.g. Lookup could never match the bill's provider name
+    # to any seeded record) must not default to "nonprofit" just because
+    # `.get("nonprofit", True)` treats "key absent" the same as "confirmed
+    # nonprofit". That is a different fact -- "we don't know" is not
+    # "yes" -- and defaulting it to yes let charity_care fire for a hospital
+    # that was never actually identified (live on ef-2026-0006). Only a
+    # hospital record that ACTUALLY CARRIES `nonprofit` (or defaults true only
+    # once we know one exists) should ever make this front applicable.
+    nonprofit = hospital.get("nonprofit", True) if hospital else False
     out.append(
         FrontDecision(
             "charity_care",
-            bool(nonprofit),
+            bool(hospital) and bool(nonprofit),
             "hospital is nonprofit, subject to 26 CFR 1.501(r)"
-            if nonprofit
-            else "hospital is for-profit -- no 501(r) obligation, no charity-care front",
+            if hospital and nonprofit
+            else (
+                "no hospital could be resolved for this bill -- cannot determine 501(r) status"
+                if not hospital
+                else "hospital is for-profit -- no 501(r) obligation, no charity-care front"
+            ),
             "26 CFR 1.501(r)-4",
         )
     )
