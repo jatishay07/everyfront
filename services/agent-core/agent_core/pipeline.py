@@ -393,6 +393,97 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     }
 
 
+#: Fields a `case.document.added` payload carries when the publisher also has
+#: the document itself -- i.e. the Gmail intake path
+#: (services/intake/intake/pipeline.py publishes `gcs_uri`, `filename` and
+#: `raw_text` alongside the ids). An event carrying NONE of them names records
+#: it cannot reconstruct; see `ensure_case_and_document_from_event`.
+EVENT_DOCUMENT_FIELDS = ("raw_text", "gcs_uri", "filename")
+
+
+def event_carries_document(payload: dict) -> bool:
+    """True if this `case.document.added` payload contains the document, not
+    just a pointer to one somebody else was supposed to have stored."""
+    return any(field in payload for field in EVENT_DOCUMENT_FIELDS)
+
+
+def ensure_case_and_document_from_event(payload: dict) -> dict:
+    """Create `cases/{case_id}` and `documents/{doc_id}` from a
+    `case.document.added` payload that names records nothing has created yet.
+
+    THE DEFECT THIS CLOSES: a bill that arrives by email produced nothing at
+    all, and said "ok" at every step. `services/intake` has no Firestore
+    grant -- the `ef-intake` service account has no `datastore.user` role, so
+    it genuinely cannot write `cases/` itself -- and it derives the case id
+    from the Gmail thread (`case-{thread_id}`). Nothing then created that
+    case: `on_document_added` returned `{"error": "no such case ..."}`, the
+    push handler discarded the error, returned HTTP 200 and marked the
+    document processed, so Pub/Sub never retried it. intake's own docstring
+    said agent-core "auto-creates both records on first sight". It never did.
+    This is that code.
+
+    WHAT IT MAY AND MAY NOT WRITE. Everything here comes out of the event; not
+    one field is inferred:
+
+    * `patient` and `bill` are `{}`. They are non-nullable in
+      web/lib/types.ts's `CaseSummary` (and `store.create_case` defaults every
+      OTHER CaseSummary field but these two), so the keys must exist or the
+      dashboard reads `undefined` -- a silent blank, not a loud error. Their
+      CONTENTS are unknown until Reader has read the PDF, and an emailed bill
+      tells us nothing about the patient. Empty is the honest shape: HANDOFF
+      defect #5 is this project's worst bug, an unreadable bill that produced
+      an invented EIN and epoch dates which the Clock then turned into real
+      regulatory deadlines. Absent stays absent.
+    * `type` is `""`, not a guess. Reader takes the stored type as a
+      classification HINT (`agents/reader.py`: `label = doc_type_hint or
+      classification["label"]`), so writing "bill" here would override Gemma's
+      first-pass classification with an assumption -- silently mislabelling a
+      denial letter, and disabling the §1.3-bonus model's whole job. `""` is
+      falsy, so Gemma decides. It is also a string, which matters: CANVAS's
+      DocumentGallery renders `titleCase(d.type)`, and `titleCase(undefined)`
+      throws and takes the case-detail page down with it (the same class of
+      crash CaseList.tsx documents from a live stub row). Reader overwrites it
+      with the real label seconds later.
+
+    Returns `{"case_created": bool, "document_created": bool}`.
+    """
+    case_id, doc_id = payload["case_id"], payload["doc_id"]
+    _, case_created = store.create_case_if_absent(case_id, {"patient": {}, "bill": {}})
+    _, doc_created = store.add_document_if_absent(
+        case_id,
+        doc_id,
+        {
+            "type": "",
+            "gcs_uri": payload.get("gcs_uri"),
+            "filename": payload.get("filename"),
+            "raw_text": payload.get("raw_text") or "",
+        },
+    )
+    if case_created or doc_created:
+        # Logged as "reader" because §3.1's `events[].agent` enum is closed and
+        # CANVAS's AgentAvatar indexes a Record<AgentName, ...> by it -- an
+        # invented "intake" agent renders an unstyled, unlabelled blank avatar
+        # in the feed. Reader is the agent this document is on its way to.
+        source = payload.get("gmail_message_id")
+        origin = f"gmail message {source}" if source else "an intake event"
+        name = payload.get("filename") or doc_id
+        chars = len(payload.get("raw_text") or "")
+        opened = (
+            f"Opened case {case_id} from {origin}, on document {name}"
+            if case_created
+            else f"Attached document {name} from {origin} to existing case {case_id}"
+        )
+        _log(
+            case_id,
+            "reader",
+            "case_opened_from_intake" if case_created else "document_attached_from_intake",
+            f"{opened} ({chars} characters of extracted text). No patient or bill facts are "
+            "known yet -- both are left empty rather than assumed, and stay that way until "
+            "Reader has actually read the document.",
+        )
+    return {"case_created": case_created, "document_created": doc_created}
+
+
 async def on_document_added(case_id: str, doc_id: str) -> dict:
     """Reader classifies+extracts one document, then Lookup, Clock, Auditor,
     and Strategist re-run and the case moves to `strategy_ready`. Publishes
