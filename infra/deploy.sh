@@ -204,8 +204,38 @@ deploy_one() {
       ;;
     intake)
       wire_push ef-intake-email     /pubsub/gmail
+      ensure_watch_renewal_job
       ;;
   esac
+}
+
+# services/intake/main.py's `/gmail/watch/renew` docstring is an explicit
+# HANDOFF: "ATLAS needs a Scheduler job ... pointed at this route with a
+# 7-day-or-shorter cadence" -- Gmail watches expire after 7 days
+# (services/intake's own module doc), and nothing was ever created: confirmed
+# live 2026-08-25, `gcloud scheduler jobs list` was empty even after intake's
+# first deploy. Without this, Gmail push intake goes silently dark a week
+# after every setup -- no error, no alert, the mailbox just stops flowing
+# into the pipeline. Runs daily (well inside the 7-day window) as its own
+# service account via OIDC, same pattern as the push subscriptions above.
+ensure_watch_renewal_job() {
+  job="ef-gmail-watch-renew"
+  target="${url}/gmail/watch/renew"
+  if gcloud scheduler jobs describe "$job" --location="$REGION" >/dev/null 2>&1; then
+    gcloud scheduler jobs update http "$job" --location="$REGION" \
+      --uri="$target" --http-method=POST \
+      --oidc-service-account-email="${sa}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      >/dev/null 2>&1 \
+      && ok "  $job -> $target (updated)" \
+      || printf '    \033[33mwarn\033[0m could not update %s -- Gmail watch renewal may be stale\n' "$job"
+  else
+    gcloud scheduler jobs create http "$job" --location="$REGION" \
+      --schedule="0 3 * * *" --uri="$target" --http-method=POST \
+      --oidc-service-account-email="${sa}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      >/dev/null 2>&1 \
+      && ok "  $job -> $target (daily)" \
+      || printf '    \033[33mwarn\033[0m could not create %s -- Gmail watch will expire in 7 days uncontested\n' "$job"
+  fi
 }
 
 # Validate before touching the caller's gcloud config -- a bad argument should
