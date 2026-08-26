@@ -208,7 +208,11 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
         bill_now = case.get("bill") or {}
         if resolved_ein and not (bill_now.get("hospital_ein") or "").strip():
             patch["bill"] = {**bill_now, "hospital_ein": resolved_ein}
-        case = store.update_case(case_id, patch)
+        # `or case`: if this case was purged mid-run (a demo reset, a manual
+        # delete), update_case now writes nothing and returns None rather than
+        # resurrecting it. Finish the cascade against the local copy -- every
+        # later write is a no-op too, so nothing is left behind.
+        case = store.update_case(case_id, patch) or case
 
     # Clock needs only bill/patient; Auditor needs `case["hospital"]` (just
     # set above) solely for its denial-lawfulness sub-check. Neither depends
@@ -285,7 +289,10 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     strategist_turn = await strategist.run(case_id, case)
     sf = strategist_turn["fact"]
     for front in sf["fronts"]:
-        store.upsert_front(case_id, front)
+        # NOT `upsert_front`: re-analysis must not reopen a front the filing
+        # lifecycle already owns -- see that method's docstring for the live
+        # ef-2026-0007 trace.
+        store.upsert_front_from_analysis(case_id, front)
         _log(
             case_id,
             "strategist",
@@ -516,12 +523,12 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
     )
     if not vf["passed"]:
         matched["status"] = "open"
-        store.upsert_front(case_id, matched)
+        store.set_front_status(case_id, front, "open")
         return {"ok": False, "reason": "; ".join(vf["issues"]), "front": matched}
 
     filing_id = str(uuid.uuid4())
     matched["status"] = "filing"
-    store.upsert_front(case_id, matched)
+    store.set_front_status(case_id, front, "filing")
     _log(
         case_id,
         "strategist",
@@ -550,12 +557,7 @@ async def finalize_filing(case_id: str, front: str, filing_id: str) -> dict:
     try:
         return await run_filer(case_id, front, filing_id)
     except Exception as exc:  # noqa: BLE001 -- revert state, log, then re-raise honestly
-        case = store.get_case(case_id)
-        fronts = (case or {}).get("fronts") or []
-        matched = next((f for f in fronts if f.get("front") == front), None)
-        if matched is not None:
-            matched["status"] = "open"
-            store.upsert_front(case_id, matched)
+        store.set_front_status(case_id, front, "open")
         _log(
             case_id,
             "filer",
@@ -586,11 +588,12 @@ async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
         ),
     )
 
-    fronts = case.get("fronts") or []
-    for f in fronts:
-        if f.get("front") == front:
-            f["status"] = "filed"
-    store.update_case(case_id, {"fronts": fronts})
+    # NOT `update_case(case_id, {"fronts": ...})` from the `case` read at the
+    # top of this function: by the time Filer returns, that snapshot is however
+    # many seconds stale, and writing the whole array back is exactly how a
+    # sibling front's concurrently-written "filed" status got clobbered (PROOF,
+    # ef-2026-0001/-0003/-0007). One front, one field, one transaction.
+    store.set_front_status(case_id, front, "filed")
     pubsub_client.publish(
         config.TOPIC_FILING_COMPLETED, {"filing_id": filing_id, "status": ff["status"]}
     )

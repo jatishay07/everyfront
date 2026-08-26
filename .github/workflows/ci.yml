@@ -17,14 +17,17 @@ jobs:
         run: pip install ruff pytest pytest-cov
 
       - name: Install package and service requirements
-        # Each packages/<name>/ and services/<name>/ may declare its own deps.
-        # Without this, pytest fails at COLLECTION -- it imports every test
-        # module before markers are consulted, so a module-level `import ijson`
-        # kills the whole run even when that test would have been skipped.
-        # Three separate PRs hit this before the cause was fixed here.
+        # Each packages/<name>/, services/<name>/ and fixtures/ may declare its
+        # own deps. Without this, pytest fails at COLLECTION -- it imports every
+        # test module before markers are consulted, so a module-level `import
+        # ijson` kills the whole run even when that test would have been
+        # skipped. Three separate PRs hit this before the cause was fixed here.
+        # fixtures/requirements.txt was missing from this glob (PROOF flagged it
+        # twice): reportlab lives there, so every fixture-bill test that needed
+        # it was passing locally and never running here.
         run: |
           found=0
-          for req in packages/*/requirements.txt services/*/requirements.txt; do
+          for req in packages/*/requirements.txt services/*/requirements.txt fixtures/requirements.txt; do
             [ -f "$req" ] || continue
             echo "installing $req"
             pip install -r "$req"
@@ -38,6 +41,20 @@ jobs:
       - name: Tests
         # -m "not e2e": the e2e suite needs a live staging project (PROOF WO3)
         run: pytest -m "not e2e"
+
+      # Root `testpaths` is ["tests", "packages"], so neither service's suite
+      # ran here at all -- including the regression tests for defects that only
+      # ever showed up in the deployed services. Three separate invocations
+      # rather than one: services/agent-core/tests and services/api/tests each
+      # contain a `test_store.py`, and pytest's default import mode derives a
+      # module name from the basename, so collecting both in one run is an
+      # "import file mismatch" error. Each service also needs its own conftest
+      # to put its package root on sys.path (see those files).
+      - name: Service tests (agent-core)
+        run: pytest services/agent-core/tests -m "not e2e"
+
+      - name: Service tests (api)
+        run: pytest services/api/tests -m "not e2e"
 
   secrets:
     runs-on: ubuntu-latest

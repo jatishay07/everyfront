@@ -677,3 +677,82 @@ def test_process_case_documents_missing_case_is_handled(monkeypatch):
     _patch_store(monkeypatch, s)
     result = asyncio.run(pipeline.process_case_documents("nope", ["d1"]))
     assert "error" in result
+
+
+def test_two_concurrent_filings_on_one_case_do_not_clobber_each_other(monkeypatch):
+    """THE regression test for the blocker PROOF found live (PR #37).
+
+    Since filing went asynchronous (ca9fd40), each approved front settles in
+    its own `/pubsub/filing-requested` push handler, and nothing serializes
+    them per case. `run_filer` used to write the WHOLE `fronts[]` array back
+    from the snapshot it read before calling Filer -- so whichever handler
+    finished second reverted its sibling's already-"filed" status, leaving a
+    front showing open/filing with a real, sent `filings/` record underneath.
+    Reproduced 3-for-3 live on ef-2026-0001, -0003 and -0007, and it made
+    `make demo-run` exit 1.
+
+    The barrier here makes that interleaving deterministic instead of lucky:
+    neither Filer returns until BOTH are holding the pre-filing snapshot.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    published = _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "filing"})
+    s.upsert_front("c1", {"front": "charity_care", "applicable": True, "status": "filing"})
+
+    async def _drive():
+        barrier = asyncio.Barrier(2)
+
+        async def _filer_that_waits_for_its_sibling(case_id, case, front, filing_id=None):
+            await barrier.wait()
+            return await _fake_filer_run()(case_id, case, front, filing_id=filing_id)
+
+        monkeypatch.setattr(filer, "run", _filer_that_waits_for_its_sibling)
+        await asyncio.gather(
+            pipeline.finalize_filing("c1", "ppdr", "filing-1"),
+            pipeline.finalize_filing("c1", "charity_care", "filing-2"),
+        )
+
+    asyncio.run(_drive())
+
+    assert {f["front"]: f["status"] for f in s.get_case("c1")["fronts"]} == {
+        "ppdr": "filed",
+        "charity_care": "filed",
+    }
+    completed = [p for t, p in published if t == pipeline.config.TOPIC_FILING_COMPLETED]
+    assert {p["filing_id"] for p in completed} == {"filing-1", "filing-2"}
+
+
+def test_reanalysis_triggered_by_a_filing_does_not_reopen_the_filed_front(monkeypatch):
+    """The second cause of the same live symptom, at the pipeline level.
+
+    The Filer stores its generated PDF as a case document; that publishes
+    `case.document.added`; that re-runs the hierarchy. Strategist's fronts
+    come back at "open" because `select_fronts` is pure and knows nothing
+    about filings -- and used to be written straight over "filed".
+
+    Live trace, ef-2026-0007 (2026-08-26): audit filed 08:40:46, charity_care
+    08:40:51, re-analyses at 08:40:50 and 08:40:52-54 reset both to "open"
+    while `filings/` held three real "sent" records.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    doc_id = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+    assert s.get_case("c1")["fronts"][0]["status"] == "open"
+
+    # The front is approved and filed...
+    s.set_front_status("c1", "charity_care", "filed")
+
+    # ...and the Filer's own generated PDF lands as a document, re-analysing.
+    generated = s.add_document("c1", {"type": "generated_application", "raw_text": "a bill"})
+    asyncio.run(pipeline.on_document_added("c1", generated))
+
+    front = s.get_case("c1")["fronts"][0]
+    assert front["status"] == "filed", "re-analysis reopened a front that was already filed"
+    assert front["reason"] == "nonprofit hospital"  # analysis still owns everything else
