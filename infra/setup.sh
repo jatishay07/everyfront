@@ -242,6 +242,77 @@ else
   printf '    \033[33mwarn\033[0m BILLING_ACCOUNT unset, skipping budget alerts\n'
 fi
 
+# ---------------------------------------------------------------- dead-letter alerting
+# §2.3 requires handlers tolerate redelivery, but a poison message that
+# exhausts max-delivery-attempts (5, set above) and lands in `dead-letter`
+# must not then vanish silently. `ef-dead-letter` gives it somewhere to land;
+# without this alert nothing ever looks at that somewhere -- confirmed live
+# 2026-08-25: `ef-dead-letter` sat with zero subscribers reading it and zero
+# monitoring policies of any kind on the project, so a dead-lettered message
+# would sit unnoticed until its 7-day retention silently dropped it. This is
+# the "something would notice" half of WO4/WO6 task 4.
+log "Dead-letter alerting"
+gcloud components install alpha --quiet >/dev/null 2>&1 || true
+if ! gcloud alpha monitoring channels list --format='value(name)' >/dev/null 2>&1; then
+  printf '    \033[33mwarn\033[0m gcloud alpha monitoring is unavailable (managed install?) -- set up a dead-letter alert by hand\n'
+else
+  ALERT_EMAIL="${ALERT_EMAIL:-$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1)}"
+  CHANNEL_NAME="$(gcloud alpha monitoring channels list \
+    --filter='displayName="everyfront-ops-email"' --format='value(name)' 2>/dev/null | head -1)"
+  if [[ -n "$CHANNEL_NAME" ]]; then
+    skip "notification channel everyfront-ops-email"
+  else
+    _channel_json="$(mktemp)"
+    printf '{"type":"email","displayName":"everyfront-ops-email","labels":{"email_address":"%s"}}' \
+      "$ALERT_EMAIL" > "$_channel_json"
+    CHANNEL_NAME="$(gcloud alpha monitoring channels create \
+      --channel-content-from-file="$_channel_json" --format='value(name)' 2>/dev/null || true)"
+    rm -f "$_channel_json"
+    if [[ -n "$CHANNEL_NAME" ]]; then
+      ok "notification channel -> $ALERT_EMAIL"
+    else
+      printf '    \033[33mwarn\033[0m could not create a notification channel (needs monitoring.notificationChannels.create) -- dead-letter alert skipped\n'
+    fi
+  fi
+
+  if gcloud alpha monitoring policies list \
+       --filter='displayName="everyfront-dead-letter-nonempty"' --format='value(name)' 2>/dev/null | grep -q .; then
+    skip "alert policy everyfront-dead-letter-nonempty"
+  elif [[ -n "$CHANNEL_NAME" ]]; then
+    _policy_json="$(mktemp)"
+    cat > "$_policy_json" <<POLICY_EOF
+{
+  "displayName": "everyfront-dead-letter-nonempty",
+  "documentation": {
+    "content": "A message landed in the \`dead-letter\` Pub/Sub topic (ef-dead-letter subscription) -- a handler failed on it 5 times (max-delivery-attempts) and Pub/Sub gave up redelivering. Investigate: \`gcloud pubsub subscriptions pull ef-dead-letter --auto-ack --limit=10\`.",
+    "mimeType": "text/markdown"
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "ef-dead-letter has undelivered messages",
+      "conditionThreshold": {
+        "filter": "resource.type = \"pubsub_subscription\" AND resource.labels.subscription_id = \"ef-dead-letter\" AND metric.type = \"pubsub.googleapis.com/subscription/num_undelivered_messages\"",
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "aggregations": [{"alignmentPeriod": "300s", "perSeriesAligner": "ALIGN_MAX"}]
+      }
+    }
+  ],
+  "alertStrategy": {"autoClose": "604800s"}
+}
+POLICY_EOF
+    if gcloud alpha monitoring policies create --policy-from-file="$_policy_json" \
+         --notification-channels="$CHANNEL_NAME" >/dev/null 2>&1; then
+      ok "alert: ef-dead-letter non-empty -> $ALERT_EMAIL"
+    else
+      printf '    \033[33mwarn\033[0m could not create the dead-letter alert policy (needs monitoring.alertPolicies.create)\n'
+    fi
+    rm -f "$_policy_json"
+  fi
+fi
+
 log "Setup complete for $PROJECT_ID"
 cat <<EOF
 
