@@ -516,12 +516,12 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
     )
     if not vf["passed"]:
         matched["status"] = "open"
-        store.upsert_front(case_id, matched)
+        store.set_front_status(case_id, front, "open")
         return {"ok": False, "reason": "; ".join(vf["issues"]), "front": matched}
 
     filing_id = str(uuid.uuid4())
     matched["status"] = "filing"
-    store.upsert_front(case_id, matched)
+    store.set_front_status(case_id, front, "filing")
     _log(
         case_id,
         "strategist",
@@ -550,12 +550,7 @@ async def finalize_filing(case_id: str, front: str, filing_id: str) -> dict:
     try:
         return await run_filer(case_id, front, filing_id)
     except Exception as exc:  # noqa: BLE001 -- revert state, log, then re-raise honestly
-        case = store.get_case(case_id)
-        fronts = (case or {}).get("fronts") or []
-        matched = next((f for f in fronts if f.get("front") == front), None)
-        if matched is not None:
-            matched["status"] = "open"
-            store.upsert_front(case_id, matched)
+        store.set_front_status(case_id, front, "open")
         _log(
             case_id,
             "filer",
@@ -586,11 +581,12 @@ async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
         ),
     )
 
-    fronts = case.get("fronts") or []
-    for f in fronts:
-        if f.get("front") == front:
-            f["status"] = "filed"
-    store.update_case(case_id, {"fronts": fronts})
+    # NOT `update_case(case_id, {"fronts": ...})` from the `case` read at the
+    # top of this function: by the time Filer returns, that snapshot is however
+    # many seconds stale, and writing the whole array back is exactly how a
+    # sibling front's concurrently-written "filed" status got clobbered (PROOF,
+    # ef-2026-0001/-0003/-0007). One front, one field, one transaction.
+    store.set_front_status(case_id, front, "filed")
     pubsub_client.publish(
         config.TOPIC_FILING_COMPLETED, {"filing_id": filing_id, "status": ff["status"]}
     )

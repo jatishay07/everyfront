@@ -54,6 +54,17 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _merge_front(fronts: list[dict], front: dict) -> list[dict]:
+    """Insert-or-replace `front` in `fronts`, keyed by its "front" name."""
+    for i, existing in enumerate(fronts):
+        if existing.get("front") == front.get("front"):
+            fronts[i] = dict(front)
+            break
+    else:
+        fronts.append(dict(front))
+    return fronts
+
+
 class CaseStore:
     """Everything the agent hierarchy needs to read or write case state.
 
@@ -141,19 +152,70 @@ class CaseStore:
     def upsert_front(self, case_id: str, front: dict) -> dict:
         """Insert or replace one `fronts[]` entry, keyed by `front["front"]`.
 
-        Firestore has no atomic array-upsert-by-key, so this is read-modify-
-        write. Acceptable here: a single case's fronts are only ever touched by
-        this case's own pipeline run, never concurrently from two agents.
+        Atomic. Firestore has no array-upsert-by-key primitive, so this is
+        still a read-modify-write -- but it runs inside a Firestore
+        transaction (in-memory mode holds `self._lock` across the same span),
+        so a concurrent writer either serializes behind it or is retried
+        against the winner's state.
+
+        The transaction is not belt-and-braces. This method's own docstring
+        used to assert that "a single case's fronts are only ever touched by
+        this case's own pipeline run, never concurrently from two agents" --
+        which stopped being true at ca9fd40, when filing went asynchronous.
+        Two fronts approved close together (what every multi-front fixture
+        does, and what the recording's approval beat does on camera) run
+        their Filers in separate `/pubsub/filing-requested` push handlers
+        with no per-case serialization, and the loser's read-modify-write
+        clobbered the sibling's already-"filed" status back down. PROOF
+        reproduced the loss 3-for-3 live -- ef-2026-0001, -0003 and -0007
+        each showed a front as open/filing while its own `filings/` record
+        proved it had been sent.
+
+        Prefer `set_front_status` when only the status changes: this method
+        writes the caller's whole entry, which is stale by however long the
+        caller held it.
         """
-        case = self.get_case(case_id) or {}
-        fronts = list(case.get("fronts") or [])
-        for i, existing in enumerate(fronts):
-            if existing.get("front") == front.get("front"):
-                fronts[i] = front
-                break
+        return self._write_fronts(case_id, lambda fronts: _merge_front(fronts, front))
+
+    def set_front_status(self, case_id: str, front: str, status: str) -> dict:
+        """Atomically set one front's `status`, touching nothing else.
+
+        Reads the entry fresh inside the transaction rather than trusting the
+        caller's copy, so a Filer that has been running for a minute cannot
+        write back a minute-old view of its own front, nor of its siblings.
+        A front that is not present is left alone -- this never invents one.
+        """
+
+        def _apply(fronts: list[dict]) -> list[dict]:
+            for f in fronts:
+                if f.get("front") == front:
+                    f["status"] = status
+            return fronts
+
+        return self._write_fronts(case_id, _apply)
+
+    def _write_fronts(self, case_id: str, mutate) -> dict:
+        """Apply `mutate(fronts) -> fronts` to a fresh read of
+        `cases/{case_id}.fronts` and persist the result atomically."""
+        if self._client is not None:
+            from google.cloud import firestore
+
+            ref = self._client.collection("cases").document(case_id)
+
+            @firestore.transactional
+            def _txn(transaction) -> None:
+                snap = ref.get(transaction=transaction)
+                data = snap.to_dict() if snap.exists else {}
+                fronts = mutate(copy.deepcopy(data.get("fronts") or []))
+                transaction.set(ref, {"fronts": fronts, "updated_at": _now_iso()}, merge=True)
+
+            _txn(self._client.transaction())
         else:
-            fronts.append(front)
-        return self.update_case(case_id, {"fronts": fronts})
+            with self._lock:
+                case = self._cases.setdefault(case_id, {})
+                case["fronts"] = mutate(copy.deepcopy(case.get("fronts") or []))
+                case["updated_at"] = _now_iso()
+        return self.get_case(case_id)
 
     # ----------------------------------------------------------- documents
     def add_document(self, case_id: str, doc: dict, doc_id: str | None = None) -> str:

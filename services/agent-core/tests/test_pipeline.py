@@ -677,3 +677,48 @@ def test_process_case_documents_missing_case_is_handled(monkeypatch):
     _patch_store(monkeypatch, s)
     result = asyncio.run(pipeline.process_case_documents("nope", ["d1"]))
     assert "error" in result
+
+
+def test_two_concurrent_filings_on_one_case_do_not_clobber_each_other(monkeypatch):
+    """THE regression test for the blocker PROOF found live (PR #37).
+
+    Since filing went asynchronous (ca9fd40), each approved front settles in
+    its own `/pubsub/filing-requested` push handler, and nothing serializes
+    them per case. `run_filer` used to write the WHOLE `fronts[]` array back
+    from the snapshot it read before calling Filer -- so whichever handler
+    finished second reverted its sibling's already-"filed" status, leaving a
+    front showing open/filing with a real, sent `filings/` record underneath.
+    Reproduced 3-for-3 live on ef-2026-0001, -0003 and -0007, and it made
+    `make demo-run` exit 1.
+
+    The barrier here makes that interleaving deterministic instead of lucky:
+    neither Filer returns until BOTH are holding the pre-filing snapshot.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    published = _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "filing"})
+    s.upsert_front("c1", {"front": "charity_care", "applicable": True, "status": "filing"})
+
+    async def _drive():
+        barrier = asyncio.Barrier(2)
+
+        async def _filer_that_waits_for_its_sibling(case_id, case, front, filing_id=None):
+            await barrier.wait()
+            return await _fake_filer_run()(case_id, case, front, filing_id=filing_id)
+
+        monkeypatch.setattr(filer, "run", _filer_that_waits_for_its_sibling)
+        await asyncio.gather(
+            pipeline.finalize_filing("c1", "ppdr", "filing-1"),
+            pipeline.finalize_filing("c1", "charity_care", "filing-2"),
+        )
+
+    asyncio.run(_drive())
+
+    assert {f["front"]: f["status"] for f in s.get_case("c1")["fronts"]} == {
+        "ppdr": "filed",
+        "charity_care": "filed",
+    }
+    completed = [p for t, p in published if t == pipeline.config.TOPIC_FILING_COMPLETED]
+    assert {p["filing_id"] for p in completed} == {"filing-1", "filing-2"}
