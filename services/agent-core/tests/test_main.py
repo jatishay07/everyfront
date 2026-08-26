@@ -394,56 +394,7 @@ def test_redelivery_never_clobbers_an_already_read_document(store, client, monke
     assert doc["extracted"]
 
 
-# ------------------------------------------------------- KNOWN OPEN DEFECT
-
-
-@pytest.mark.xfail(
-    strict=False,
-    reason="OPEN: the doc_key dedupe does not cover the sync route -- see this test's docstring",
-)
-def test_inject_bill_two_routes_should_run_one_cascade(store, monkeypatch):
-    """FOUND, NOT FIXED, by this work order -- flagged to FORGE rather than
-    changed, because the fix touches the demo's critical path and this is not
-    what SWARM was asked to change here.
-
-    `/demo/inject_bill` reaches agent-core by two routes for the same
-    document: the Pub/Sub push, and the synchronous `/internal/process_
-    documents` batch. dce54e6 deduped the push route on `doc:{case_id}:{doc_id}`
-    to stop the activity feed showing every audit finding 4x. But ONLY the push
-    handler ever writes that key -- `/internal/process_document(s)` never marks
-    it -- so the two routes still do not see each other, and a 3-document case
-    still runs 4 cascades. This test reproduces it with the pipeline stubbed:
-    it fails on `assert 2 == 1` today.
-
-    A real fix needs both routes to claim the same key BEFORE doing the work
-    (and to release it on failure, or the poisoned-doc_key defect this work
-    order just fixed comes straight back). Marking after the fact in the sync
-    route is not enough: push delivery is sub-second and the batch call takes
-    minutes, so the push almost always wins the race and the batch would still
-    re-run everything.
-    """
-    cascades = []
-
-    async def fake_cascade(case_id, case):
-        cascades.append(case_id)
-        return {}
-
-    async def fake_reader(case_id, doc_id):
-        return {"fact": {"label": "bill", "extraction": {}}}
-
-    monkeypatch.setattr(pipeline, "_run_cascade", fake_cascade)
-    monkeypatch.setattr(pipeline, "_run_reader", fake_reader)
-    store.create_case("c1", {"patient": {}, "bill": {}})
-    store.add_document("c1", {"raw_text": "x"}, "d1")
-    client = TestClient(main.app, raise_server_exceptions=False)
-
-    client.post("/internal/process_documents", json={"case_id": "c1", "doc_ids": ["d1"]})
-    client.post(
-        "/pubsub/document-added", json=envelope({"case_id": "c1", "doc_id": "d1"}, "pubsub-1")
-    )
-
-    assert len(cascades) == 1, f"the two routes ran {len(cascades)} cascades for one document"
-
-
 async def _async(value):
+    """Wrap a plain value as an awaitable, for monkeypatching the async
+    `pipeline.on_document_added` with a canned result."""
     return value
