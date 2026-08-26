@@ -174,6 +174,38 @@ deploy_one() {
     --quiet >/dev/null
   url="$(gcloud run services describe "ef-${svc}" --region="$REGION" --format='value(status.url)')"
   ok "$svc -> $url"
+
+  # Point this service's Pub/Sub subscriptions at it.
+  #
+  # setup.sh creates these as PULL subscriptions and its own comment promised
+  # deploy.sh would convert them to push "once the Cloud Run URLs exist". That
+  # conversion was never written, so every subscription sat with no subscriber:
+  # approve_filing published `filing.requested` into a queue nobody read, the
+  # front flipped to "filing", and no filing was ever produced. Nothing errored.
+  #
+  # The demo path worked only because /demo/inject_bill calls agent-core
+  # SYNCHRONOUSLY over HTTP, bypassing the event backbone entirely -- so the
+  # one required §1.3 service that was provisioned and named correctly was also
+  # completely inert, and looked fine from every angle except an actual filing.
+  wire_push() {
+    _sub="$1"; _path="$2"
+    gcloud pubsub subscriptions describe "$_sub" >/dev/null 2>&1 || return 0
+    gcloud pubsub subscriptions modify-push-config "$_sub" \
+      --push-endpoint="${url}${_path}" \
+      --push-auth-service-account="${sa}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      >/dev/null 2>&1 \
+      && ok "  $_sub -> ${_path}" \
+      || printf '    \033[33mwarn\033[0m could not wire %s -- it stays PULL and nothing will consume it\n' "$_sub"
+  }
+  case "$svc" in
+    agent-core)
+      wire_push ef-document-added   /pubsub/document-added
+      wire_push ef-filing-requested /pubsub/filing-requested
+      ;;
+    intake)
+      wire_push ef-intake-email     /pubsub/gmail
+      ;;
+  esac
 }
 
 # Validate before touching the caller's gcloud config -- a bad argument should

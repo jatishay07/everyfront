@@ -61,21 +61,20 @@
     }
   ],
   "expected": {
-    "audit_findings_cents_total": 24500,
+    "audit_findings_cents_total": 21000,
     "audit_findings_reference_model": [
       {
-        "amount_cents": 21000,
-        "code": "80053",
-        "description": "COMPREHENSIVE METABOLIC PANEL",
-        "kind": "exact_duplicate",
-        "note": "Identical code, units, and charge billed twice in the same encounter."
-      },
-      {
-        "amount_cents": 3500,
-        "code": "36415",
-        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
-        "kind": "ptp_unbundling",
-        "note": "36415 billed alongside same-encounter E/M 99284 with no modifier -- a commonly bundled NCCI column-2 code. Verify against LEDGER's live NCCI PTP table (packages/datapipes, WO3, not yet built) before filing."
+        "citation": "42 USC 1395b-7(b) (itemized statement); duplicate billing is not separately regulated",
+        "codes": [
+          "80053"
+        ],
+        "description": "2 identical lines for 80053 (1 unit(s) each) -- likely duplicate billing",
+        "kind": "duplicate",
+        "lines": [
+          2,
+          3
+        ],
+        "potential_savings_cents": 21000
       }
     ],
     "deadlines": [
@@ -130,20 +129,30 @@
       {
         "applicable": true,
         "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "deadline": null,
         "front": "charity_care",
-        "reason": "Screened free against Sutter Bay Hospitals's FAP."
+        "reason": "Income is 117.1303% of the federal poverty level. At or below the 400% threshold for free care. Basis: Cal. Health & Safety Code \u00a7127405(a)(1)(A), (d)(1); 26 CFR 1.501(r)-4(b)(2)"
       },
       {
         "applicable": true,
-        "citation": "45 CFR 149.620(c)",
+        "citation": "45 CFR 149.620(a)(2)(ii), (c)(1)",
+        "deadline": "2026-10-03",
         "front": "ppdr",
-        "reason": "Bill exceeds GFE by $700.00, over the $400 floor."
+        "reason": "uninsured with a bill $700.00 above the Good Faith Estimate (>= $400 floor)"
+      },
+      {
+        "applicable": false,
+        "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
+        "deadline": null,
+        "front": "debt_validation",
+        "reason": "account is not reported in collections"
       },
       {
         "applicable": true,
         "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "deadline": null,
         "front": "audit",
-        "reason": "Itemized bill present -- billing audit always runs."
+        "reason": "itemized bill on file; a billing audit is always performed"
       }
     ]
   },

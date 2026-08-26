@@ -2,14 +2,47 @@
 
 Split out of `generate.py` deliberately: this module has NO reportlab/PIL
 dependency, only `packages/rules` (which every other test in this repo
-already requires) and `fixtures/reference_model.py`. That means
-`tests/test_fixture_corpus.py` and `tests/test_stats_consistency.py` -- the
-schema/watermark/deadline/eligibility/stats checks -- can run in ANY
-environment that already runs the rest of the suite, including today's CI
-(.github/workflows/ci.yml installs `ruff pytest pytest-cov` only; see
-fixtures/requirements.txt's HANDOFF to FORGE). Only `generate.py`'s actual PDF
-rendering, and `tests/test_bill_pdfs.py`, need reportlab/pypdf/Pillow and
-`pytest.importorskip` themselves out without those installed.
+already requires). That means `tests/test_fixture_corpus.py` and
+`tests/test_stats_consistency.py` -- the schema/watermark/deadline/
+eligibility/stats checks -- can run in ANY environment that already runs the
+rest of the suite, including today's CI (.github/workflows/ci.yml installs
+`ruff pytest pytest-cov` only; see fixtures/requirements.txt's HANDOFF to
+FORGE). Only `generate.py`'s actual PDF rendering, and `tests/test_bill_pdfs.py`,
+need reportlab/pypdf/Pillow and `pytest.importorskip` themselves out without
+those installed.
+
+REWIRED 2026-08-25 (PROOF, WO6): this used to compute `fronts`/
+`audit_findings`/`denial_check` via `fixtures/reference_model.py`'s
+`select_fronts_reference` / `audit_line_items_reference` /
+`check_denial_lawfulness_reference` -- an explicit, admitted stand-in that
+module's own docstring says to delete "when STATUTE ships the real
+select_fronts / audit_line_items / check_denial_lawfulness." STATUTE shipped
+all three (`packages/rules/rules/{fronts,audit,denial}.py`); this module now
+imports and calls THOSE directly, so the corpus's `expected` block is checked
+against the actual rules engine the live pipeline runs, not a from-scratch
+lookalike (`tests/test_fronts_against_fixture_corpus.py` flagged exactly this
+gap: "the fixture corpus's committed, generated JSON currently tests a
+placeholder, not this package's actual select_fronts"). `fixtures/
+reference_model.py` is deleted -- its own docstring said to delete it the day
+this switch happened, and nothing outside this comment referenced it as a
+Python import (only in docstrings, now updated).
+
+`audit_line_items` accepts optional `ptp_lookup`/`mue_lookup`/
+`cash_price_lookup` callables (LEDGER's NCCI/MRF data). This module
+deliberately passes NONE of them -- matching exactly what the live pipeline's
+Auditor does today (`services/agent-core/agent_core/agents/auditor.py`'s
+`_facts()` calls `rules_bridge.audit_line_items(items,
+cash_price_lookup=cash_price_lookup)` with no `ptp_lookup`/`mue_lookup` at
+all; `cash_price_lookup` itself is None unless a *live* MRF fetch succeeds
+against the resolved hospital's real `mrf_url`, which this offline corpus
+build can't reproduce deterministically). Concretely this means
+`cases_data.py`'s seeded `ptp_unbundling` and `mue_excess` LineItem findings
+will NEVER be counted in `audit_findings_cents_total` here, because they are
+structurally unreachable in the live system too -- see this PR's HANDOFF to
+SWARM/LEDGER. Only `exact_duplicate` findings (detected unconditionally, no
+external table needed) count today; a live MRF fetch may ALSO surface a real
+`cash_price_delta` finding this static corpus doesn't predict -- that would
+be a pleasant surplus, never a promise this corpus makes and fails to keep.
 """
 
 from __future__ import annotations
@@ -23,15 +56,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "packages" / "rules"))
 
+from rules.audit import audit_line_items  # noqa: E402
 from rules.deadlines import compute_deadlines  # noqa: E402
+from rules.denial import check_denial_lawfulness  # noqa: E402
 from rules.eligibility import screen_eligibility  # noqa: E402
+from rules.fronts import select_fronts  # noqa: E402
 
 from fixtures.cases_data import WATERMARK, CaseFixture, Hospital  # noqa: E402
-from fixtures.reference_model import (  # noqa: E402
-    audit_line_items_reference,
-    check_denial_lawfulness_reference,
-    select_fronts_reference,
-)
 
 TODAY = date(2026, 8, 25)  # CLAUDE.md currentDate -- see docstring in cases_data.py
 
@@ -114,7 +145,6 @@ def build_case_json(case: CaseFixture, hospitals: dict[str, Hospital]) -> dict:
         )
 
     eligibility = None
-    determination = None
     if hospital is not None:
         eligibility = screen_eligibility(
             case.patient["annual_income_cents"],
@@ -122,20 +152,33 @@ def build_case_json(case: CaseFixture, hospitals: dict[str, Hospital]) -> dict:
             case.patient["state"],
             hospital_to_contract(hospital),
         )
-        determination = eligibility.determination
-
-    fronts = select_fronts_reference(case.patient, bill, case.line_items, hospital, determination)
-    findings = audit_line_items_reference(case.line_items)
-    denial_check = None
-    if case.denial_demanded_docs:
-        denial_check = check_denial_lawfulness_reference(
-            case.denial_demanded_docs, case.denial_fap_published_docs
-        )
 
     documents = [
         {"doc_id": d.doc_id, "type": d.type, "file": DOCUMENT_PATHS[d.render]}
         for d in case.documents
     ]
+
+    # Real STATUTE code from here down (see this module's 2026-08-25
+    # docstring amendment) -- the same `select_fronts`/`audit_line_items`/
+    # `check_denial_lawfulness` the live pipeline calls, given the same
+    # case-shaped dict the Strategist assembles (patient/bill/hospital/
+    # documents).
+    fronts_case = {
+        "patient": case.patient,
+        "bill": bill,
+        "hospital": hospital_to_contract(hospital) if hospital is not None else {},
+        "documents": [{"type": d.type} for d in case.documents],
+    }
+    fronts = select_fronts(fronts_case, today=TODAY)
+    # No ptp_lookup/mue_lookup/cash_price_lookup -- see docstring: this
+    # matches the live Auditor's own call exactly, so a fixture never
+    # promises a dollar amount the deployed pipeline can't produce.
+    findings = audit_line_items(bill["line_items"])
+    denial_check = None
+    if case.denial_demanded_docs:
+        denial_check = check_denial_lawfulness(
+            list(case.denial_demanded_docs), list(case.denial_fap_published_docs)
+        )
 
     return {
         "case_id": case.case_id,
@@ -176,13 +219,13 @@ def build_case_json(case: CaseFixture, hospitals: dict[str, Hospital]) -> dict:
                 }
                 for d in deadlines
             ],
-            # NOTE: fronts/audit_findings/denial_check below are PROOF's
-            # reference-model reconstruction of what STATUTE's not-yet-built
-            # select_fronts / audit_line_items / check_denial_lawfulness
-            # (contract §3.5) should say -- see fixtures/reference_model.py.
+            # Keys keep the `_reference_model` suffix for consumer
+            # compatibility (tests/, demo_run.py) even though the VALUES
+            # below now come from the real `packages/rules` functions, not a
+            # stand-in -- see this module's 2026-08-25 docstring amendment.
             "fronts_reference_model": [asdict(f) for f in fronts],
             "audit_findings_reference_model": [asdict(f) for f in findings],
-            "audit_findings_cents_total": sum(f.amount_cents for f in findings),
+            "audit_findings_cents_total": sum(f.potential_savings_cents or 0 for f in findings),
             "denial_check_reference_model": (asdict(denial_check) if denial_check else None),
         },
     }
