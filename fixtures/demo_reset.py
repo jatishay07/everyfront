@@ -212,9 +212,11 @@ def _approve_all_applicable(api, case_id: str, case: dict) -> list[str]:
         if r.status_code == 200:
             approved.append(front["front"])
         else:
-            reason = r.json().get("detail", r.text) if r.headers.get("content-type", "").startswith(
-                "application/json"
-            ) else r.text
+            reason = (
+                r.json().get("detail", r.text)
+                if r.headers.get("content-type", "").startswith("application/json")
+                else r.text
+            )
             print(
                 f"    WARNING: front={front['front']} not approved ({r.status_code}): {reason}",
                 file=sys.stderr,
