@@ -229,6 +229,9 @@ async def run(case_id: str, case: dict) -> dict:
         "Return the resolved hospital record (or the honest reason it could not be resolved).",
         fact,
     )
-    prompt = f"Resolve the hospital for case {case_id}. Call get_lookup_result and report back."
+    # No raw case_id in the prompt -- see reader.py's docstring note (bug
+    # found live 2026-08-25): an LLM's freeform narration lands verbatim in
+    # `events/{id}.detail`, which a case rename cannot scrub after the fact.
+    prompt = "Resolve the hospital for this case. Call get_lookup_result and report back."
     turn = await common.run_agent_turn(NAME, config.GEMINI_MODEL, INSTRUCTION, [tool], prompt)
     return {"fact": fact, **turn}

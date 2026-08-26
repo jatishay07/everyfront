@@ -14,10 +14,15 @@ That distinction is the product. "We computed that you qualify" is advice;
 claim in §1.1. The placeholder made the demo path complete while looking
 complete -- which is exactly why it needed finding rather than trusting.
 
-Filer only ever runs from `pipeline.approve_and_request_filing`, which will
-not call it unless (a) `POST /cases/{id}/approve_filing` has been called and
-(b) Verifier passed. The human-in-the-loop gate is enforced by the caller, not
-by this module trusting its own judgment.
+Filer only ever runs from `pipeline.finalize_filing` (called by
+`services/agent-core/main.py`'s `/pubsub/filing-requested` push subscriber,
+CHANGED 2026-08-25, SWARM WO7: `approve_and_request_filing` used to call it
+in-process too, which is what made that endpoint take 6+ minutes). Either
+way, a `filing.requested` message only ever exists because (a)
+`POST /cases/{id}/approve_filing` was called and (b) Verifier passed --
+`approve_and_request_filing` is the only thing that ever publishes it. The
+human-in-the-loop gate is enforced there, not by this module trusting its own
+judgment.
 """
 
 from __future__ import annotations
@@ -160,9 +165,10 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         "Return the filing that was just sent: channel, vendor id, and status.",
         fact,
     )
-    prompt = (
-        f"Report the filing just sent for case {case_id}, front {front!r}. "
-        "Call get_filer_result first."
-    )
+    # No raw case_id in the prompt -- see reader.py's docstring note (bug
+    # found live 2026-08-25): an LLM's freeform narration lands verbatim in
+    # `events/{id}.detail`, which a case rename cannot scrub after the fact.
+    # `front` is safe to keep: it is never renamed and names no case.
+    prompt = f"Report the filing just sent for the {front!r} front. Call get_filer_result first."
     turn = await common.run_agent_turn(NAME, config.GEMINI_MODEL, INSTRUCTION, [tool], prompt)
     return {"fact": fact, "filing_id": filing_id, **turn}

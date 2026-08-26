@@ -215,6 +215,33 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             finding["detail"],
             [finding["citation"]] if finding["citation"] else [],
         )
+    # DEFECT (persona 5 WO7, "ef-2026-0006 reports $0 savings"): with zero
+    # findings, the loop above logs nothing at all -- a genuinely clean bill
+    # (every line item audited, nothing wrong) and an unparseable bill (no
+    # line items extracted at all, nothing COULD be audited) both produced
+    # this exact same silence, and both reach the dashboard as an identical
+    # "$0.00 audit findings" with no way for a judge -- or PROOF's own bug
+    # bash -- to tell which one happened. Make the distinction an explicit
+    # event either way, using `auditor.line_items_examined` (see that
+    # module's `_facts`).
+    if not af["findings"]:
+        examined = af.get("line_items_examined", 0)
+        if examined:
+            _log(
+                case_id,
+                "auditor",
+                "audit_finding:none",
+                f"{examined} line item(s) examined -- no duplicate, NCCI, or cash-price "
+                "findings. $0.00 audit findings reflects a clean bill.",
+            )
+        else:
+            _log(
+                case_id,
+                "auditor",
+                "audit_skipped",
+                "no line items were extracted from any document on file -- $0.00 audit "
+                "findings reflects missing/unparseable data, not a clean bill.",
+            )
     if af["denial_check"]["ran"]:
         _log(
             case_id,
@@ -266,12 +293,20 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     audit_cents = af["total_findings_cents"]
     charity_erasure_cents, charity_explain = _charity_care_erasure_cents(case)
     combined_cents = max(audit_cents, charity_erasure_cents)
+    # Same distinction as the audit_finding:none / audit_skipped events above,
+    # folded into the one line the dashboard's $0 case actually gets read
+    # from: "$0.00, 0 items examined" (nothing to audit) must not read the
+    # same as "$0.00" on its own (which a clean, fully-audited bill would also
+    # show).
+    examined = af.get("line_items_examined", 0)
+    audit_note = "" if examined else " (no line items were extracted -- nothing to audit)"
     _log(
         case_id,
         "auditor",
         "savings_summary",
         (
-            f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}. "
+            f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}"
+            f"{audit_note}. "
             f"Charity-care free-tier erasure: ${charity_erasure_cents / 100:,.2f} "
             f"({charity_explain}). Reported savings for this pass: "
             f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "
@@ -388,15 +423,43 @@ async def process_case_documents(case_id: str, doc_ids: list[str]) -> dict:
     return {"readers": dict(zip(doc_ids, reader_turns, strict=True)), **result}
 
 
+def _has_completed_filing(case_id: str, front: str) -> bool:
+    """True if `filings/` already has a real, sent filing for this case+front.
+
+    Used only to decide whether a front stuck at status `"filing"` is safe to
+    retry (see the guard in `approve_and_request_filing`) -- a genuinely
+    completed filing must never be silently re-filed just because the
+    `fronts[]` status patch that should have followed it (`run_filer`'s
+    `status: "filed"` write) did not land for some unrelated reason.
+    """
+    return any(f.get("front") == front for f in store.list_filings(case_id))
+
+
 async def approve_and_request_filing(case_id: str, front: str) -> dict:
     """Contract §3.3's `POST /cases/{id}/approve_filing` handler's core logic.
 
-    Runs Verifier; on pass, publishes `filing.requested` (Strategist's
-    literal act of emitting it, per the playbook) and hands off to Filer
-    immediately in-process as well, since the sole consumer of
-    `filing.requested` in this repo is this same service's own Filer -- see
-    services/agent-core/main.py's `/pubsub/filing-requested` route for the
-    asynchronous (real Pub/Sub push) path this mirrors.
+    Runs Verifier synchronously (fast: one LLM narration turn over an
+    already-computed fact), then, on pass, publishes `filing.requested` and
+    returns immediately -- Filer runs asynchronously off `filing.requested`,
+    via `services/agent-core/main.py`'s `/pubsub/filing-requested` push
+    subscriber calling `finalize_filing` below.
+
+    CHANGED 2026-08-25 (SWARM WO7, "approval times out clients"): this used to
+    ALSO call `run_filer` synchronously, in-process, right here -- meaning
+    every `approve_filing` request paid for Verifier's LLM turn, Filer's LLM
+    turn, real PDF rendering, a GCS upload, and a vendor round-trip, all
+    inside one HTTP request. Measured live: over 6 minutes, well past
+    services/api's own `AGENT_CORE_TIMEOUT_S` and Cloud Run's request
+    timeout -- the client saw a timeout even on runs where Filer eventually
+    succeeded server-side. That synchronous call existed only because, until
+    today, ATLAS's five Pub/Sub subscriptions were provisioned as PULL with no
+    subscriber (`infra/deploy.sh` never converted them to push) -- so
+    `filing.requested` went into a queue nobody read, and the in-process call
+    was the only thing that ever actually filed anything. `infra/deploy.sh`
+    now wires `ef-filing-requested` to this same service's
+    `/pubsub/filing-requested` push endpoint, so the event path is real:
+    letting it do the work, instead of duplicating that work here, is what
+    makes this endpoint fast again.
     """
     case = store.get_case(case_id)
     if case is None:
@@ -408,10 +471,24 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
         return {"ok": False, "reason": f"case has no front {front!r}"}
     if not matched.get("applicable"):
         return {"ok": False, "reason": f"front {front!r} is not applicable to this case"}
-    if matched.get("status") not in ("open",):
+    status = matched.get("status")
+    # BUG (SWARM WO7, "ef-2026-0001's charity_care front is stuck at status
+    # filing"): before today's deploy.sh fix, `filing.requested` was
+    # published into an unread PULL queue -- Filer never ran, the front never
+    # reached "filed" NOR reverted to "open" (there was no exception to
+    # revert on; the request had simply already returned or timed out), and
+    # every later approval attempt hit this exact guard and was rejected as
+    # "not open". A front that requested a filing and never got one must stay
+    # retryable. `status == "filing"` is now accepted here too, UNLESS a real
+    # filing already exists for this front (`_has_completed_filing`) -- in
+    # which case this really is a completed filing whose `fronts[]` status
+    # patch just did not land, and re-filing would double-file.
+    if status not in ("open", "filing"):
+        return {"ok": False, "reason": f"front {front!r} is not open (status={status})"}
+    if status == "filing" and _has_completed_filing(case_id, front):
         return {
             "ok": False,
-            "reason": f"front {front!r} is not open (status={matched.get('status')})",
+            "reason": f"front {front!r} already has a completed filing on record",
         }
 
     verifier_turn = await verifier.run(case_id, case, front)
@@ -440,22 +517,30 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
     pubsub_client.publish(
         config.TOPIC_FILING_REQUESTED, {"case_id": case_id, "front": front, "filing_id": filing_id}
     )
+    return {"ok": True, "front": matched, "filing_id": filing_id, "status": "filing_requested"}
 
-    # BUG (persona 5 WO6 task 1, found live 2026-08-25): a Filer failure
-    # (e.g. the missing-pypdf deploy defect this same task fixed) used to
-    # leave the front stuck in "filing" forever -- `matched["status"]` was
-    # set above and never reverted, so every retry after a transient/
-    # deploy-time failure hit "front ... is not open (status=filing)" even
-    # once the underlying problem was fixed. Mirror the Verifier-reject path
-    # just above: revert to "open" and log the failure, then let the
-    # exception still propagate (a filing that did not happen must not be
-    # reported as if it succeeded), so the case is left retryable rather than
-    # wedged.
+
+async def finalize_filing(case_id: str, front: str, filing_id: str) -> dict:
+    """Run Filer for a `filing.requested` message and settle the front's
+    status either way. The asynchronous counterpart of what
+    `approve_and_request_filing` used to do in-process (see that function's
+    docstring) -- called from `services/agent-core/main.py`'s
+    `/pubsub/filing-requested` push subscriber.
+
+    On failure, reverts the front to "open" (persona 5 WO6 task 1's fix,
+    carried over unchanged) so the case stays retryable rather than wedged at
+    "filing" forever, then re-raises so Pub/Sub's own redelivery/backoff sees
+    a real failure instead of a silently-acked message.
+    """
     try:
-        filer_result = await run_filer(case_id, front, filing_id)
+        return await run_filer(case_id, front, filing_id)
     except Exception as exc:  # noqa: BLE001 -- revert state, log, then re-raise honestly
-        matched["status"] = "open"
-        store.upsert_front(case_id, matched)
+        case = store.get_case(case_id)
+        fronts = (case or {}).get("fronts") or []
+        matched = next((f for f in fronts if f.get("front") == front), None)
+        if matched is not None:
+            matched["status"] = "open"
+            store.upsert_front(case_id, matched)
         _log(
             case_id,
             "filer",
@@ -464,7 +549,6 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
             "front reverted to open for retry",
         )
         raise
-    return {"ok": True, "front": matched, "filer": filer_result}
 
 
 async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
