@@ -170,10 +170,26 @@ deploy_one() {
     --memory=1Gi \
     --timeout=300 \
     --allow-unauthenticated \
-    --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=TRUE${pythonpath:+,PYTHONPATH=$pythonpath}${extra_env}" \
+    --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID},GOOGLE_CLOUD_REGION=${REGION},GOOGLE_CLOUD_LOCATION=${VERTEX_LOCATION},GOOGLE_GENAI_USE_VERTEXAI=TRUE,GCS_DOCUMENTS_BUCKET=ef-documents-${PROJECT_ID}${pythonpath:+,PYTHONPATH=$pythonpath}${extra_env}" \
     --quiet >/dev/null
   url="$(gcloud run services describe "ef-${svc}" --region="$REGION" --format='value(status.url)')"
   ok "$svc -> $url"
+
+  # GCS_DOCUMENTS_BUCKET is set HERE, not only in go_live.sh.
+  #
+  # --set-env-vars replaces the whole literal env list (gcloud's
+  # config_changes.py _PruneMapping); --set-secrets lives in a separate mutex
+  # group, so a redeploy preserved the OAuth secret refs while silently
+  # dropping the bucket name go_live.sh had set with --update-env-vars. The
+  # damage is entirely quiet: services/intake/intake/storage.py reads
+  # os.environ["GCS_DOCUMENTS_BUCKET"], dedupe.claim() fails OPEN without it,
+  # state.set_last_history_id() no-ops, so every Gmail push starts its history
+  # scan from the current id, finds nothing, and returns 200 with
+  # {"documents_published": 0}. Forever.
+  #
+  # HANDOFF.md's own rule -- "always redeploy before believing any live
+  # measurement" -- makes a redeploy after go_live.sh the LIKELY sequence, not
+  # an unlucky one. Setting it here makes the deploy self-sufficient instead.
 
   # Point this service's Pub/Sub subscriptions at it.
   #
