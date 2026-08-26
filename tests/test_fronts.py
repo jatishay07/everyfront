@@ -135,6 +135,31 @@ class TestCharityCare:
         assert "for-profit" in d.reason
         assert "1.501(r)-1(b)(18)" in d.citation
 
+    def test_unresolved_hospital_does_not_get_the_benefit_of_the_doubt(self):
+        """ef-2026-0006: Lookup could not resolve a hospital at all (no EIN,
+        no name -- `hospital == {}`). Previously `nonprofit` defaulted to
+        `True` for a missing key, which marked charity_care applicable for a
+        facility nobody could name. It must now refuse instead of assume.
+
+        Note: `_case(hospital={})` would MERGE an empty override onto the
+        baseline hospital dict (see `_case`'s dict-merge rule) and so would
+        not actually remove `nonprofit` -- the hospital dict is replaced
+        outright here instead, to reproduce the real shape an unresolved
+        `hospital` join actually takes.
+        """
+        case = _case()
+        case["hospital"] = {}
+        d = _decision(select_fronts(case, today=TODAY), "charity_care")
+        assert d.applicable is False
+        assert "not established" in d.reason
+        assert "1.501(r)-1(b)(18)" in d.citation
+
+    def test_nonprofit_key_present_but_not_a_bool_is_also_unresolved(self):
+        case = _case(hospital={"nonprofit": None})
+        d = _decision(select_fronts(case, today=TODAY), "charity_care")
+        assert d.applicable is False
+        assert "not established" in d.reason
+
     def test_income_over_every_threshold_is_ineligible(self):
         case = _case(patient={"annual_income": 900_000_00})
         d = _decision(select_fronts(case, today=TODAY), "charity_care")
@@ -233,9 +258,13 @@ class TestAudit:
     def test_no_itemized_bill_is_not_applicable(self):
         d = _decision(select_fronts(_case(), today=TODAY), "audit")
         assert d.applicable is False
+        assert "no itemized bill on file" in d.reason
 
-    def test_itemized_bill_in_documents_triggers_audit(self):
-        case = _case(documents=[{"type": "denial_letter"}, {"type": "itemized_bill"}])
+    def test_itemized_bill_with_usable_line_items_triggers_audit(self):
+        case = _case(
+            documents=[{"type": "denial_letter"}, {"type": "itemized_bill"}],
+            bill={"line_items": [{"code": "99213"}]},
+        )
         d = _decision(select_fronts(case, today=TODAY), "audit")
         assert d.applicable is True
         assert "1395b-7(b)" in d.citation
@@ -245,8 +274,33 @@ class TestAudit:
         d = _decision(select_fronts(case, today=TODAY), "audit")
         assert d.applicable is True
 
+    def test_itemized_bill_document_with_no_usable_line_items_is_not_applicable(self):
+        """ef-2026-0006: a document tagged `itemized_bill` reached the case,
+        but extraction produced zero usable line items (the Reader could not
+        parse it). This must NOT read as "audited, found nothing" -- it must
+        read as "could not audit", and must not be applicable."""
+        case = _case(documents=[{"type": "itemized_bill"}])
+        d = _decision(select_fronts(case, today=TODAY), "audit")
+        assert d.applicable is False
+        assert "no usable line items were extracted" in d.reason
+        assert "no itemized bill on file" not in d.reason
+
+    def test_itemized_bill_document_with_only_malformed_line_items_is_not_applicable(self):
+        case = _case(
+            documents=[{"type": "itemized_bill"}],
+            bill={"line_items": [{"code": ""}, {"code": None}, "not a dict"]},
+        )
+        d = _decision(select_fronts(case, today=TODAY), "audit")
+        assert d.applicable is False
+        assert "no usable line items were extracted" in d.reason
+
     def test_non_list_documents_is_handled_gracefully(self):
         case = _case(documents="not a list")
+        d = _decision(select_fronts(case, today=TODAY), "audit")
+        assert d.applicable is False
+
+    def test_non_list_line_items_is_handled_gracefully(self):
+        case = _case(bill={"line_items": "not a list"})
         d = _decision(select_fronts(case, today=TODAY), "audit")
         assert d.applicable is False
 
