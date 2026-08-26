@@ -41,6 +41,11 @@ gcloud config set project "$PROJECT_ID" >/dev/null
 gcloud config set run/region "$REGION" >/dev/null
 ok "default project and region set ($REGION)"
 
+# Resolved once, here, because three later sections need it: the Pub/Sub
+# service agent's address (dead-letter permissions + token-creator) and the
+# budget/monitoring sections.
+PROJECT_NUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+PUBSUB_AGENT="service-${PROJECT_NUM}@gcp-sa-pubsub.iam.gserviceaccount.com"
 
 # ---------------------------------------------------------------- billing
 # Cloud Run, Vertex, and Firestore all refuse to work without billing. Fail
@@ -231,17 +236,71 @@ else
   ok "ef-dead-letter -> dead-letter"
 fi
 
+# ------------------------------------------- make dead-lettering actually work
+# Attaching `--dead-letter-topic` above is NOT enough. Pub/Sub forwards a
+# dead-lettered message as its own service agent, which needs
+# roles/pubsub.publisher on the dead-letter TOPIC and roles/pubsub.subscriber
+# on each SUBSCRIPTION doing the forwarding. Neither is implied by anything
+# else granted here. Confirmed live 2026-08-26: every topic and subscription
+# policy in the project was empty (`etag: ACAB`), and roles/pubsub.serviceAgent
+# -- which the agent DOES hold at project level -- contains ten permissions,
+# all of them iam/resourcemanager/serviceusage, and no `pubsub.topics.publish`
+# whatsoever (`gcloud iam roles describe roles/pubsub.serviceAgent`).
+#
+# So all five subscriptions carried a dead-letter policy that could never fire:
+# a poison message would retry to max-delivery-attempts, then sit until the
+# 1-day retention silently dropped it, and the `everyfront-dead-letter-nonempty`
+# alert further down -- which exists and is enabled -- could never trigger,
+# because nothing could ever reach the topic it watches. Same class of defect
+# as the five PULL subscriptions with no subscriber: infrastructure that is
+# present, correct-looking, and structurally incapable of doing its job.
+#
+# Not fatal on failure, unlike the Gmail grant above: a project without these
+# still processes every healthy message, it just loses the safety net. Warn
+# loudly rather than halting a bootstrap over it.
+log "Dead-letter delivery permissions"
+if gcloud pubsub topics get-iam-policy dead-letter \
+     --format='value(bindings.members)' 2>/dev/null | grep -q "$PUBSUB_AGENT"; then
+  skip "pubsub service agent publisher on dead-letter"
+elif gcloud pubsub topics add-iam-policy-binding dead-letter \
+       --member="serviceAccount:${PUBSUB_AGENT}" \
+       --role="roles/pubsub.publisher" >/dev/null 2>&1; then
+  ok "pubsub service agent -> publisher on dead-letter"
+else
+  warn "could not grant publisher on dead-letter -- dead-lettering will silently drop messages"
+fi
+while IFS='|' read -r topic sub; do
+  [ -z "$topic" ] && continue
+  if gcloud pubsub subscriptions get-iam-policy "$sub" \
+       --format='value(bindings.members)' 2>/dev/null | grep -q "$PUBSUB_AGENT"; then
+    skip "  pubsub service agent subscriber on $sub"
+  elif gcloud pubsub subscriptions add-iam-policy-binding "$sub" \
+         --member="serviceAccount:${PUBSUB_AGENT}" \
+         --role="roles/pubsub.subscriber" >/dev/null 2>&1; then
+    ok "  pubsub service agent -> subscriber on $sub"
+  else
+    warn "could not grant subscriber on $sub -- its dead-letter policy cannot fire"
+  fi
+done <<< "$SUB_RECORDS"
+
 # ---------------------------------------------------------------- service accounts
 log "Service accounts (least privilege)"
 # macOS ships bash 3.2, which has no associative arrays. Parallel
 # "name|roles" records keep this runnable on the dev machine AND on Cloud Shell.
+#
+# roles/secretmanager.secretAccessor is deliberately NOT in this list. It used
+# to be, at PROJECT scope, for ef-intake and ef-agent -- which meant ef-intake,
+# whose only legitimate need is the three google-oauth-* values, could read
+# every vendor key in the project (lob-api-key, phaxio-api-secret, ...) the
+# moment those secrets existed. Secrets are now bound one at a time, per
+# consumer, in the section below. WO1 says least privilege and this repo is
+# public with a README that makes claims about its own security posture.
 SA_RECORDS="
-ef-intake|roles/pubsub.publisher roles/storage.objectAdmin roles/secretmanager.secretAccessor
-ef-agent|roles/pubsub.publisher roles/pubsub.subscriber roles/datastore.user roles/storage.objectAdmin roles/aiplatform.user roles/secretmanager.secretAccessor
+ef-intake|roles/pubsub.publisher roles/storage.objectAdmin
+ef-agent|roles/pubsub.publisher roles/pubsub.subscriber roles/datastore.user roles/storage.objectAdmin roles/aiplatform.user
 ef-api|roles/datastore.user roles/pubsub.publisher roles/storage.objectViewer
 ef-web|
 "
-PROJECT_NUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 while IFS='|' read -r sa roles; do
   [ -z "$sa" ] && continue
   email="${sa}@${PROJECT_ID}.iam.gserviceaccount.com"
