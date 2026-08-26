@@ -200,7 +200,14 @@ def test_approve_filing_blocks_when_verifier_fails(monkeypatch):
     assert case["fronts"][0]["status"] == "open"
 
 
-def test_approve_filing_runs_filer_when_verifier_passes(monkeypatch):
+def test_approve_filing_publishes_and_returns_without_running_filer(monkeypatch):
+    """CHANGED 2026-08-25 (SWARM WO7, "approval times out clients"):
+    `approve_and_request_filing` no longer runs Filer in-process -- it
+    publishes `filing.requested` and returns as soon as Verifier passes.
+    Filer now only runs from the `filing.requested` push subscriber
+    (`finalize_filing`, exercised separately below) -- see that function's
+    docstring for why the synchronous call routinely took over 6 minutes and
+    blew every timeout in the chain."""
     s = make_memory_store()
     _patch_store(monkeypatch, s)
     published = _patch_no_op_pubsub(monkeypatch)
@@ -214,40 +221,67 @@ def test_approve_filing_runs_filer_when_verifier_passes(monkeypatch):
             {"case_id": case_id, "front": front, "passed": True, "issues": []}, "clear to file"
         ),
     )
-    monkeypatch.setattr(
-        filer,
-        "run",
-        lambda case_id, case, front, filing_id=None: async_fake_turn(
-            {
-                "case_id": case_id,
-                "front": front,
-                "filing_id": filing_id,
-                "channel": "fax",
-                "vendor_id": "SIMULATED-FAX-abc",
-                "status": "sent",
-                "simulated": True,
-                "source": {},
-            },
-            "filed via fax",
-        ),
-    )
+
+    def _boom(*a, **k):
+        raise AssertionError("Filer must not run synchronously from approve_and_request_filing")
+
+    monkeypatch.setattr(filer, "run", _boom)
 
     result = asyncio.run(pipeline.approve_and_request_filing("c1", "ppdr"))
     assert result["ok"] is True
+    assert result["status"] == "filing_requested"
     case = s.get_case("c1")
-    assert case["fronts"][0]["status"] == "filed"
+    # not yet "filed" -- that only happens once finalize_filing (the async
+    # push path) actually runs Filer.
+    assert case["fronts"][0]["status"] == "filing"
 
     topics_published = [t for t, _ in published]
     assert pipeline.config.TOPIC_FILING_REQUESTED in topics_published
-    assert pipeline.config.TOPIC_FILING_COMPLETED in topics_published
+    assert pipeline.config.TOPIC_FILING_COMPLETED not in topics_published
 
     events = s.list_events("c1")
     assert any(e["agent"] == "verifier" for e in events)
-    assert any(e["agent"] == "filer" for e in events)
     assert any(e["action"] == "filing_requested" for e in events)
+    assert not any(e["agent"] == "filer" for e in events)
 
 
-def test_approve_filing_reverts_front_to_open_when_filer_raises(monkeypatch):
+def _fake_filer_run(status="sent"):
+    return lambda case_id, case, front, filing_id=None: async_fake_turn(
+        {
+            "case_id": case_id,
+            "front": front,
+            "filing_id": filing_id,
+            "channel": "fax",
+            "vendor_id": "SIMULATED-FAX-abc",
+            "status": status,
+            "simulated": True,
+            "source": {},
+        },
+        "filed via fax",
+    )
+
+
+def test_finalize_filing_runs_filer_and_marks_front_filed(monkeypatch):
+    """The async counterpart of the old in-process call: `finalize_filing` is
+    what `services/agent-core/main.py`'s `/pubsub/filing-requested` push
+    subscriber calls once `filing.requested` actually arrives."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    published = _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "filing"})
+    monkeypatch.setattr(filer, "run", _fake_filer_run())
+
+    result = asyncio.run(pipeline.finalize_filing("c1", "ppdr", "filing-1"))
+    assert result["fact"]["status"] == "sent"
+    case = s.get_case("c1")
+    assert case["fronts"][0]["status"] == "filed"
+    assert any(t == pipeline.config.TOPIC_FILING_COMPLETED for t, _ in published)
+    events = s.list_events("c1")
+    assert any(e["agent"] == "filer" and e["action"] == "file" for e in events)
+
+
+def test_finalize_filing_reverts_front_to_open_when_filer_raises(monkeypatch):
     """BUG found live (persona 5 WO6 task 1): a deploy-time defect (agent-core's
     container was missing RELAY's pypdf/reportlab dependency) made every
     Filer call raise -- and the front was left stuck at "filing" forever,
@@ -260,15 +294,7 @@ def test_approve_filing_reverts_front_to_open_when_filer_raises(monkeypatch):
     _patch_store(monkeypatch, s)
     _patch_no_op_pubsub(monkeypatch)
     s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
-    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "open"})
-
-    monkeypatch.setattr(
-        verifier,
-        "run",
-        lambda case_id, case, front: async_fake_turn(
-            {"case_id": case_id, "front": front, "passed": True, "issues": []}, "clear to file"
-        ),
-    )
+    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "filing"})
 
     async def _boom(case_id, case, front, filing_id=None):
         raise ModuleNotFoundError("No module named 'pypdf'")
@@ -277,7 +303,7 @@ def test_approve_filing_reverts_front_to_open_when_filer_raises(monkeypatch):
 
     raised = False
     try:
-        asyncio.run(pipeline.approve_and_request_filing("c1", "ppdr"))
+        asyncio.run(pipeline.finalize_filing("c1", "ppdr", "filing-1"))
     except ModuleNotFoundError:
         raised = True
     assert raised  # the failure is not swallowed
@@ -289,26 +315,55 @@ def test_approve_filing_reverts_front_to_open_when_filer_raises(monkeypatch):
     assert any(e["agent"] == "filer" and e["action"] == "file_failed" for e in events)
 
     # And the front is retryable now that it is back to open.
+    monkeypatch.setattr(filer, "run", _fake_filer_run())
+    result = asyncio.run(pipeline.finalize_filing("c1", "ppdr", "filing-2"))
+    assert result["fact"]["status"] == "sent"
+    assert s.get_case("c1")["fronts"][0]["status"] == "filed"
+
+
+def test_approve_filing_retries_a_front_stuck_at_filing_with_no_completed_filing(monkeypatch):
+    """BUG found live (SWARM WO7): ef-2026-0001's charity_care front got stuck
+    at status "filing" from a timed-out approval, back when `filing.requested`
+    went into an unread PULL queue (before infra/deploy.sh wired the push
+    subscriptions) -- Filer never ran, and every later approve_filing call was
+    rejected as "not open". A front that requested a filing and never got one
+    must be retryable, not permanently wedged."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    published = _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "filing"})
+    # no filings/ record exists for this front -- genuinely stuck, not filed.
+
     monkeypatch.setattr(
-        filer,
+        verifier,
         "run",
-        lambda case_id, case, front, filing_id=None: async_fake_turn(
-            {
-                "case_id": case_id,
-                "front": front,
-                "filing_id": filing_id,
-                "channel": "fax",
-                "vendor_id": "SIMULATED-FAX-abc",
-                "status": "sent",
-                "simulated": True,
-                "source": {},
-            },
-            "filed via fax",
+        lambda case_id, case, front: async_fake_turn(
+            {"case_id": case_id, "front": front, "passed": True, "issues": []}, "clear to file"
         ),
     )
+
     result = asyncio.run(pipeline.approve_and_request_filing("c1", "ppdr"))
     assert result["ok"] is True
-    assert s.get_case("c1")["fronts"][0]["status"] == "filed"
+    assert s.get_case("c1")["fronts"][0]["status"] == "filing"
+    assert any(t == pipeline.config.TOPIC_FILING_REQUESTED for t, _ in published)
+
+
+def test_approve_filing_refuses_retry_when_filing_already_completed(monkeypatch):
+    """The flip side of the stuck-front fix above: a front at status "filing"
+    that already HAS a real `filings/` record (its own `fronts[]` status
+    patch just never landed, e.g. a crash between the two writes) must not be
+    silently re-filed -- that would double-file the same front."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "filing"})
+    s.create_filing({"case_id": "c1", "front": "ppdr", "status": "sent"})
+
+    result = asyncio.run(pipeline.approve_and_request_filing("c1", "ppdr"))
+    assert result["ok"] is False
+    assert "already has a completed filing" in result["reason"]
 
 
 def test_approve_filing_rejects_front_not_applicable(monkeypatch):

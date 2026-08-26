@@ -14,10 +14,15 @@ That distinction is the product. "We computed that you qualify" is advice;
 claim in §1.1. The placeholder made the demo path complete while looking
 complete -- which is exactly why it needed finding rather than trusting.
 
-Filer only ever runs from `pipeline.approve_and_request_filing`, which will
-not call it unless (a) `POST /cases/{id}/approve_filing` has been called and
-(b) Verifier passed. The human-in-the-loop gate is enforced by the caller, not
-by this module trusting its own judgment.
+Filer only ever runs from `pipeline.finalize_filing` (called by
+`services/agent-core/main.py`'s `/pubsub/filing-requested` push subscriber,
+CHANGED 2026-08-25, SWARM WO7: `approve_and_request_filing` used to call it
+in-process too, which is what made that endpoint take 6+ minutes). Either
+way, a `filing.requested` message only ever exists because (a)
+`POST /cases/{id}/approve_filing` was called and (b) Verifier passed --
+`approve_and_request_filing` is the only thing that ever publishes it. The
+human-in-the-loop gate is enforced there, not by this module trusting its own
+judgment.
 """
 
 from __future__ import annotations
