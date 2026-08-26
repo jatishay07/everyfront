@@ -200,20 +200,36 @@ class CaseStore:
         one the filing lifecycle already owns.
 
         Analysis is not a one-shot: every `case.document.added` re-runs the
-        whole hierarchy, and the Filer itself stores each generated PDF as a
-        document -- so filing a front publishes an event that re-analyses the
-        case. `select_fronts` is pure and has no idea anything has been filed,
-        so it returns every applicable front at status "open", and a plain
-        `upsert_front` then wrote that "open" straight over a sibling front's
-        "filed".
+        whole hierarchy. `select_fronts` is pure and has no idea anything has
+        been filed, so it returns every applicable front at status "open", and
+        a plain `upsert_front` wrote that "open" straight over a sibling
+        front's "filed".
 
         Observed live on ef-2026-0007, 2026-08-26: audit filed 08:40:46 and
         charity_care 08:40:51, then re-analyses at 08:40:50 and 08:40:52-54
         reset both to "open" -- while `filings/` held three real "sent"
         records. ppdr kept its "filed" only because its filing happened to
-        land after the last re-analysis. This is the second, independent
-        cause of the same symptom PROOF reported, and no transaction can fix
-        it: both writers are behaving exactly as written.
+        land after the last re-analysis. This is a second, independent cause
+        of the same symptom PROOF reported, and no transaction can fix it:
+        both writers are behaving exactly as written.
+
+        CORRECTION 2026-08-26 (FORGE, same day): this docstring originally
+        claimed those re-analyses were triggered by the Filer -- "the Filer
+        itself stores each generated PDF as a document, so filing a front
+        publishes an event that re-analyses the case." That is FALSE and it
+        was my inference from the timestamps above, not something I checked.
+        `filer.run` calls `store.add_document`, which publishes nothing; the
+        only publishers of `case.document.added` in this repo are
+        `services/api`'s `/demo/inject_bill` and `services/intake`. The real
+        driver is a Pub/Sub redelivery storm: `ef-document-added` has a 60s
+        ack deadline against a cascade that takes 60-130s, so the same
+        document is redelivered mid-cascade and up to five concurrent
+        cascades run per document -- which is also why the interleaving
+        *looked* filing-triggered.
+
+        The behaviour this method guards against is real and the fix stands.
+        The mechanism I attributed it to was wrong, and a wrong mechanism in
+        a docstring is how the next person debugs the wrong thing.
 
         Everything else on the entry -- applicable, reason, citation,
         deadline -- IS analysis's to update, and still is.
