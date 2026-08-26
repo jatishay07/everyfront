@@ -18,9 +18,17 @@
 
 PYTHON ?= .venv/bin/python
 
-.PHONY: demo-reset demo-run demo-cycle demo-reset-dry demo-run-dry
+.PHONY: demo-reset demo-reset-purge-only demo-run demo-cycle demo-reset-dry demo-run-dry
 
+# --reseed: purge, then reseed the 7 background cases (contract-shaped,
+# human-plausible ids -- see fixtures/demo_reset.py's docstring); the 8th
+# case is left for `demo-run` to inject live, on camera.
 demo-reset:
+	$(PYTHON) fixtures/demo_reset.py --reseed
+
+# Purge-only, no reseed -- for a fast cleanup between ad hoc test injections
+# when a full pre-recording reseed isn't needed.
+demo-reset-purge-only:
 	$(PYTHON) fixtures/demo_reset.py
 
 demo-run:
@@ -30,7 +38,7 @@ demo-run:
 # What CI actually exercises (see tests/test_demo_harness.py); use these to
 # rehearse the script's own logic/timing narration before a real recording.
 demo-reset-dry:
-	$(PYTHON) fixtures/demo_reset.py --dry-run
+	$(PYTHON) fixtures/demo_reset.py --dry-run --reseed
 
 demo-run-dry:
 	$(PYTHON) fixtures/demo_run.py --dry-run

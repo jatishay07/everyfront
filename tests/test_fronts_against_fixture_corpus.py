@@ -5,28 +5,24 @@ against PROOF's 8-case corpus. Make sure the ordering rule holds -- debt
 validation FIRST when in collections -- and that a front is never marked
 applicable without a deadline that can actually be met."
 
-IMPORTANT GAP THIS FILE EXISTS TO CLOSE: `fixtures/build.py` (and therefore
-every `fronts_reference_model` entry in `fixtures/generated/cases/*/case.json`
-and every assertion in `tests/test_fixture_corpus.py::TestFrontOrdering`) is
-still wired to `fixtures/reference_model.py::select_fronts_reference` -- an
-explicit, simplified STAND-IN PROOF wrote before STATUTE's real
-`rules.fronts.select_fronts` existed. That module's own docstring says the
-switch to the real function is supposed to happen automatically once it
-ships; it has not been rewired. Concretely, the reference model does not
-even implement deadline-expiry gating (no case in the FAP/PPDR/debt-validation
-window ever expires in it) or the "sequenced after debt validation" reason
-annotation. So the fixture corpus's *committed, generated* JSON currently
-tests a placeholder, not this package's actual `select_fronts` -- the exact
-kind of "looks checked but isn't" gap agreement §2.2 warns about.
+GAP THIS FILE ORIGINALLY EXISTED TO CLOSE (CLOSED 2026-08-25, PROOF WO6):
+`fixtures/build.py` used to be wired to `fixtures/reference_model.py::
+select_fronts_reference` -- an explicit, simplified stand-in PROOF wrote
+before STATUTE's real `rules.fronts.select_fronts` existed, missing
+deadline-expiry gating and the "sequenced after debt validation" reason
+annotation. PROOF has since rewired `fixtures/build.py` to call the real
+`select_fronts` (and `audit_line_items` / `check_denial_lawfulness`)
+directly, so every `fronts_reference_model` entry in `fixtures/generated/
+cases/*/case.json` now comes from this package's actual code, and
+`fixtures/reference_model.py` is deleted.
 
 This file is STATUTE's own regression suite (packages/rules is STATUTE's
 directory; this repo's existing convention already puts STATUTE's tests for
 `packages/rules` under the shared `tests/` -- see test_fronts.py,
 test_deadlines.py, etc.) exercising the REAL `select_fronts` directly against
-PROOF's real corpus data (`fixtures.cases_data`), independent of the stale
-reference model. A HANDOFF to PROOF to rewire `fixtures/build.py` itself
-(outside packages/rules/, so not STATUTE's to edit) is in this work order's
-PR description.
+PROOF's real corpus data (`fixtures.cases_data`), independent of
+`fixtures/build.py`'s own computation -- kept as a second, independent check
+now that both paths agree, not because a gap remains.
 """
 
 from __future__ import annotations

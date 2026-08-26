@@ -174,6 +174,68 @@ deploy_one() {
     --quiet >/dev/null
   url="$(gcloud run services describe "ef-${svc}" --region="$REGION" --format='value(status.url)')"
   ok "$svc -> $url"
+
+  # Point this service's Pub/Sub subscriptions at it.
+  #
+  # setup.sh creates these as PULL subscriptions and its own comment promised
+  # deploy.sh would convert them to push "once the Cloud Run URLs exist". That
+  # conversion was never written, so every subscription sat with no subscriber:
+  # approve_filing published `filing.requested` into a queue nobody read, the
+  # front flipped to "filing", and no filing was ever produced. Nothing errored.
+  #
+  # The demo path worked only because /demo/inject_bill calls agent-core
+  # SYNCHRONOUSLY over HTTP, bypassing the event backbone entirely -- so the
+  # one required §1.3 service that was provisioned and named correctly was also
+  # completely inert, and looked fine from every angle except an actual filing.
+  wire_push() {
+    _sub="$1"; _path="$2"
+    gcloud pubsub subscriptions describe "$_sub" >/dev/null 2>&1 || return 0
+    gcloud pubsub subscriptions modify-push-config "$_sub" \
+      --push-endpoint="${url}${_path}" \
+      --push-auth-service-account="${sa}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      >/dev/null 2>&1 \
+      && ok "  $_sub -> ${_path}" \
+      || printf '    \033[33mwarn\033[0m could not wire %s -- it stays PULL and nothing will consume it\n' "$_sub"
+  }
+  case "$svc" in
+    agent-core)
+      wire_push ef-document-added   /pubsub/document-added
+      wire_push ef-filing-requested /pubsub/filing-requested
+      ;;
+    intake)
+      wire_push ef-intake-email     /pubsub/gmail
+      ensure_watch_renewal_job
+      ;;
+  esac
+}
+
+# services/intake/main.py's `/gmail/watch/renew` docstring is an explicit
+# HANDOFF: "ATLAS needs a Scheduler job ... pointed at this route with a
+# 7-day-or-shorter cadence" -- Gmail watches expire after 7 days
+# (services/intake's own module doc), and nothing was ever created: confirmed
+# live 2026-08-25, `gcloud scheduler jobs list` was empty even after intake's
+# first deploy. Without this, Gmail push intake goes silently dark a week
+# after every setup -- no error, no alert, the mailbox just stops flowing
+# into the pipeline. Runs daily (well inside the 7-day window) as its own
+# service account via OIDC, same pattern as the push subscriptions above.
+ensure_watch_renewal_job() {
+  job="ef-gmail-watch-renew"
+  target="${url}/gmail/watch/renew"
+  if gcloud scheduler jobs describe "$job" --location="$REGION" >/dev/null 2>&1; then
+    gcloud scheduler jobs update http "$job" --location="$REGION" \
+      --uri="$target" --http-method=POST \
+      --oidc-service-account-email="${sa}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      >/dev/null 2>&1 \
+      && ok "  $job -> $target (updated)" \
+      || printf '    \033[33mwarn\033[0m could not update %s -- Gmail watch renewal may be stale\n' "$job"
+  else
+    gcloud scheduler jobs create http "$job" --location="$REGION" \
+      --schedule="0 3 * * *" --uri="$target" --http-method=POST \
+      --oidc-service-account-email="${sa}@${PROJECT_ID}.iam.gserviceaccount.com" \
+      >/dev/null 2>&1 \
+      && ok "  $job -> $target (daily)" \
+      || printf '    \033[33mwarn\033[0m could not create %s -- Gmail watch will expire in 7 days uncontested\n' "$job"
+  fi
 }
 
 # Validate before touching the caller's gcloud config -- a bad argument should

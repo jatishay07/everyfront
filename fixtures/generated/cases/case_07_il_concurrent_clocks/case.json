@@ -68,35 +68,20 @@
     }
   ],
   "expected": {
-    "audit_findings_cents_total": 51500,
+    "audit_findings_cents_total": 22000,
     "audit_findings_reference_model": [
       {
-        "amount_cents": 7000,
-        "code": "86787",
-        "description": "AB, VARICELLA ZOSTER IGG",
-        "kind": "cash_price_delta",
-        "note": "REAL figures from docs/SPIKE.md gate (b): Advocate's own attested MRF lists code 86787 gross $140.00 / cash $70.00 -- a flat 50%-of-gross discount. Billing a self-pay patient the gross price is a 2x overcharge against the hospital's own published cash price."
-      },
-      {
-        "amount_cents": 19000,
-        "code": "71046",
-        "description": "CHEST X-RAY, 2 VIEWS",
-        "kind": "mue_excess",
-        "note": "3 units billed in one line for a code with an illustrative 1-unit/day MUE ceiling -- flagged as 2 excess units. NOT cross-checked against a live CMS NCCI MUE table (packages/datapipes has no NCCI pipeline yet, WO3); verify before citing in a real filing."
-      },
-      {
-        "amount_cents": 22000,
-        "code": "80053",
-        "description": "COMPREHENSIVE METABOLIC PANEL",
-        "kind": "exact_duplicate",
-        "note": "Same metabolic panel billed twice."
-      },
-      {
-        "amount_cents": 3500,
-        "code": "36415",
-        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
-        "kind": "ptp_unbundling",
-        "note": "36415 alongside same-day E/M 99285, no modifier."
+        "citation": "42 USC 1395b-7(b) (itemized statement); duplicate billing is not separately regulated",
+        "codes": [
+          "80053"
+        ],
+        "description": "2 identical lines for 80053 (1 unit(s) each) -- likely duplicate billing",
+        "kind": "duplicate",
+        "lines": [
+          3,
+          4
+        ],
+        "potential_savings_cents": 22000
       }
     ],
     "deadlines": [
@@ -160,20 +145,30 @@
       {
         "applicable": true,
         "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "deadline": "2027-03-17",
         "front": "charity_care",
-        "reason": "Screened free against Advocate Christ Medical Center's FAP."
+        "reason": "Income is 109.8097% of the federal poverty level. At or below the 250% threshold for free care. Basis: 210 ILCS 89/10 (Hospital Uninsured Patient Discount Act; general/non-rural hospital tier); 26 CFR 1.501(r)-4(b)(2)"
       },
       {
         "applicable": true,
-        "citation": "45 CFR 149.620(c)",
+        "citation": "45 CFR 149.620(a)(2)(ii), (c)(1)",
+        "deadline": "2026-11-17",
         "front": "ppdr",
-        "reason": "Bill exceeds GFE by $900.00, over the $400 floor."
+        "reason": "uninsured with a bill $900.00 above the Good Faith Estimate (>= $400 floor)"
+      },
+      {
+        "applicable": false,
+        "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
+        "deadline": null,
+        "front": "debt_validation",
+        "reason": "account is not reported in collections"
       },
       {
         "applicable": true,
         "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "deadline": null,
         "front": "audit",
-        "reason": "Itemized bill present -- billing audit always runs."
+        "reason": "itemized bill on file; a billing audit is always performed"
       }
     ]
   },

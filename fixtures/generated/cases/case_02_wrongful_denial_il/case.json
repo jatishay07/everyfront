@@ -56,21 +56,20 @@
     }
   ],
   "expected": {
-    "audit_findings_cents_total": 21500,
+    "audit_findings_cents_total": 18000,
     "audit_findings_reference_model": [
       {
-        "amount_cents": 18000,
-        "code": "96365",
-        "description": "IV INFUSION, INITIAL HOUR",
-        "kind": "exact_duplicate",
-        "note": "Identical infusion line billed twice."
-      },
-      {
-        "amount_cents": 3500,
-        "code": "36415",
-        "description": "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
-        "kind": "ptp_unbundling",
-        "note": "Same pattern as case 1 -- 36415 alongside same-day E/M 99285."
+        "citation": "42 USC 1395b-7(b) (itemized statement); duplicate billing is not separately regulated",
+        "codes": [
+          "96365"
+        ],
+        "description": "2 identical lines for 96365 (1 unit(s) each) -- likely duplicate billing",
+        "kind": "duplicate",
+        "lines": [
+          1,
+          2
+        ],
+        "potential_savings_cents": 18000
       }
     ],
     "deadlines": [
@@ -107,11 +106,23 @@
     ],
     "denial_check_reference_model": {
       "citation": "26 CFR 1.501(r)-4(b)(3)",
-      "undisclosed_docs": [
+      "demanded_docs": [
+        "completed_application_form",
+        "proof_of_income_last_30_days",
         "notarized_affidavit_of_indigency",
         "three_years_federal_tax_returns"
       ],
-      "unlawful": true
+      "drafted_citation": "The hospital's Financial Assistance Policy, as published, does not list notarized_affidavit_of_indigency; three_years_federal_tax_returns among the documentation an applicant may be required to submit. Under 26 CFR 1.501(r)-4(b)(3), the FAP must describe any required documentation, and a facility may not condition eligibility for assistance on information outside that published list. The denial on this basis is unlawful and must be reversed.",
+      "fap_doc_list": [
+        "completed_application_form",
+        "proof_of_income_last_30_days"
+      ],
+      "insufficient_data": false,
+      "unlisted_docs": [
+        "notarized_affidavit_of_indigency",
+        "three_years_federal_tax_returns"
+      ],
+      "violation": true
     },
     "eligibility": {
       "citations": [
@@ -131,14 +142,30 @@
       {
         "applicable": true,
         "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "deadline": "2026-09-02",
         "front": "charity_care",
-        "reason": "Screened free against Advocate Christ Medical Center's FAP."
+        "reason": "Income is 184.8429% of the federal poverty level. At or below the 250% threshold for free care. Basis: 210 ILCS 89/10 (Hospital Uninsured Patient Discount Act; general/non-rural hospital tier); 26 CFR 1.501(r)-4(b)(2)"
+      },
+      {
+        "applicable": false,
+        "citation": "45 CFR 149.610(a)",
+        "deadline": null,
+        "front": "ppdr",
+        "reason": "PPDR requires an uninsured/self-pay patient (patient is insured)"
+      },
+      {
+        "applicable": false,
+        "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
+        "deadline": null,
+        "front": "debt_validation",
+        "reason": "account is not reported in collections"
       },
       {
         "applicable": true,
         "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "deadline": null,
         "front": "audit",
-        "reason": "Itemized bill present -- billing audit always runs."
+        "reason": "itemized bill on file; a billing audit is always performed"
       }
     ]
   },
