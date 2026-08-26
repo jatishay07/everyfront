@@ -215,6 +215,33 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             finding["detail"],
             [finding["citation"]] if finding["citation"] else [],
         )
+    # DEFECT (persona 5 WO7, "ef-2026-0006 reports $0 savings"): with zero
+    # findings, the loop above logs nothing at all -- a genuinely clean bill
+    # (every line item audited, nothing wrong) and an unparseable bill (no
+    # line items extracted at all, nothing COULD be audited) both produced
+    # this exact same silence, and both reach the dashboard as an identical
+    # "$0.00 audit findings" with no way for a judge -- or PROOF's own bug
+    # bash -- to tell which one happened. Make the distinction an explicit
+    # event either way, using `auditor.line_items_examined` (see that
+    # module's `_facts`).
+    if not af["findings"]:
+        examined = af.get("line_items_examined", 0)
+        if examined:
+            _log(
+                case_id,
+                "auditor",
+                "audit_finding:none",
+                f"{examined} line item(s) examined -- no duplicate, NCCI, or cash-price "
+                "findings. $0.00 audit findings reflects a clean bill.",
+            )
+        else:
+            _log(
+                case_id,
+                "auditor",
+                "audit_skipped",
+                "no line items were extracted from any document on file -- $0.00 audit "
+                "findings reflects missing/unparseable data, not a clean bill.",
+            )
     if af["denial_check"]["ran"]:
         _log(
             case_id,
@@ -266,12 +293,20 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     audit_cents = af["total_findings_cents"]
     charity_erasure_cents, charity_explain = _charity_care_erasure_cents(case)
     combined_cents = max(audit_cents, charity_erasure_cents)
+    # Same distinction as the audit_finding:none / audit_skipped events above,
+    # folded into the one line the dashboard's $0 case actually gets read
+    # from: "$0.00, 0 items examined" (nothing to audit) must not read the
+    # same as "$0.00" on its own (which a clean, fully-audited bill would also
+    # show).
+    examined = af.get("line_items_examined", 0)
+    audit_note = "" if examined else " (no line items were extracted -- nothing to audit)"
     _log(
         case_id,
         "auditor",
         "savings_summary",
         (
-            f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}. "
+            f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}"
+            f"{audit_note}. "
             f"Charity-care free-tier erasure: ${charity_erasure_cents / 100:,.2f} "
             f"({charity_explain}). Reported savings for this pass: "
             f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "

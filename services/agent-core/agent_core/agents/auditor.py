@@ -173,6 +173,17 @@ async def _facts(case_id: str, case: dict) -> dict:
     total_findings_cents = rules_bridge.total_savings_cents(findings)
     return {
         "case_id": case_id,
+        # DEFECT found live 2026-08-25 (SWARM WO7, "ef-2026-0006 reports $0
+        # savings"): with zero line items (an unparseable bill -- Reader's
+        # extraction returned only sentinel defaults, no line_items at all),
+        # `findings` is `[]` and pipeline._run_cascade's per-finding loop logs
+        # nothing -- the exact same silence a genuinely CLEAN bill with real,
+        # fully-audited line items would produce. A judge (or this system's
+        # own operator) reading "$0.00 audit findings" cannot tell "we
+        # examined N line items and found nothing wrong" from "there was
+        # nothing to examine" without this count. See pipeline.py's
+        # `_run_cascade` for the event this now drives.
+        "line_items_examined": len(items),
         "findings": [
             {
                 "kind": f.kind,
