@@ -18,6 +18,28 @@ import io
 from datetime import date
 from typing import Any
 
+from .forms import _full_name
+
+# BUG FOUND live (RELAY WO8, item 4 spot-check): both letter renderers below
+# used to read `patient["first_name"]`/`patient["last_name"]` directly.
+# Contract §3.1's `patient` shape carries exactly one `name` field -- it has
+# NEVER had `first_name`/`last_name` keys, in the contract or in a single
+# fixture -- so every debt-validation and records-request letter rendered
+# for every real case silently printed a blank line (just a bare `" "`)
+# where the patient's name belongs, in both the greeting block and the
+# signature. Nothing raised or logged: the PDF still rendered, `len(pdf) >
+# 500`, and existing tests only check `pdf[:4] == b"%PDF"`, so this shipped
+# unnoticed. `forms.py`'s `_full_name` already reads `name` correctly (with a
+# defensive first/last fallback for a caller that never adopts the contract
+# shape) -- reused here instead of duplicating that logic a third time.
+#
+# SECOND BUG in the same spot-check: both address lines below read
+# `patient["address"]`, which -- like `first_name`/`last_name` -- does not
+# exist anywhere in contract §3.1; `forms.py` already established the actual
+# convention (an address is filing-specific extra data, not part of the
+# case's own patient record) by reading `extra["patient_address"]`. Same
+# fix: read from `extra`, not `patient`.
+
 
 def _styles():
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -92,14 +114,14 @@ def render_debt_validation_letter(case: dict, extra: dict | None = None) -> byte
         Paragraph(filing_date.strftime("%B %d, %Y"), body),
         Spacer(1, 12),
         Paragraph(
-            f"{_get(patient, 'first_name', default='')} {_get(patient, 'last_name', default='')}",
+            _full_name(patient),
             body,
         ),
-        Paragraph(_get(patient, "address", "street", default=""), body),
+        Paragraph(_get(extra, "patient_address", "street", default=""), body),
         Paragraph(
-            f"{_get(patient, 'address', 'city', default='')}, "
-            f"{_get(patient, 'address', 'state', default='')} "
-            f"{_get(patient, 'address', 'zip', default='')}",
+            f"{_get(extra, 'patient_address', 'city', default='')}, "
+            f"{_get(extra, 'patient_address', 'state', default='')} "
+            f"{_get(extra, 'patient_address', 'zip', default='')}",
             body,
         ),
         Spacer(1, 12),
@@ -134,7 +156,7 @@ def render_debt_validation_letter(case: dict, extra: dict | None = None) -> byte
         Paragraph("Sincerely,", body),
         Spacer(1, 28),
         Paragraph(
-            f"{_get(patient, 'first_name', default='')} {_get(patient, 'last_name', default='')}",
+            _full_name(patient),
             body,
         ),
         Spacer(1, 24),
@@ -181,10 +203,10 @@ def render_records_request_letter(case: dict, extra: dict | None = None) -> byte
         Paragraph(filing_date.strftime("%B %d, %Y"), body),
         Spacer(1, 12),
         Paragraph(
-            f"{_get(patient, 'first_name', default='')} {_get(patient, 'last_name', default='')}",
+            _full_name(patient),
             body,
         ),
-        Paragraph(_get(patient, "address", "street", default=""), body),
+        Paragraph(_get(extra, "patient_address", "street", default=""), body),
         Spacer(1, 12),
         Paragraph(f"{provider} -- Billing Department", body),
         Spacer(1, 12),
@@ -205,7 +227,7 @@ def render_records_request_letter(case: dict, extra: dict | None = None) -> byte
         Paragraph("Sincerely,", body),
         Spacer(1, 28),
         Paragraph(
-            f"{_get(patient, 'first_name', default='')} {_get(patient, 'last_name', default='')}",
+            _full_name(patient),
             body,
         ),
         Spacer(1, 24),
