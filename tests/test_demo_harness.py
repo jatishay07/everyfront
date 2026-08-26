@@ -16,6 +16,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GENERATED = REPO_ROOT / "fixtures" / "generated"
 PYTHON = sys.executable
@@ -116,3 +118,197 @@ class TestMakefileWiring:
             "demo-reset",
             "demo-run",
         ]
+
+    def test_demo_reset_target_passes_reseed(self):
+        """WO6 task 1: `make demo-reset` must genuinely purge AND reseed, not
+        just purge -- see fixtures/demo_reset.py's module docstring."""
+        lines = (REPO_ROOT / "fixtures" / "Makefile").read_text().splitlines()
+        header = next(i for i, ln in enumerate(lines) if ln.startswith("demo-reset:"))
+        recipe = lines[header + 1]
+        assert "--reseed" in recipe
+
+
+class TestHumanPlausibleCaseIds:
+    """WO6 task 1: 'reseed your 8 cases with human-plausible case
+    identifiers, not demo-<fixture>-<uuid>.'"""
+
+    def test_every_corpus_case_has_a_human_id(self):
+        from fixtures.cases_data import CASES
+        from fixtures.demo_reset import HUMAN_CASE_IDS
+
+        assert set(HUMAN_CASE_IDS) == {c.case_id for c in CASES}
+
+    def test_human_ids_are_unique_and_dont_look_like_fixture_scratch_data(self):
+        from fixtures.demo_reset import HUMAN_CASE_IDS
+
+        ids = list(HUMAN_CASE_IDS.values())
+        assert len(ids) == len(set(ids))
+        for case_id in ids:
+            assert not case_id.startswith("demo-"), case_id
+            assert "uuid" not in case_id.lower()
+
+    def test_live_demo_fixture_is_excluded_from_the_quiet_reseed(self):
+        """case_01 is injected LIVE by demo_run.py, on camera -- reseeding it
+        too would leave 9 cases in Firestore instead of the §7 target of 8."""
+        from fixtures.demo_reset import HUMAN_CASE_IDS, LIVE_DEMO_FIXTURE, RESEED_FIXTURES
+
+        assert LIVE_DEMO_FIXTURE not in RESEED_FIXTURES
+        assert set(RESEED_FIXTURES) | {LIVE_DEMO_FIXTURE} == set(HUMAN_CASE_IDS)
+        assert len(RESEED_FIXTURES) == 7
+
+    def test_demo_reset_dry_run_plan_names_every_reseed_target(self):
+        result = _run("fixtures/demo_reset.py", "--dry-run")
+        assert result.returncode == 0, result.stderr
+        from fixtures.demo_reset import HUMAN_CASE_IDS, RESEED_FIXTURES
+
+        for fixture_name in RESEED_FIXTURES:
+            assert HUMAN_CASE_IDS[fixture_name] in result.stdout
+
+
+class _FakeSnapshot:
+    def __init__(self, doc_id: str, data: dict | None, reference: _FakeDocRef | None = None):
+        self.id = doc_id
+        self._data = data
+        self.exists = data is not None
+        self.reference = reference
+
+    def to_dict(self):
+        return dict(self._data) if self._data is not None else None
+
+
+class _FakeDocRef:
+    """Just enough of the google-cloud-firestore DocumentReference surface
+    for fixtures.demo_reset.rename_case / _delete_collection to run against,
+    entirely offline -- no GCP project or credentials needed."""
+
+    def __init__(self, docs: dict, path: str):
+        self._docs = docs
+        self.path = path
+
+    def get(self):
+        return _FakeSnapshot(self.path.rsplit("/", 1)[-1], self._docs.get(self.path), self)
+
+    def set(self, data: dict) -> None:
+        self._docs[self.path] = dict(data)
+
+    def update(self, patch: dict) -> None:
+        self._docs.setdefault(self.path, {}).update(patch)
+
+    def delete(self) -> None:
+        self._docs.pop(self.path, None)
+
+    def collection(self, name: str) -> _FakeCollectionRef:
+        return _FakeCollectionRef(self._docs, f"{self.path}/{name}")
+
+    @property
+    def reference(self) -> _FakeDocRef:
+        return self
+
+
+class _FakeCollectionRef:
+    def __init__(self, docs: dict, path: str, where: tuple | None = None):
+        self._docs = docs
+        self.path = path
+        self._where = where
+
+    def document(self, doc_id: str) -> _FakeDocRef:
+        return _FakeDocRef(self._docs, f"{self.path}/{doc_id}")
+
+    def where(self, field: str, op: str, value) -> _FakeCollectionRef:
+        assert op == "=="
+        return _FakeCollectionRef(self._docs, self.path, where=(field, value))
+
+    def limit(self, _n: int) -> _FakeCollectionRef:
+        return self
+
+    def stream(self):
+        prefix = self.path + "/"
+        out = []
+        for path, data in list(self._docs.items()):
+            if not path.startswith(prefix) or "/" in path[len(prefix) :]:
+                continue  # only immediate children, matching a real subcollection query
+            if self._where is not None:
+                field, value = self._where
+                if data.get(field) != value:
+                    continue
+            out.append(_FakeSnapshot(path[len(prefix) :], data, _FakeDocRef(self._docs, path)))
+        return out
+
+
+class _FakeFirestoreClient:
+    def __init__(self):
+        self.docs: dict[str, dict] = {}
+
+    def collection(self, name: str) -> _FakeCollectionRef:
+        return _FakeCollectionRef(self.docs, name)
+
+
+class TestRenameCase:
+    """WO6 task 1's actual data-safety mechanism, tested against a fake
+    Firestore client (no live GCP project needed): renaming a case must
+    preserve its documents/events subcollections, repoint any filings that
+    reference it, rewrite each event's own embedded case_id, and leave no
+    trace of the old id behind."""
+
+    def _client_with_one_case(self) -> _FakeFirestoreClient:
+        from fixtures.demo_reset import rename_case  # noqa: F401 -- import check
+
+        client = _FakeFirestoreClient()
+        old = "demo-case_03_in_collections_ca-abcd1234"
+        client.docs[f"cases/{old}"] = {"status": "filing", "patient": {"name": "Denise Okafor"}}
+        client.docs[f"cases/{old}/documents/doc1"] = {"type": "collection_notice"}
+        client.docs[f"cases/{old}/events/ev1"] = {
+            "case_id": old,
+            "agent": "reader",
+            "action": "classified",
+        }
+        client.docs["filings/f1"] = {"case_id": old, "front": "debt_validation"}
+        client.docs["filings/f2"] = {"case_id": "some-other-case", "front": "ppdr"}
+        return client, old
+
+    def test_rename_moves_the_case_doc_and_deletes_the_old_one(self):
+        from fixtures.demo_reset import rename_case
+
+        client, old = self._client_with_one_case()
+        rename_case(client, old, "ef-2026-0003")
+
+        assert client.docs["cases/ef-2026-0003"] == {
+            "status": "filing",
+            "patient": {"name": "Denise Okafor"},
+        }
+        assert f"cases/{old}" not in client.docs
+
+    def test_rename_carries_documents_subcollection_verbatim(self):
+        from fixtures.demo_reset import rename_case
+
+        client, old = self._client_with_one_case()
+        rename_case(client, old, "ef-2026-0003")
+
+        assert client.docs["cases/ef-2026-0003/documents/doc1"] == {"type": "collection_notice"}
+        assert f"cases/{old}/documents/doc1" not in client.docs
+
+    def test_rename_rewrites_each_event_s_own_case_id_field(self):
+        from fixtures.demo_reset import rename_case
+
+        client, old = self._client_with_one_case()
+        rename_case(client, old, "ef-2026-0003")
+
+        event = client.docs["cases/ef-2026-0003/events/ev1"]
+        assert event["case_id"] == "ef-2026-0003"
+        assert event["agent"] == "reader"  # everything else about the event is untouched
+
+    def test_rename_repoints_only_the_matching_filing(self):
+        from fixtures.demo_reset import rename_case
+
+        client, old = self._client_with_one_case()
+        rename_case(client, old, "ef-2026-0003")
+
+        assert client.docs["filings/f1"]["case_id"] == "ef-2026-0003"
+        assert client.docs["filings/f2"]["case_id"] == "some-other-case"  # untouched
+
+    def test_rename_raises_on_a_case_that_does_not_exist(self):
+        from fixtures.demo_reset import rename_case
+
+        client = _FakeFirestoreClient()
+        with pytest.raises(RuntimeError):
+            rename_case(client, "no-such-case", "ef-2026-0003")

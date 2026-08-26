@@ -6,12 +6,13 @@ the committed `fixtures/generated/` bundle has not drifted from
 `fixtures/cases_data.py` -- the single source of truth (see
 `fixtures/generate.py`'s docstring: nothing under `generated/` is hand-edited).
 
-Where the corpus's `expected` block encodes deadlines and eligibility, this
-also cross-checks it against the REAL `packages/rules` functions (they exist
-today). Where it encodes fronts/audit findings/denial lawfulness, it checks
-against `fixtures/reference_model.py` -- an explicit stand-in for STATUTE's
-not-yet-built `select_fronts` / `audit_line_items` / `check_denial_lawfulness`
-(see that module's docstring for the HANDOFF).
+The corpus's `expected` block (deadlines, eligibility, fronts, audit findings,
+denial lawfulness) is entirely computed via the REAL `packages/rules`
+functions as of 2026-08-25 (`fixtures/build.py` calls `select_fronts` /
+`audit_line_items` / `check_denial_lawfulness` directly -- the earlier
+`fixtures/reference_model.py` stand-in this docstring used to point at is
+deleted). This module cross-checks a subset of that directly, independent of
+`fixtures/build.py`'s own computation.
 """
 
 from __future__ import annotations
@@ -264,13 +265,13 @@ class TestExpectedEligibilityMatchesTheRealRulesEngine:
 class TestDenialTriage:
     def test_case_02_is_flagged_unlawful(self):
         check = _load("case_02_wrongful_denial_il")["expected"]["denial_check_reference_model"]
-        assert check["unlawful"] is True
-        assert check["undisclosed_docs"]
+        assert check["violation"] is True
+        assert check["unlisted_docs"]
 
     def test_case_08_is_lawful_no_flag(self):
         check = _load("case_08_lawful_denial_ca")["expected"]["denial_check_reference_model"]
-        assert check["unlawful"] is False
-        assert check["undisclosed_docs"] == []
+        assert check["violation"] is False
+        assert check["unlisted_docs"] == []
 
     def test_only_cases_with_a_denial_letter_carry_a_denial_check(self):
         with_letter = {"case_02_wrongful_denial_il", "case_08_lawful_denial_ca"}

@@ -31,11 +31,12 @@ dramatic case). No other state appears in this corpus.
   * fixtures/generated/cases/<case_id>/documents/*        (reportlab/PIL rendered docs)
   * fixtures/generated/expected_stats.json                (the §3.4 demo stat object)
 
-Nothing here calls a model. Where this module encodes what
+Nothing here calls a model. `fixtures/build.py` computes what
 `select_fronts`/`audit_line_items`/`check_denial_lawfulness` (contract §3.5)
-SHOULD say, it goes through `fixtures/reference_model.py`, which is explicitly
-a stand-in for STATUTE's not-yet-landed work orders 3-5 -- see that module's
-docstring for the HANDOFF.
+say about each case by calling STATUTE's real `packages/rules/rules/
+{fronts,audit,denial}.py` directly (REWIRED 2026-08-25, PROOF WO6 -- see that
+module's docstring; the earlier `fixtures/reference_model.py` stand-in is
+deleted).
 """
 
 from __future__ import annotations
