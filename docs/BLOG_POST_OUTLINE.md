@@ -7,10 +7,16 @@ and which real artifact in the repo backs it, so whoever writes the full post
 (could still be MEGAPHONE) isn't inventing numbers.
 
 **Where the numbers come from:** `docs/SPIKE.md` (the Day-1 spike, all figures
-pre-scale) and `packages/datapipes` + its commit message (the production run:
-200 hospitals seeded, 100% live FAP URL rate, 2,881 NCCI pairs, 15,112 MUE
-codes, 180/200 EIN↔CCN resolved). Use the spike numbers when explaining a
-data quirk conceptually; use the production numbers when stating what shipped.
+pre-scale) and a direct query against the live Firestore project on
+2026-08-25 (the production run, re-counted for this pass rather than taken on
+faith: **204 hospitals** seeded, **201/204 (98.5%)** carrying a live FAP URL,
+2,881 NCCI PTP pairs, 15,112 MUE codes loaded. **One correction against an
+earlier draft's numbers:** the EIN↔CCN crosswalk shows **0/204 populated** in
+the live seed today, not "180/200 resolved" as previously stated — we could
+not reproduce that number against the live database, so this post says what
+we actually found, not what an earlier note claimed.) Use the spike numbers
+when explaining a data quirk conceptually; use the re-verified production
+numbers when stating what shipped.
 
 **Code snippets to pull in** (already committed, don't paraphrase from
 memory): `docs/spike/parse_schedule_h.py`, `packages/datapipes/datapipes/schedule_h.py`,
@@ -83,21 +89,43 @@ each quirk gets a short callout of *what would have gone wrong* if unhandled:
   (`<ein>_<hospital-name>_standardcharges.<ext>`) hands you the EIN↔hospital
   crosswalk for free, closing a join `packages/datapipes` would otherwise
   need a third-party API for.
-- Real numbers: Advocate Christ Medical Center's MRF gives `$140` gross vs.
-  `$70` cash for CPT 86787 — a flat 50%-of-gross discount, independently
-  confirming a hospital's own published pricing is enough to prove a
-  self-pay patient is being overcharged 2×, no external pricing database
-  required.
+- Real numbers, re-fetched live from the hospital's actual published file on
+  2026-08-25 while writing this outline (not just quoted from the spike):
+  Advocate Christ Medical Center's MRF gives `$140` gross vs. `$70` cash for
+  CPT 86787 — a flat 50%-of-gross discount, independently confirming a
+  hospital's own published pricing is enough to prove a self-pay patient is
+  being overcharged 2×, no external pricing database required. The same live
+  fetch also returned real cash prices for four other codes on the same
+  bill (99285, 71046, 80053, 36415), which is the basis for a $1,217.50 /
+  6-finding audit result the underlying rules engine can compute by hand —
+  worth a one-line mention as "what this data enables," with an honest note
+  that the live pipeline isn't reliably surfacing all of it end to end yet
+  (see the repo's README for the open gap; this post is about the data
+  pipeline, not that gap, but a blog post that hid it would undercut its own
+  credibility).
 
 ## 5. What shipped, in production numbers
 
-- 200 hospitals seeded to Firestore, **100% live FAP-URL rate** (by
-  selection, per §3 above).
-- EIN↔CCN crosswalk resolved for 180/200.
+- **204 hospitals** seeded to Firestore — counted by querying the live
+  project directly on 2026-08-25, not carried forward from an earlier
+  estimate. **201/204 (98.5%)** carry a live `fap_url` (by selection, per §3
+  above) — very close to, genuinely strong, but stated as 201/204 rather than
+  rounded up to "100%."
+- **EIN↔CCN crosswalk: 0/204 populated** in the live seed today. An earlier
+  internal number claimed "180/200 resolved"; re-checking the live database
+  for this post could not reproduce that, so this section says what's
+  actually there. The crosswalk code and its tests exist in
+  `packages/datapipes`; it simply hasn't been run against the live seed
+  since it was rebuilt at 204-hospital scale.
 - 2,881 NCCI PTP pairs + 15,112 MUE codes loaded for the billing-audit side
   of the product (not this post's main subject, but worth one sentence
-  since it reuses the same pipeline's infrastructure).
-- One honest caveat, stated plainly: this seed is 200 hospitals, not the
+  since it reuses the same pipeline's infrastructure) — confirmed still
+  bundled and queryable in under 10ms as of this pass.
+- Hospital-level attested cash prices (`cash_prices`, from the MRF fetcher in
+  §4) are pre-cached for **2 of 204** hospitals today (Advocate Christ
+  Medical Center, Stanford Health Care) — the fetcher works live against real
+  hospital systems, it just hasn't been run at scale across the seed yet.
+- One honest caveat, stated plainly: this seed is 204 hospitals, not the
   full ~2,500 that carry a usable Schedule H facility record in a given
   year — deliberate scope discipline for a 12-day build, not a claim that
   the harder problem (full national coverage) is solved.
