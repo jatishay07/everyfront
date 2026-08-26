@@ -26,7 +26,7 @@
     <text x="1174" y="35" font-size="13" fill="#1E1B2E">live and verified today</text>
     <rect x="1140" y="47" width="26" height="14" rx="3" fill="#FDECEA" stroke="#B3540A" stroke-width="2" stroke-dasharray="4,3"/>
     <text x="1174" y="58" font-size="13" fill="#1E1B2E">wired, but a known gap remains (see README)</text>
-    <text x="1140" y="78" font-size="11" font-style="italic" fill="#8A8698">status verified 2026-08-25 by curling the live services — see README's status table</text>
+    <text x="1140" y="78" font-size="11" font-style="italic" fill="#8A8698">status re-verified 2026-08-25 by curling the live services + querying Firestore directly — see README's status table</text>
   </g>
 
   <!-- ============================================================ -->
@@ -68,11 +68,11 @@
     <rect x="255" y="300" width="200" height="150" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
     <text x="269" y="323" font-size="15" font-weight="600" fill="#0F5C36">packages/datapipes</text>
     <text x="269" y="340" font-size="11.5" fill="#1E8E5A" font-style="italic">live — seeded to Firestore + GCS</text>
-    <text x="269" y="360" font-size="12" fill="#1E5C3E">200 hospitals, 100% live FAP URL</text>
+    <text x="269" y="360" font-size="12" fill="#1E5C3E">204 hospitals, 201/204 live FAP URL</text>
     <text x="269" y="376" font-size="12" fill="#1E5C3E">2,881 NCCI PTP pairs, 15,112 MUE</text>
-    <text x="269" y="392" font-size="12" fill="#1E5C3E">EIN↔CCN crosswalk: 180/200</text>
-    <text x="269" y="408" font-size="12" fill="#1E5C3E">MRF cash prices: 3 live systems</text>
-    <text x="269" y="428" font-size="11" fill="#5B5770" font-style="italic">(docs/SPIKE.md has the receipts)</text>
+    <text x="269" y="392" font-size="12" fill="#1E5C3E">EIN↔CCN crosswalk: 0/204 today</text>
+    <text x="269" y="408" font-size="12" fill="#1E5C3E">MRF cash prices: real, 2/204 cached</text>
+    <text x="269" y="428" font-size="11" fill="#5B5770" font-style="italic">(counts queried live from Firestore 2026-08-25)</text>
   </g>
 
   <!-- inputs -> datapipes -->
@@ -102,37 +102,37 @@
   <line x1="602" y1="238" x2="602" y2="278" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Pub/Sub bus -->
-  <rect x="492" y="280" width="838" height="66" rx="10" fill="#FDECEA" stroke="#D93025" stroke-width="2"/>
-  <text x="506" y="302" font-size="15" font-weight="700" fill="#B3261E">Pub/Sub</text>
-  <text x="506" y="318" font-size="11" fill="#7A2B26">event backbone — every handler idempotent on event_id, dead-letter after 5 tries</text>
-  <!-- topic pills -->
+  <rect x="492" y="280" width="838" height="72" rx="10" fill="#FDECEA" stroke="#D93025" stroke-width="2"/>
+  <text x="506" y="298" font-size="14" font-weight="700" fill="#B3261E">Pub/Sub</text>
+  <text x="506" y="311" font-size="10.5" fill="#7A2B26">event backbone, dead-letter after 5 tries — 3/5 subs genuinely push-wired (gcloud-verified); demo uses a direct call, not this bus</text>
+  <!-- topic pills: solid green border = live push subscription (gcloud-verified 2026-08-25); dashed = still pull-only, no subscriber -->
   <g font-size="10.5" fill="#7A2B26">
-    <rect x="506" y="323" width="150" height="18" rx="9" fill="#FFFFFF" stroke="#D93025" stroke-width="1"/>
+    <rect x="506" y="323" width="150" height="18" rx="9" fill="#FFFFFF" stroke="#1E8E5A" stroke-width="1.5"/>
     <text x="514" y="336">intake.email.received</text>
     <path d="M658,332 L676,332" stroke="#B3261E" stroke-width="1.5" marker-end="url(#arrow)"/>
-    <rect x="680" y="323" width="150" height="18" rx="9" fill="#FFFFFF" stroke="#D93025" stroke-width="1"/>
+    <rect x="680" y="323" width="150" height="18" rx="9" fill="#FFFFFF" stroke="#1E8E5A" stroke-width="1.5"/>
     <text x="688" y="336">case.document.added</text>
     <path d="M832,332 L850,332" stroke="#B3261E" stroke-width="1.5" marker-end="url(#arrow)"/>
-    <rect x="854" y="323" width="158" height="18" rx="9" fill="#FFFFFF" stroke="#D93025" stroke-width="1"/>
+    <rect x="854" y="323" width="158" height="18" rx="9" fill="#FFFFFF" stroke="#B3540A" stroke-width="1.5" stroke-dasharray="4,3"/>
     <text x="862" y="336">case.analysis.complete</text>
     <path d="M1014,332 L1032,332" stroke="#B3261E" stroke-width="1.5" marker-end="url(#arrow)"/>
-    <rect x="1036" y="323" width="132" height="18" rx="9" fill="#FFFFFF" stroke="#D93025" stroke-width="1"/>
+    <rect x="1036" y="323" width="132" height="18" rx="9" fill="#FFFFFF" stroke="#1E8E5A" stroke-width="1.5"/>
     <text x="1044" y="336">filing.requested</text>
     <path d="M1170,332 L1188,332" stroke="#B3261E" stroke-width="1.5" marker-end="url(#arrow)"/>
-    <rect x="1192" y="323" width="130" height="18" rx="9" fill="#FFFFFF" stroke="#D93025" stroke-width="1"/>
+    <rect x="1192" y="323" width="130" height="18" rx="9" fill="#FFFFFF" stroke="#B3540A" stroke-width="1.5" stroke-dasharray="4,3"/>
     <text x="1200" y="336">filing.completed</text>
   </g>
 
   <!-- bus <-> agent-core -->
-  <line x1="560" y1="346" x2="560" y2="378" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="560" y1="352" x2="560" y2="378" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="568" y="368" font-size="10.5" fill="#5B5770">docs / analysis</text>
-  <line x1="1070" y1="378" x2="1070" y2="346" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="1070" y1="378" x2="1070" y2="352" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
   <text x="978" y="368" font-size="10.5" fill="#5B5770">filing.requested / .completed</text>
 
   <!-- agent-core outer box -->
   <rect x="492" y="382" width="658" height="278" rx="12" fill="#F1ECFB" stroke="#6C4AB6" stroke-width="2"/>
   <text x="506" y="404" font-size="15" font-weight="700" fill="#4B2E91">agent-core — Cloud Run (ADK agent hierarchy, live)</text>
-  <text x="506" y="420" font-size="11.5" fill="#5B5770">all six agents run today; a real /demo/inject_bill call produced 30 logged events with citations in 75s</text>
+  <text x="506" y="420" font-size="11.5" fill="#5B5770">all six agents run today; three real /demo/inject_bill calls on 2026-08-25 each returned in 47–68s with citations logged</text>
 
   <!-- six agent chips -->
   <!-- Reader -->
@@ -142,17 +142,16 @@
   <path d="M590,465 L604,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Lookup -->
-  <rect x="608" y="432" width="80" height="66" rx="8" fill="#FDECEA" stroke="#B3540A" stroke-width="2" stroke-dasharray="5,4"/>
-  <text x="648" y="456" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Lookup</text>
-  <text x="648" y="470" font-size="8.5" fill="#B3540A" text-anchor="middle" font-style="italic">live · EIN-only</text>
-  <text x="648" y="482" font-size="8.5" fill="#B3540A" text-anchor="middle" font-style="italic">no name match</text>
+  <rect x="608" y="432" width="80" height="66" rx="8" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
+  <text x="648" y="458" font-size="13" font-weight="600" fill="#0F5C36" text-anchor="middle">Lookup</text>
+  <text x="648" y="474" font-size="8.5" fill="#1E8E5A" text-anchor="middle" font-style="italic">live · EIN or name</text>
   <path d="M688,465 L702,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Clock / Auditor -->
   <rect x="706" y="432" width="118" height="66" rx="8" fill="#FDECEA" stroke="#B3540A" stroke-width="2" stroke-dasharray="5,4"/>
   <text x="765" y="450" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Clock /</text>
   <text x="765" y="465" font-size="13" font-weight="600" fill="#1E1B2E" text-anchor="middle">Auditor</text>
-  <text x="765" y="480" font-size="9" fill="#B3540A" text-anchor="middle" font-style="italic">live · partial</text>
+  <text x="765" y="480" font-size="8" fill="#B3540A" text-anchor="middle" font-style="italic">live · $ gap, see README</text>
   <path d="M824,465 L838,465" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
 
   <!-- Strategist -->
@@ -194,9 +193,9 @@
 
   <!-- packages/rules -->
   <rect x="678" y="578" width="462" height="62" rx="8" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
-  <text x="688" y="598" font-size="13" font-weight="700" fill="#0F5C36">packages/rules — deterministic engine (live, 182 tests)</text>
+  <text x="688" y="598" font-size="13" font-weight="700" fill="#0F5C36">packages/rules — deterministic engine (100% branch coverage)</text>
   <text x="688" y="614" font-size="11" fill="#1E5C3E">deadlines · eligibility · fronts · audit · denial triage — every result cites its regulation</text>
-  <text x="688" y="628" font-size="10.5" fill="#1E5C3E" font-style="italic">100% branch coverage · zero LLM calls anywhere in this package</text>
+  <text x="688" y="628" font-size="10.5" fill="#1E5C3E" font-style="italic">re-measured 2026-08-25: 489 stmts / 180 branches, 0 missed · zero LLM calls in this package</text>
 
   <!-- agent-core <-> Firestore -->
   <line x1="600" y1="660" x2="600" y2="700" stroke="#1E1B2E" stroke-width="1.5" marker-end="url(#arrow)"/>
@@ -249,26 +248,26 @@
     <text x="1394" y="514" font-size="10.5" fill="#B3540A" font-style="italic">no live keys yet → recording stub</text>
   </g>
   <g>
-    <rect x="1380" y="542" width="200" height="66" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
-    <text x="1394" y="565" font-size="15" font-weight="600" fill="#0F5C36">Google Calendar</text>
-    <text x="1394" y="582" font-size="12" fill="#1E5C3E">deadline ladder,</text>
-    <text x="1394" y="597" font-size="12" fill="#1E5C3E">red ≤ 7 days — live</text>
+    <rect x="1380" y="542" width="200" height="66" rx="10" fill="#FDECEA" stroke="#B3540A" stroke-width="1.5" stroke-dasharray="5,4"/>
+    <text x="1394" y="562" font-size="15" font-weight="600" fill="#1E1B2E">Google Calendar</text>
+    <text x="1394" y="578" font-size="11.5" fill="#5B5770">calendar_sync.py exists, tested</text>
+    <text x="1394" y="594" font-size="10" fill="#B3540A" font-style="italic">never called from the live pipeline</text>
   </g>
   <g>
-    <rect x="1380" y="622" width="200" height="66" rx="10" fill="#E6F4EC" stroke="#1E8E5A" stroke-width="2"/>
-    <text x="1394" y="645" font-size="15" font-weight="600" fill="#0F5C36">Google Drive</text>
-    <text x="1394" y="662" font-size="12" fill="#1E5C3E">per-case, advocate-</text>
-    <text x="1394" y="677" font-size="12" fill="#1E5C3E">shareable folder — live</text>
+    <rect x="1380" y="622" width="200" height="66" rx="10" fill="#FDECEA" stroke="#B3540A" stroke-width="1.5" stroke-dasharray="5,4"/>
+    <text x="1394" y="642" font-size="15" font-weight="600" fill="#1E1B2E">Google Drive</text>
+    <text x="1394" y="658" font-size="11.5" fill="#5B5770">drive_sync.py exists, tested</text>
+    <text x="1394" y="674" font-size="10" fill="#B3540A" font-style="italic">never called from the live pipeline</text>
   </g>
 
-  <!-- Filer fans out to delivery (built, behind one swappable interface) -->
+  <!-- Filer fans out to delivery: fax/mail genuinely reached (test-mode stub); Calendar/Drive are built but not called -->
   <path d="M1140,448 C1250,420 1320,410 1378,410" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
   <path d="M1140,455 C1260,470 1330,485 1378,492" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
-  <path d="M1140,462 C1260,520 1330,555 1378,570" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
-  <path d="M1140,468 C1250,560 1330,635 1378,650" fill="none" stroke="#1E8E5A" stroke-width="1.5" marker-end="url(#arrowGreen)"/>
-  <text x="1230" y="378" font-size="10.5" fill="#5B5770" font-style="italic">packages/delivery — live: 5 real forms filled</text>
+  <path d="M1140,462 C1260,520 1330,555 1378,570" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowMuted)"/>
+  <path d="M1140,468 C1250,560 1330,635 1378,650" fill="none" stroke="#8A8698" stroke-width="1.5" stroke-dasharray="4,3" marker-end="url(#arrowMuted)"/>
+  <text x="1230" y="378" font-size="10.5" fill="#5B5770" font-style="italic">packages/delivery — Filer reaches fax/mail (stub); Calendar/Drive built, not wired</text>
 
   <!-- ============ FOOTER ============ -->
-  <text x="40" y="920" font-size="12" fill="#5B5770">Live today: https://ef-agent-core-756591166292.us-central1.run.app · https://ef-api-756591166292.us-central1.run.app · Gemini 3.7 Flash + Gemma 4 via Vertex AI</text>
+  <text x="40" y="920" font-size="12" fill="#5B5770">Live today: https://ef-web-756591166292.us-central1.run.app (dashboard) · ef-api / ef-agent-core / ef-intake also deployed · Gemini 3.7 Flash + Gemma 4 via Vertex AI</text>
   <text x="40" y="938" font-size="11" fill="#8A8698">Every Front — All Things Agentic Hackathon · The Taskmaster track</text>
 </svg>
