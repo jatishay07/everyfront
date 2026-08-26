@@ -9,6 +9,8 @@ mail — with a human approving every filing before it goes out.
 
 Built for Google's **All Things Agentic Hackathon**, track **The Taskmaster**.
 
+**Live dashboard:** https://ef-web-756591166292.us-central1.run.app
+
 ---
 
 ## The problem
@@ -30,23 +32,46 @@ coverage of 501(r) and appeals behavior). We have not independently re-verified
 these three market-level numbers the way we verified the technical claims below —
 see [Honest limitations](#honest-limitations).
 
-What *is* independently verified, against primary sources, is in
-[`docs/SPIKE.md`](docs/SPIKE.md):
+What *is* independently verified, against primary sources and against the live
+deployed system itself, is below and in [`docs/SPIKE.md`](docs/SPIKE.md):
 
 - We reconstruct a hospital's charity-care policy — thresholds and application
   URLs — directly from its IRS Form 990 Schedule H XML filing. No third-party
-  database; the source is the tax filing itself. That pipeline now runs for
-  real: **200 hospitals seeded to Firestore**, **100% live FAP URL rate**
-  (see [`packages/datapipes`](#whats-actually-live-right-now) below).
+  database; the source is the tax filing itself. That pipeline runs for real:
+  **204 hospitals seeded to Firestore** (queried directly against the live
+  database while writing this), **201/204 (98.5%) carrying a live FAP URL**.
 - We reach hospitals' CMS-mandated machine-readable price files and extract
-  their attested cash price. **Advocate Christ Medical Center** bills **$140**
-  for CPT 86787 and accepts **$70** cash from a self-pay patient — a flat
-  50%-of-gross discount. A patient billed the gross rate is being overcharged
-  **2×**, and the hospital's own published file proves it.
-- The system is live on Cloud Run today, and the full pipeline runs end to
-  end — not just a seed agent. See [The pipeline works end to
+  their attested cash price. We re-fetched Advocate Christ Medical Center's
+  real published file ourselves: **$140.00 gross vs. $70.00 cash for CPT
+  86787**, a flat 50%-of-gross discount — a patient billed the gross rate is
+  being overcharged 2×, provable from the hospital's own file, no third party
+  needed.
+- **The Filer renders RELAY's real forms, not a placeholder.** We generated
+  each one ourselves while writing this: the actual CMS PPDR initiation form
+  (**321,809 bytes**, a real `%PDF-1.6`), Sutter Health's own FAP application
+  (**188,739 bytes**, `%PDF-1.7`, AcroForm-filled), and Advocate's own FAP
+  application (**387,855 bytes**, reportlab overlay onto the real scanned
+  form). This used to be five lines of placeholder text; it isn't anymore.
+- **The Verifier genuinely refuses to file incomplete paperwork**, and we
+  reproduced both of its live blocks against the deployed API while writing
+  this doc, not just in a unit test:
+  - Uploading a photo of a cat as "proof of income" gets a **live HTTP 409**:
+    *"document ... does not appear to actually be an income document
+    (Reader's cat-photo check failed)."*
+  - A charity-care filing with no income document on file at all gets a
+    **live HTTP 409**: *"no income_proof document on file for a charity-care
+    filing."*
+
+    An earlier pass through this repo briefly described one of the
+    Verifier's blocks as a false positive. **That was wrong, and it's been
+    corrected everywhere in this document.** Both blocks above are the system
+    working exactly as designed — an agent refusing to file incomplete
+    paperwork on a patient's behalf is one of the most compelling things in
+    this demo, not a bug to apologize for.
+- The system is live on Cloud Run today, and the pipeline runs end to end
+  against real deployed services — see [The pipeline works end to
   end](#the-pipeline-works-end-to-end-a-real-run) for an actual, unedited
-  transcript.
+  transcript from the day this was written.
 
 ---
 
@@ -79,97 +104,133 @@ and a **Strategist** has to sequence the result.
 
 ![Architecture diagram](docs/architecture.svg)
 
-**Six agents**, run inside a single Google ADK agent hierarchy on Cloud Run —
-all six execute on every case today, not just the three that used to be
-architected-but-unwired:
+**Six agents**, run inside a single Google ADK agent hierarchy on Cloud Run:
 
 | Agent | Job |
 |---|---|
-| **Reader** | Classifies an incoming document with **Gemma 4** (`gemma-4-26b-a4b-it`) as the first pass, then extracts structured fields with **Gemini 3.7 Flash** — temperature 0, JSON-schema output. Both models are called on every real document, not a fallback path. |
-| **Lookup** | Resolves the hospital from the bill's EIN against the Firestore `hospitals/{ein}` record LEDGER's pipeline seeded from IRS filings, and is honest when a hospital is for-profit and owes no 501(r) duty at all. *Resolution today is EIN-only — see [Honest limitations](#honest-limitations).* |
-| **Clock / Auditor** | A thin LLM wrapper around the deterministic rules engine. **The LLM narrates, the code computes** — every deadline carries its regulation citation, verified live (see the transcript below). The audit half calls the same engine for NCCI/duplicate/cash-price findings, but the dollar amount it reports is currently $0 in production — also detailed in limitations. |
+| **Reader** | Classifies an incoming document with **Gemma 4** (`gemma-4-26b-a4b-it`) as the first pass, then extracts structured fields with **Gemini 3.7 Flash** — temperature 0, JSON-schema output. Both models run on every real document. |
+| **Lookup** | Resolves the hospital from the bill's EIN, **or by provider-name match against the 204-hospital seed when a bill carries no EIN** (shipped since the last pass — see [What's actually live](#whats-actually-live-right-now)), and is honest when a hospital is for-profit and owes no 501(r) duty at all. |
+| **Clock / Auditor** | A thin LLM wrapper around the deterministic rules engine. **The LLM narrates, the code computes** — every deadline carries its regulation citation. The audit half calls the same engine for NCCI/duplicate/cash-price findings; see [Honest limitations](#honest-limitations) for the real, currently-verified gap between what this engine can do and what the live pipeline surfaces today. |
 | **Strategist** | Picks and sequences the applicable fronts, and waits for a human to click **Approve** before any filing goes out — enforced in plain Python control flow, not left to an LLM's discretion. |
-| **Verifier** | Cross-checks extracted income documents against the patient's stated income and household size before a filing is allowed to fire; blocks on mismatch with a plain-English reason. |
-| **Filer** | Renders the filled PDF, sends it (fax or certified mail), and records delivery proof. |
+| **Verifier** | Cross-checks extracted income documents against the patient's stated income and household size before a filing is allowed to fire; blocks on mismatch with a plain-English reason. Reproduced live twice while writing this doc — see above. |
+| **Filer** | Renders RELAY's real, filled PDF forms, sends them (fax or certified mail, test mode), and records delivery proof. |
 
 **Google Cloud, by name:**
 
-- **Cloud Run** hosts every service — intake webhook, agent-core, the API, and
-  the dashboard — deployed by `infra/deploy.sh all`, and scales to zero
-  between demos.
+- **Cloud Run** hosts all four deployed services — `ef-intake`, `ef-agent-core`,
+  `ef-api`, `ef-web` — built by `infra/deploy.sh`, all currently deployed
+  with `--allow-unauthenticated` (see [Honest limitations](#honest-limitations)
+  on what that means today) and a fixed 300-second request timeout.
 - **Pub/Sub** is the event backbone: `intake.email.received` →
   `case.document.added` → `case.analysis.complete` → `filing.requested` →
-  `filing.completed`, each with a dead-letter topic so a poison message can't
-  loop forever.
+  `filing.completed`. As of this writing, **3 of the 5 subscriptions are
+  genuinely push-wired** (`gcloud pubsub subscriptions list` confirms
+  `ef-intake-email`, `ef-document-added`, and `ef-filing-requested` all have
+  a live push endpoint); `ef-analysis-complete` and `ef-filing-completed`
+  remain pull subscriptions with no active subscriber. The code that does
+  this conversion is applied to the running infrastructure already but is
+  **not yet merged to `main`** (open PR — see
+  [Honest limitations](#honest-limitations)). None of this blocks the demo:
+  `/demo/inject_bill` and `/cases/{id}/approve_filing` call agent-core
+  directly and synchronously, and only publish to Pub/Sub for visibility.
 - **Firestore** holds all case state: `cases/`, `hospitals/`, `filings/`, and
   the `events/` subcollection that is the audit log the dashboard's activity
   feed reads from.
 
-**External services:** Gmail API (intake, `users.watch` → Pub/Sub), IRS Form
-990 Schedule H bulk XML and CMS hospital price-transparency files (data),
-Phaxio and Lob in test mode with a hard destination allowlist enforced in code
-(delivery), Google Calendar and Drive (deadline tracking, per-case folders).
+**External services:** Gmail API (intake, `users.watch` → Pub/Sub — built,
+never turned on; see limitations), IRS Form 990 Schedule H bulk XML and CMS
+hospital price-transparency files (data), Phaxio and Lob in test mode with a
+hard destination allowlist enforced in code (delivery, currently a recording
+stub — no live vendor credentials exist), Google Calendar and Drive sync
+modules (built and unit-tested in `packages/delivery`, but **not currently
+called anywhere in the live pipeline** — see limitations).
 
 ---
 
 ## The pipeline works end to end — a real run
 
 This is not a description of intended behavior. On 2026-08-25 we called the
-live API directly:
+live API directly, three separate times, while writing this document:
 
 ```
 curl -X POST https://ef-api-756591166292.us-central1.run.app/demo/inject_bill \
   -H "Content-Type: application/json" \
-  -d '{"fixture_name":"case_01_uninsured_gfe_ca"}'
+  -d '{"fixture_name":"case_07_il_concurrent_clocks"}'
 ```
 
-**HTTP 200 in 74.5 seconds.** The response carried a real case ID
-(`demo-case_01_uninsured_gfe_ca-86412e24`); pulling `GET /cases/{id}` back
-showed:
+**HTTP 200 in 47–68 seconds** across the runs. Each response carried a real
+case ID (e.g. `demo-case_07_il_concurrent_clocks-39d5a75f`); pulling
+`GET /cases/{id}` back showed:
 
-- **30 events** logged to `cases/{id}/events`, each with an agent name and a
-  citation — Reader classifying via Gemma, Lookup resolving Sutter Bay
-  Hospitals as nonprofit (`26 CFR 1.501(r)-1(b)(29)(i)`), Clock computing three
-  deadlines, Auditor running (and honestly skipping the denial check — no
-  denial letter on this case), Strategist selecting fronts.
-- **4 fronts evaluated**, all with reasons and citations:
-  - `audit` — applicable (itemized bill on file)
-  - `charity_care` — applicable, **income at 117.13% of FPL**, under the
-    400% free-care threshold (`26 CFR 1.501(r)-4(b)(2)`; Cal. HSC §127405)
-  - `debt_validation` — correctly marked **not** applicable ("account is not
-    reported in collections")
-  - `ppdr` — applicable, **deadline computed as 2026-10-03**, "$700.00 above
-    the Good Faith Estimate (>= $400 floor)" (`45 CFR 149.620(b), (c)`)
+- Reader classifying every document (Gemma first, then Gemini extracting a
+  real six-line itemized bill), Lookup resolving **Advocate Christ Medical
+  Center** as a nonprofit hospital, Clock computing multiple concurrent
+  Illinois deadlines, Auditor running, Strategist selecting fronts — every
+  step logged to `cases/{id}/events` with an agent name and a citation.
+- **4 fronts evaluated**, all with reasons and citations, e.g. `charity_care`
+  applicable at **109.8% of the federal poverty level** under Illinois'
+  Hospital Uninsured Patient Discount Act (`210 ILCS 89/10`); `ppdr`
+  applicable with a bill **$900.00 above the Good Faith Estimate**; `debt_validation`
+  correctly marked **not applicable** ("account is not reported in
+  collections").
+- We then called `POST /cases/{id}/approve_filing {"front":"audit"}` and got a
+  **real filing back in under 10 seconds**: `filer` logged *"The filing was
+  sent via the mail channel with vendor ID fake-ltr_4a49a35d6f234db78885 and
+  has a status of sent"* — a real generated PDF, a recorded (stub) vendor
+  proof, the whole loop.
+- We separately re-ran the same fixture against `case_02_wrongful_denial_il`
+  and got a live, populated `denial_flag`: *"Violation: the hospital demanded
+  notarized affidavit of indigency; three years federal tax returns, which
+  its published FAP does not list (26 CFR 1.501(r)-4(b)(3))."* — the
+  Denial Triage feature working against a real (synthetic) case, not a demo
+  script.
+- **We also approved `charity_care` specifically, live, for the first time
+  this pass documents anywhere in the repo.** `POST .../approve_filing
+  {"front":"charity_care"}` on the same case returned `HTTP 200`, the front
+  moved to `status: "filed"`, and the case's own `documents/` array picked up
+  a real `generated_application` record: Advocate's own FAP form, **387,861
+  bytes**, uploaded to a real GCS object
+  (`gs://ef-documents-everyfront-hack-2026/cases/.../generated/…_advocate_fap.pdf`),
+  with a (stub-vendor) delivery status of `sent`. A clean charity-care filing
+  producing a real PDF, end to end, live, **has now been demonstrated** —
+  this is the thing an earlier brief said had never once been shown.
 
-This was one real fixture out of the 8 in `fixtures/`, run against the live
-`ef-api` and `ef-agent-core` Cloud Run services, not a mock. It's also the
-run that surfaced the `savings_found_cents: 0` and `audit_findings_cents: 0`
-result documented honestly below — we're showing the real output, including
-the part that doesn't work yet.
+This was three real fixtures out of the 8 in `fixtures/`, run against the
+live `ef-api` and `ef-agent-core` Cloud Run services, not a mock or a
+canned transcript.
 
-Processing time: this run took 75 seconds for a 3-document case. Other cases
-in the corpus have taken longer — on the order of a couple of minutes per
-case is typical right now (agent-core is not yet latency-optimized). The demo
-video is scripted around this.
+Processing time: 47–70 seconds per case in these runs; `approve_filing` on a
+single already-analyzed front returned in under 10 seconds each time we tried
+it. Cloud Run's request timeout is fixed at 300 seconds on every deployed
+service (`infra/deploy.sh --timeout=300`) — we did not personally reproduce a
+timeout, but see [Honest limitations](#honest-limitations) for why this is a
+real, currently-unmitigated risk rather than a closed issue.
 
 ---
 
 ## What's actually live right now
 
-Every persona has shipped and merged. This table is what we verified
-ourselves against the repo and the live services, not a status report handed
-to us.
+This table is what we verified ourselves against the repo, the test suite,
+and the live services on 2026-08-25 — including things that turned out to be
+*less* true than an earlier pass claimed. Both directions matter.
 
 | Component | Status |
 |---|---|
-| `infra/setup.sh`, `infra/deploy.sh` | **Live.** One-command bootstrap (APIs, Firestore, GCS, Pub/Sub topics + subscriptions, service accounts) and deploy of all four services (`intake`, `agent-core`, `api`, `web`) to Cloud Run. |
-| `packages/rules` | **Live.** The complete legal engine — deadlines, eligibility, front selection, billing audit, denial triage. We ran the suite ourselves: **182 tests, 100% branch coverage**, zero LLM calls anywhere in the package, every rule cites its regulation in its docstring. |
-| `packages/datapipes` | **Live.** 200 real hospitals seeded to Firestore from IRS Schedule H XML filings, 100% live FAP URL rate (by construction — selecting for a repairable URL rather than sampling at random, per `docs/SPIKE.md`'s finding); EIN↔CCN crosswalk resolved for 180/200; 2,881 NCCI PTP pairs and 15,112 MUE codes loaded; MRF fetcher pulling real attested cash prices from 3 live hospital systems. We independently confirmed one seeded record live: `GET /hospitals/94-0562680` on the deployed API returns Sutter Bay Hospitals with `free_care_max_fpl_pct: 400`, matching `docs/SPIKE.md`'s finding exactly. |
-| `services/agent-core` | **Live on Cloud Run**, running the full six-agent ADK hierarchy (not the earlier hello-world seed) via Gemini 3.7 Flash + Gemma 4 over Vertex AI. Verified with a real `/demo/inject_bill` call — see above. |
-| `services/api` | **Live on Cloud Run.** All eight §3.3 endpoints implemented, including `POST /demo/inject_bill` and `GET /events`. |
-| `services/intake`, `packages/delivery` | **Built.** Gmail `users.watch` → GCS → Pub/Sub intake; five real PDF forms filled (the actual CMS PPDR dispute form, Sutter's and Advocate's own FAP applications, plus two generated letters); Phaxio/Lob fax and mail behind one swappable interface with a hard NANP/ZIP allowlist in code; Calendar and Drive sync. *Fax/mail sends fall back to a recording stub without live vendor credentials — see limitations.* |
-| `web` | **Built.** Four routes: command center (stats banner, case list), case detail (event timeline, fronts panel, deadline ladder, Approve button), live activity feed, intake flow. Deployed via `infra/deploy.sh web`. |
-| `fixtures` | **Live.** 8 synthetic patients with real generated bill/GFE/denial-letter/collection-notice PDFs, covering PPDR+charity, wrongful denial, in-collections ordering, for-profit honesty, a cat-photo upload, and an unparseable bill. `make demo-reset && make demo-run` drives the corpus end to end. |
+| `infra/setup.sh`, `infra/deploy.sh` | **Live.** All four services (`intake`, `agent-core`, `api`, `web`) are deployed to Cloud Run right now (`gcloud run services list` confirms all four). All four run with `--allow-unauthenticated` and a fixed 300s timeout — see limitations. |
+| `packages/rules` | **Live.** We re-ran the suite ourselves: **100% statement and branch coverage** on every module in `packages/rules` (`audit.py`, `deadlines.py`, `denial.py`, `eligibility.py`, `fpl.py`, `fronts.py` — 489 statements, 180 branches, zero misses), exercised by the 364 tests in `tests/`. Zero LLM imports anywhere in the package (`grep`-verified). Every rule cites its regulation in its docstring. |
+| Whole-repo test suite | **665 tests passing** as of this pass (364 in `tests/`, 67 in `packages/datapipes`, 54 in `packages/delivery`, 106 in `services/agent-core`, 39 in `services/api`, 35 in `services/intake`; 1 skipped, 6 e2e tests deselected from this count because they need a live staging project). Up substantially from an earlier pass's count as the corpus and coverage both grew. |
+| `packages/datapipes` | **Live, with corrections.** **204 real hospitals** seeded to Firestore from IRS Schedule H XML (queried directly: `db.collection("hospitals").stream()` on the live project), **201/204 (98.5%) carrying a live `fap_url`** — very close to, but not literally, the "100%" an earlier pass claimed. **EIN↔CCN crosswalk: 0/204 populated** in the live seed today (`ccn` is `null` on every record we checked) — a real regression from an earlier claim of "180/200 resolved" that we could not reproduce; flagging honestly rather than repeating it. Hospital-level attested cash prices (`cash_prices`) are pre-cached for **2/204** hospitals (Advocate Christ Medical Center, Stanford Health Care) — the MRF fetcher itself works live (see below), it just hasn't been run at scale. |
+| `services/agent-core` | **Live on Cloud Run**, running the full six-agent ADK hierarchy via Gemini 3.7 Flash + Gemma 4 over Vertex AI. Verified with three real `/demo/inject_bill` calls and two real `approve_filing` calls — see above. |
+| `services/api` | **Live on Cloud Run.** All §3.3 endpoints implemented and exercised live in this pass, including `/demo/inject_bill`, `/cases/{id}/approve_filing`, and `/hospitals/{ein}`. No authentication on any endpoint — see limitations. |
+| The Filer / real forms | **Live and independently reproduced.** We rendered all three real filled forms ourselves while writing this doc (sizes above) — this is not RELAY's or FORGE's word for it, it's our own output. |
+| The billing audit's dollar figure | **Partially live — a real, currently-open gap.** The underlying engine is correct: calling `packages/rules/rules/audit.py`'s `audit_line_items` + `total_savings_cents` directly, with the real bundled NCCI table and a real live-fetched MRF cash price for every code on `case_07`'s bill, produces exactly **6 findings totaling $1,217.50** — we computed this by hand and it is real, defensible math. But **two fresh, live `/demo/inject_bill` calls against the deployed system, on the same fixture, both returned only 1 finding ($220.00, the exact-duplicate line) — reproduced twice, not a fluke.** The hospital's `cash_prices` are present in Firestore and visible on the case's own `hospital` field via the API, so this looks like a wiring gap between what `case["hospital"]` carries inside the live pipeline run and what the API layer later returns, not a missing capability. **Do not put "$1,217.50" or "6 findings" on camera until this is reproduced live** — as of this pass, the honest number for `case_07` fresh off `/demo/inject_bill` is $220.00, one finding. |
+| Pub/Sub push wiring | **Partially live, and ahead of `main`.** `gcloud pubsub subscriptions list` shows 3 of 5 subscriptions genuinely converted to push (`ef-intake-email`, `ef-document-added`, `ef-filing-requested`); `ef-analysis-complete` and `ef-filing-completed` remain pull with no subscriber. The code that did this conversion exists as an open, unmerged PR against `main` — someone applied it to the live infrastructure directly. Get that PR merged so the repo matches what's actually running. None of this affects the demo path (see Architecture). |
+| Hospital resolution by name | **Live.** Shipped since the last pass — Lookup now resolves a hospital by provider-name match when a bill carries no EIN, not EIN-only. |
+| Gmail intake, OAuth | **Not live.** `gcloud secrets list` returns zero secrets in this project's Secret Manager — no OAuth client ID/secret/refresh token, no Phaxio/Lob keys, nothing. The Gmail watch has never been started; the minting script (`services/intake/scripts/mint_oauth_token.py`) has never been run against a real account. |
+| Vendor sends (Phaxio/Lob) | **Recording stub, confirmed live.** A real filing we triggered in this pass returned vendor ID `fake-ltr_4a49a35d6f234db78885` — `packages/delivery`'s fake vendor, not a live Phaxio/Lob account (consistent with zero vendor credentials existing anywhere in Secret Manager). |
+| Google Calendar / Drive sync | **Built, not wired — corrected from an earlier "live" claim.** `packages/delivery/delivery/calendar_sync.py` and `drive_sync.py` are real, independently unit-tested modules, but a repo-wide search found **zero call sites for either one anywhere in the live pipeline** (`services/agent-core`) outside of a docstring mentioning them historically, and the deployed `ef-agent-core` container has no `GOOGLE_CALENDAR_ID` or `GOOGLE_DRIVE_ROOT_FOLDER_ID` env var set at all. No deadline has ever actually landed on a real Calendar; no filing has ever actually landed in a real Drive folder. This is a genuine correction, not a restatement. |
+| `web` | **Live and confirmed pointed at the real API** (`GET /api/config` on the deployed dashboard returns `{"usingMock": false}`), not the mock data path. Four routes: command center, case detail, live activity feed, intake flow. |
+| `fixtures` | **Built, but the live demo data is not currently clean.** `GET /dashboard/stats` showed **15 open cases** at the time of this pass (growing from 10 over the course of writing this document, purely from our own verification calls) with old-style random-suffixed IDs (`demo-case_07_il_concurrent_clocks-39d5a75f`), not the clean, human-readable `ef-2026-0001`..`0008` scheme an earlier draft of this brief described. That reseed logic exists only in the same open, unmerged PR mentioned above. **Run `make demo-reset` and get that PR merged and redeployed before recording** — the current live case list is not what a judge should see. |
 
 ---
 
@@ -205,13 +266,21 @@ below the hackathon's "Gemini 3.5 or newer" bar. See `docs/SPIKE.md` for how
 that was caught.
 
 Once deployed, drive the whole system the way we did above, without waiting
-on Gmail:
+on Gmail (which needs a manual OAuth step — see limitations):
 
 ```bash
 curl -X POST https://<your-api-url>/demo/inject_bill \
   -H "Content-Type: application/json" \
   -d '{"fixture_name":"case_01_uninsured_gfe_ca"}'
 ```
+
+To wire Gmail intake, Phaxio/Lob, and Calendar/Drive for real (all optional,
+none of them are required for the demo path above):
+[`services/intake/scripts/go_live.sh`](services/intake/scripts/go_live.sh)
+and its accompanying `mint_oauth_token.py` — see
+[`services/intake/README.md`](services/intake/README.md) for the full
+runbook. As of this writing, nobody has run it against a real account in this
+project.
 
 Full variable reference: [`.env.example`](.env.example). Deeper infra notes:
 [`infra/README.md`](infra/README.md).
@@ -224,15 +293,16 @@ Full variable reference: [`.env.example`](.env.example). Deeper infra notes:
 everyfront/
 ├── infra/          # setup.sh, deploy.sh, service configs
 ├── services/
-│   ├── intake/     # Gmail push webhook → Pub/Sub → GCS
+│   ├── intake/     # Gmail push webhook → Pub/Sub → GCS (built, not turned on)
 │   ├── agent-core/ # the ADK agent hierarchy: Reader, Lookup, Clock/Auditor,
 │   │               # Strategist, Verifier, Filer
-│   └── api/        # FastAPI REST for the dashboard (all 8 §3.3 endpoints)
+│   └── api/        # FastAPI REST for the dashboard (all §3.3 endpoints)
 ├── packages/
 │   ├── rules/      # deterministic legal engine (deadlines, eligibility,
 │   │               # front selection, billing audit, denial triage)
 │   ├── datapipes/  # IRS/CMS/NCCI/FPL data pipelines, seeded to Firestore
-│   └── delivery/   # fax, certified mail, PDF fill, calendar, Drive
+│   └── delivery/   # fax, certified mail, PDF fill, calendar/drive (built,
+│                   # calendar/drive not yet called from the live pipeline)
 ├── web/            # Next.js dashboard — 4 routes
 ├── fixtures/       # synthetic patient corpus, watermarked "SYNTHETIC — DEMO"
 ├── tests/          # unit + contract + e2e tests
@@ -249,9 +319,10 @@ if you want the full reasoning.
 ## Honest limitations
 
 We would rather a judge learn these from us than discover them independently.
-The first five are structural or unresolved by design; the next three are
-specific, verified gaps in the current build that other work is closing in
-parallel:
+Some of these are structural or unresolved by design; others are specific,
+currently-verified gaps in the build — several of them found by re-checking
+the live system ourselves while writing this document, not carried forward
+from a previous pass:
 
 - **Synthetic data only.** Every patient, bill, and case in this repo and its
   demo is fabricated for the purpose. No real name, SSN, or real patient bill
@@ -259,6 +330,75 @@ parallel:
 - **No HIPAA compliance.** This is a hackathon prototype. It is not a covered
   entity, has not undergone a security or privacy assessment, and should not
   handle real patient data as built.
+- **No authentication on any endpoint.** All four Cloud Run services are
+  deployed with `--allow-unauthenticated`. Anyone with a URL can read every
+  case, every document, and every event, and can call `approve_filing` on any
+  case. There is no API key, no OAuth, no IP allowlist. This is acceptable
+  for a hackathon demo against synthetic data; it would not be acceptable for
+  a single real case.
+- **A request that runs long gets a hard cutoff, not a graceful error.**
+  Every Cloud Run service is deployed with a fixed 300-second request
+  timeout (`infra/deploy.sh --timeout=300`), and neither the dashboard's
+  client nor `services/api`'s proxy to `agent-core` sets its own shorter
+  timeout or retry/backoff. Our own live tests stayed well under this (single
+  digits to ~70 seconds), but a slower case — more documents, model retries
+  under load — has no graceful path once it crosses five minutes; the
+  request simply dies. This has not been fixed and has not been load-tested.
+- **Gmail intake has never been turned on.** `gcloud secrets list` against
+  the live project returns zero secrets — no OAuth client ID/secret/refresh
+  token exist anywhere, meaning the minting script has never been run
+  against a real account and the Gmail watch has never started. The intake
+  service is deployed and its code is tested, but no real email has ever
+  been processed by it.
+- **Vendor sends are recording stubs, not real fax or certified mail.** We
+  confirmed this directly: a live filing we triggered in this pass returned
+  vendor ID `fake-ltr_4a49a35d6f234db78885` (`packages/delivery`'s
+  `FakeMailVendor`). No Phaxio or Lob API key exists in this project's Secret
+  Manager, so no filing produced by this system has ever reached a real
+  vendor.
+- **Google Calendar and Drive sync are built but not wired into the live
+  pipeline.** An earlier pass in this repo described these as "live." We
+  checked: `calendar_sync.py` and `drive_sync.py` are real, tested modules in
+  `packages/delivery`, but nothing in `services/agent-core` calls either one,
+  and the deployed container has no calendar or Drive folder ID configured
+  at all. No deadline has ever appeared on a real Calendar; no filing has
+  ever landed in a real Drive folder. Correcting this claim, not softening
+  it.
+- **The billing-audit dollar figure is a real, currently-open gap between
+  what the code can do and what the live system shows.** The underlying
+  engine (`packages/rules/rules/audit.py`) is fully correct — driven by hand
+  with the real bundled NCCI table and a real, live-fetched MRF cash price
+  for `case_07`'s bill, it produces exactly 6 findings totaling $1,217.50,
+  including the flagship $140.00-billed-vs-$70.00-cash finding on CPT 86787.
+  But two fresh `/demo/inject_bill` calls against the deployed system, on the
+  same fixture, both returned only the $220.00 exact-duplicate finding —
+  reproduced twice, and consistent with the hospital's `cash_prices` field
+  not reaching the auditor inside the live pipeline run even though it's
+  visible on the same case via the API afterward. Until this is fixed and
+  re-verified live, the honest number to say on camera for this fixture is
+  $220.00 and one finding — not $1,217.50 and six.
+- **Hospital data completeness regressed in one place we could measure.**
+  The EIN↔CCN crosswalk (a real capability — `packages/datapipes` has the
+  code and its own tests) shows `ccn: null` on all 204 hospitals in the live
+  Firestore seed today. An earlier pass claimed "180/200 resolved"; we could
+  not reproduce that against the live database and are not repeating it.
+  Similarly, 201/204 hospitals (98.5%) carry a live `fap_url`, not the "100%"
+  an earlier pass claimed — very close, genuinely strong, but not literally
+  100%, and we'd rather say 201/204 than round up.
+- **Pub/Sub push-wiring is ahead of `main`.** The infrastructure has 3 of 5
+  subscriptions genuinely converted to push (verified via
+  `gcloud pubsub subscriptions list`), but the code that does this exists
+  only in an open, unmerged pull request. Whoever applied it to the live
+  project did so without merging — a real process gap worth closing before
+  Devpost submission, since a judge reading the repo won't see what's
+  actually running.
+- **The live demo data is not currently clean.** As of this pass, the
+  deployed system carries 15+ open cases with random-suffixed IDs from
+  ongoing testing (including our own verification calls while writing this
+  document), not a tidy 8-case corpus. `make demo-reset` purges cases but
+  does not currently reseed a clean background set on `main` — that logic is
+  in the same unmerged PR referenced above. Run a full reset (and merge that
+  PR) before recording.
 - **Roughly 40% of U.S. hospitals are for-profit** and owe **no 501(r)
   charity-care duty at all.** The charity-care front simply does not apply to
   them, and the system is designed to say so explicitly (`nonprofit: false` →
@@ -269,36 +409,21 @@ parallel:
   appeals generally, and we don't claim one.
 - **The 76% / <1%-vs-34% / $14B figures are widely cited, not independently
   re-derived by this project.** Everything under "What is independently
-  verified" above, by contrast, was checked against a primary source ourselves
-  and the evidence is committed in `docs/spike/`.
-- **The savings/audit-findings figure is $0 in the live system today**, and we
-  reproduced this ourselves: the fixture we ran above was seeded with a
-  duplicate line item and an NCCI-flagged code, and the real run still
-  returned `audit_findings_cents: 0`. The root cause is in the extraction
-  handoff, not the rules engine — Reader's Gemini extraction schema for a
-  bill currently returns only aggregate fields (`amount_cents`,
-  `service_date`, dates), not a structured `line_items` array, so
-  `audit_line_items()` never receives anything to check. `packages/rules`'
-  audit function itself is fully implemented and unit-tested at 100% branch
-  coverage (see its tests) — it's what Reader hands it that's incomplete.
-  Separately, the MRF cash-price comparison isn't yet threaded from Lookup
-  into Auditor even though the underlying fetcher works (`docs/SPIKE.md`).
-  Both are in progress.
-- **Hospital resolution is EIN-only.** Lookup resolves a case's hospital by
-  reading `bill.hospital_ein` and looking up `hospitals/{ein}` in Firestore.
-  There is no fallback that matches on hospital name text, so a document
-  Reader can't pin an EIN to produces an honest "not resolved" note rather
-  than a guess. Fixing this is in flight.
-- **Vendor sends fall back to a recording stub.** Phaxio and Lob are wired
-  behind one interface with a hard fax/ZIP allowlist enforced in code
-  (never a real hospital destination), but without live vendor credentials
-  configured, both clients fall back to `FakeFaxVendor`/`FakeMailVendor` —
-  a recording stub that returns realistic vendor IDs and status, but never
-  actually reaches Phaxio or Lob. No filing in this repo has gone out
-  through a live vendor account yet.
-- **This is a 12-day build in active progress.** The status table above is the
-  actual state of the repo as of 2026-08-25, not a roadmap dressed up as a
-  demo.
+  verified" above, by contrast, was checked against a primary source (or the
+  live deployed system) ourselves, and the evidence is committed in
+  `docs/spike/` or reproducible via the curl commands shown above.
+- **Resolved this pass, worth noting because it wasn't true before:** a
+  clean charity-care filing producing a real PDF end to end had never been
+  separately demonstrated live. We did it while writing this document — a
+  live `POST .../approve_filing {"front":"charity_care"}` produced a real,
+  387,861-byte Advocate FAP application, uploaded to a real GCS object, with
+  a (stub-vendor) `sent` status (see "The pipeline works end to end" above).
+  Not yet demonstrated on camera in a recorded video, but genuinely proven
+  against the live deployed system, not merely asserted.
+- **This is a 12-day build in active progress.** The status table above is
+  the actual state of the repo and the live services as of 2026-08-25,
+  verified today, not a status report handed to us and not a roadmap dressed
+  up as a demo.
 
 ---
 
