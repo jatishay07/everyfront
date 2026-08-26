@@ -9,20 +9,20 @@ hierarchy in `agent_core/`, wired up here as a Pub/Sub push subscriber plus a
 couple of internal endpoints `services/api` calls synchronously.
 
 Why both a push subscriber AND a synchronous internal call for the same
-events (see /pubsub/document-added vs /internal/process_document): this repo
-has no upstream intake service yet (services/intake is still RELAY's empty
-stub) so nothing publishes `case.document.added` except this codebase's own
-`/demo/inject_bill`. That endpoint calls the synchronous internal route so a
-live demo recording does not depend on push-delivery latency, while ALSO
-publishing the real Pub/Sub message so the topic is genuinely exercised (and
-visible as evidence in the Cloud Console) for architecture purposes. Once
-RELAY's Gmail intake ships and publishes independently, the push-subscriber
-path is what actually matters and the synchronous route is fine to keep as a
-test/ops escape hatch.
+events (see /pubsub/document-added vs /internal/process_document):
+`/demo/inject_bill` calls the synchronous internal route so a live demo
+recording does not depend on push-delivery latency, while ALSO publishing the
+real Pub/Sub message so the topic is genuinely exercised (and visible as
+evidence in the Cloud Console) for architecture purposes. RELAY's Gmail
+intake (services/intake) now publishes `case.document.added` independently,
+and for THAT publisher the push subscriber is the only path -- which is why
+/pubsub/document-added creates the case and document the event names before
+running the pipeline; see its own comments.
 
 Idempotency (contract §2.3): both push endpoints dedupe on the Pub/Sub
 message id via `CaseStore.has_processed_message` / `mark_message_processed`
-before doing any work.
+before doing any work -- and mark only AFTER handling actually succeeded, so
+a failure is redelivered rather than silently swallowed.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from datetime import date, timedelta
 
 from agent_core import pipeline
 from agent_core.store import store
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from google.adk.agents import Agent
 from google.adk.runners import InMemoryRunner
 from google.genai import types
@@ -277,7 +277,50 @@ async def pubsub_document_added(body: dict) -> dict:
     if store.has_processed_message(doc_key):
         return {"status": "document already processed", "doc_id": doc_id}
 
+    # Auto-create the case + document a Gmail-sourced event names.
+    #
+    # `services/intake` cannot write Firestore (no `datastore.user` on the
+    # `ef-intake` service account) and derives the case id from the Gmail
+    # thread, so for a real emailed bill NOTHING has created `cases/{case_id}`
+    # or its document -- `on_document_added` returned `{"error": "no such
+    # case"}` and the lines below used to discard it. See
+    # `pipeline.ensure_case_and_document_from_event` for what may and may not
+    # be written (nothing is inferred; `patient`/`bill` stay empty).
+    #
+    # Gated on the event actually CARRYING the document, because an event that
+    # is only a pair of ids cannot reconstruct anything and creating a case
+    # from one would resurrect deleted cases: `fixtures/demo_reset.py` renames
+    # each case (copy to `ef-2026-000N`, then delete the original) while its
+    # own `case.document.added` messages are still in flight, and the zombie
+    # rows that produced are exactly what `store.update_case`'s "never
+    # resurrect a purged case" guard exists to prevent.
+    if store.get_case(case_id) is None or store.get_document(case_id, doc_id) is None:
+        if not pipeline.event_carries_document(payload):
+            logger.warning(
+                "case.document.added names case=%s doc=%s, neither of which exists, and carries "
+                "no document to create them from; acking (a retry cannot reconstruct it)",
+                case_id,
+                doc_id,
+            )
+            return {"status": "unknown case/document and nothing to create it from, acked"}
+        pipeline.ensure_case_and_document_from_event(payload)
+
     result = await pipeline.on_document_added(case_id, doc_id)
+
+    # Mark processed ONLY on success (`CaseStore.has_processed_message`'s own
+    # contract: "the caller must call mark_message_processed only once handling
+    # actually completes"). `on_document_added` reports failure by RETURNING
+    # `{"error": ...}`, not by raising, and marking regardless is what
+    # permanently poisoned every Gmail-sourced document: the handler answered
+    # 200 `{"status":"ok","result_keys":["error"]}`, Pub/Sub acked, and the
+    # `doc:` key then suppressed every redelivery of a document that had never
+    # been read. A non-2xx here leaves both keys unset, so Pub/Sub's own
+    # backoff retries -- same shape as /pubsub/filing-requested, which re-raises
+    # for exactly this reason.
+    if result.get("error"):
+        logger.error("case.document.added processing failed for %s: %s", doc_key, result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
+
     store.mark_message_processed(doc_key)
     store.mark_message_processed(message_id)
     return {"status": "ok", "result_keys": list(result.keys())}
