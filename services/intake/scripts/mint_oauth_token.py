@@ -125,13 +125,27 @@ def main() -> None:
         "(not your personal account) and click Allow for every scope shown.\n",
         file=sys.stderr,
     )
-    creds = flow.run_local_server(port=args.port)
+    # `prompt="consent"` is load-bearing, not cosmetic. `access_type=offline`
+    # (which google-auth-oauthlib already sets by default) only asks Google to
+    # ISSUE a refresh token; Google returns one just once per (client_id,
+    # account) grant and then silently omits it from every later exchange. So
+    # the second run of this script -- a re-mint after a typo, a rotation, a
+    # second demo account -- would complete the whole browser dance and then
+    # die at the check below, sending a human off to
+    # myaccount.google.com/permissions to revoke by hand mid-runbook.
+    # `prompt="consent"` forces the consent screen every time and makes Google
+    # re-issue the refresh token unconditionally, so this script is as
+    # re-runnable as the rest of the go-live path (go_live.sh is already
+    # idempotent by construction).
+    creds = flow.run_local_server(port=args.port, prompt="consent")
 
     if not creds.refresh_token:
         sys.exit(
-            "error: Google did not return a refresh_token. This almost always means "
-            "this exact client_id already has a live consent grant for this account -- "
-            "revoke it first at https://myaccount.google.com/permissions, then re-run."
+            "error: Google did not return a refresh_token even though this script "
+            "requested prompt=consent. Revoke this client's grant at "
+            "https://myaccount.google.com/permissions and re-run; if it still fails, "
+            "the OAuth client is probably a 'Web application' type rather than the "
+            "'Desktop app' type infra/OAUTH.md step 3 calls for."
         )
 
     print("\n" + "=" * 78)

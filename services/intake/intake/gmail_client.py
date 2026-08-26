@@ -49,23 +49,110 @@ def start_watch(topic_name: str | None = None) -> dict:
     return result
 
 
+class HistoryExpired(Exception):
+    """`startHistoryId` is too old for Gmail to diff against.
+
+    Gmail keeps the history log for a limited window and answers **404** for
+    any `startHistoryId` that has aged out of it. Verbatim from the Gmail v1
+    discovery document shipped inside google-api-python-client 2.199.0
+    (`users.history.list`, parameter `startHistoryId`):
+
+        "Supplying an invalid or out of date `startHistoryId` typically
+        returns an `HTTP 404` error code. A `historyId` is typically valid
+        for at least a week, but in some rare circumstances may be valid for
+        only a few hours. If you receive an `HTTP 404` error response, your
+        application should perform a full sync."
+
+    The cursor in `state.py` is therefore perishable: a quiet weekend, a
+    paused demo, or "in some rare circumstances" a few HOURS invalidates it.
+
+    Raised instead of leaking `googleapiclient`'s `HttpError` so the recovery
+    policy lives in `pipeline.py` (which owns the cursor and knows what
+    "start over from here" means) rather than in this module, whose job is to
+    be a thin API wrapper.
+    """
+
+
+def _is_history_expired(exc: Exception) -> bool:
+    """True for the 404 Gmail returns on an aged-out `startHistoryId`.
+
+    Reads both attributes `googleapiclient.errors.HttpError` exposes rather
+    than picking one. Read out of the pinned 2.199.0 wheel's `errors.py`, not
+    assumed: `HttpError.__init__` sets `self.resp`, and `status_code` is a
+    `@property` returning `self.resp.status` -- so on the real exception the
+    two can never disagree. The fallback earns its keep against anything that
+    is only HttpError-SHAPED (a stub, a mock, a future rename).
+
+    Deliberately duck-typed rather than `except HttpError`: `googleapiclient`
+    is a real dependency of this service but is not installed in every
+    environment that collects these tests, and a module-level import of it
+    here would trade a runtime bug for a collection-time one.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+    try:
+        return int(status) == 404
+    except (TypeError, ValueError):
+        return False
+
+
 def list_new_message_ids(start_history_id: str) -> list[str]:
-    """Every message added since `start_history_id`, across paginated results."""
+    """Every INBOX message added since `start_history_id`, across paginated
+    results.
+
+    `labelId="INBOX"` is load-bearing. `start_watch` above passes
+    `labelIds: ["INBOX"]`, but that only constrains which changes TRIGGER a
+    push notification -- it is not remembered by, and does not propagate to,
+    `history.list`. Unfiltered, `history.list` reports `messageAdded` across
+    EVERY label, so a draft, a sent message, or a spam message that happens
+    to carry a PDF is fetched, stored to GCS and published as
+    `case.document.added` exactly as if a patient had emailed a bill in. On a
+    live demo account that is any PDF the operator touches, on camera.
+
+    `labelId` (singular, a plain string) is the real parameter name -- read
+    off the Gmail v1 discovery document in google-api-python-client 2.199.0,
+    where it is documented as "Only return messages with a label matching the
+    ID." Passing the `labelIds` list that `users.watch` takes instead would
+    raise `TypeError: Got an unexpected keyword argument labelIds` at the
+    first push -- `discovery.py` validates kwargs against the method's
+    argmap. Loud, at least, but only at runtime, and this code path has never
+    run against a live Gmail (no OAuth token has ever been minted).
+
+    HANDOFF (not built here): a From-header allowlist would narrow this
+    further, since INBOX still admits anything anyone sends the demo account.
+    It is not a one-liner -- it needs header extraction, RFC-5322 address
+    normalisation, and an explicit "unset means allow all" default so an
+    empty env var cannot silently swallow the demo bill. Written up in the PR
+    description rather than smuggled into this change.
+
+    Raises `HistoryExpired` if Gmail 404s because the cursor has aged out of
+    the history window; see that class and `pipeline.process_gmail_push`.
+    """
     service = _service()
     message_ids: list[str] = []
     page_token = None
     while True:
-        resp = (
-            service.users()
-            .history()
-            .list(
-                userId="me",
-                startHistoryId=start_history_id,
-                historyTypes=["messageAdded"],
-                pageToken=page_token,
+        try:
+            resp = (
+                service.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    historyTypes=["messageAdded"],
+                    labelId="INBOX",
+                    pageToken=page_token,
+                )
+                .execute()
             )
-            .execute()
-        )
+        except Exception as exc:
+            if _is_history_expired(exc):
+                raise HistoryExpired(
+                    f"Gmail returned 404 for startHistoryId={start_history_id!r} -- "
+                    "the cursor has aged out of the history window"
+                ) from exc
+            raise
         for record in resp.get("history", []):
             for added in record.get("messagesAdded", []):
                 message_ids.append(added["message"]["id"])
