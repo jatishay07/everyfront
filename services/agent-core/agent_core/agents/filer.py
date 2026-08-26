@@ -160,9 +160,10 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         "Return the filing that was just sent: channel, vendor id, and status.",
         fact,
     )
-    prompt = (
-        f"Report the filing just sent for case {case_id}, front {front!r}. "
-        "Call get_filer_result first."
-    )
+    # No raw case_id in the prompt -- see reader.py's docstring note (bug
+    # found live 2026-08-25): an LLM's freeform narration lands verbatim in
+    # `events/{id}.detail`, which a case rename cannot scrub after the fact.
+    # `front` is safe to keep: it is never renamed and names no case.
+    prompt = f"Report the filing just sent for the {front!r} front. Call get_filer_result first."
     turn = await common.run_agent_turn(NAME, config.GEMINI_MODEL, INSTRUCTION, [tool], prompt)
     return {"fact": fact, "filing_id": filing_id, **turn}
