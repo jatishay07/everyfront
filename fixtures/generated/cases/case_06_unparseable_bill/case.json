@@ -27,11 +27,11 @@
     "eligibility": null,
     "fronts_reference_model": [
       {
-        "applicable": true,
-        "citation": "26 CFR 1.501(r)-4(b)(2)",
+        "applicable": false,
+        "citation": "26 CFR 1.501(r)-1(b)(18)",
         "deadline": null,
         "front": "charity_care",
-        "reason": "Income is 120.1479% of the federal poverty level. At or below the 400% threshold for free care. Basis: Cal. Health & Safety Code \u00a7127405(a)(1)(A), (d)(1); 26 CFR 1.501(r)-4(b)(2)"
+        "reason": "hospital's tax-exempt (nonprofit) status is not established -- the hospital record was never resolved to a specific facility, and 26 CFR 1.501(r) attaches to a named 'hospital organization' (1.501(r)-1(b)(18)); an unidentified hospital cannot be asserted to owe a charity-care obligation"
       },
       {
         "applicable": false,
@@ -48,11 +48,11 @@
         "reason": "account is not reported in collections"
       },
       {
-        "applicable": true,
-        "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
+        "applicable": false,
+        "citation": "42 USC 1395b-7(b)",
         "deadline": null,
         "front": "audit",
-        "reason": "itemized bill on file; a billing audit is always performed"
+        "reason": "an itemized bill document is on file but no usable line items were extracted from it -- this is a failed or incomplete read, not a clean bill, and must not be reported as an audit that found nothing"
       }
     ]
   },
