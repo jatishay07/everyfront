@@ -19,6 +19,7 @@ BILLING_ACCOUNT="${BILLING_ACCOUNT:-}"
 log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '    \033[32mok\033[0m   %s\n' "$*"; }
 skip() { printf '    \033[2m--\033[0m   %s (exists)\n' "$*"; }
+warn() { printf '    \033[33mwarn\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- preflight
@@ -39,6 +40,7 @@ fi
 gcloud config set project "$PROJECT_ID" >/dev/null
 gcloud config set run/region "$REGION" >/dev/null
 ok "default project and region set ($REGION)"
+
 
 # ---------------------------------------------------------------- billing
 # Cloud Run, Vertex, and Firestore all refuse to work without billing. Fail
@@ -110,7 +112,7 @@ if curl -sS -m 90 -X PATCH \
     -H "Content-Type: application/json" -d "$_index_payload" >/dev/null 2>&1; then
   ok "events.ts collection-group index (may take a few minutes to build)"
 else
-  printf '    \033[33mwarn\033[0m could not set the events.ts index -- GET /events will 500 until it exists\n'
+  warn "could not set the events.ts index -- GET /events will 500 until it exists"
 fi
 
 # ---------------------------------------------------------------- buckets
@@ -146,6 +148,46 @@ if gcloud pubsub topics describe dead-letter >/dev/null 2>&1; then
   skip "dead-letter"
 else
   gcloud pubsub topics create dead-letter >/dev/null; ok "dead-letter"
+fi
+
+# ------------------------------------------------- Gmail -> Pub/Sub publisher
+# THE grant that makes Gmail intake work at all, and the single most commonly
+# missed step in a Gmail-to-Pub/Sub setup. `users.watch` does NOT publish as
+# the caller: Gmail publishes as its own fixed system account, which must hold
+# roles/pubsub.publisher ON THIS EXACT TOPIC. No project-level binding we make
+# elsewhere covers it, because the principal is not ours -- it is a single
+# global account shared by every Gmail API user on earth.
+#
+# Worse, `users.watch` does not merely fail later: it sends a test message to
+# the topic at watch-registration time and REFUSES the watch outright if the
+# publish is denied --
+#
+#   400 FAILED_PRECONDITION -- "Error sending test message to Cloud PubSub
+#   projects/<p>/topics/intake.email.received : User not authorized to
+#   perform this action."
+#
+# so the mailbox is never watched at all. Confirmed absent live 2026-08-26
+# (ATLAS infra audit): the topic's IAM policy was empty (`etag: ACAB`, zero
+# bindings) and the string `gmail-api-push` appeared nowhere in this repo. It
+# belongs in the idempotent bootstrap, not in a runbook step someone has to
+# remember, because forgetting it produces the project's signature failure
+# mode -- a green transcript over a completely dead feature.
+GMAIL_PUSH_SA="gmail-api-push@system.gserviceaccount.com"
+log "Gmail push publisher"
+if gcloud pubsub topics get-iam-policy intake.email.received \
+     --format='value(bindings.members)' 2>/dev/null | grep -q "$GMAIL_PUSH_SA"; then
+  skip "gmail-api-push publisher on intake.email.received"
+elif gcloud pubsub topics add-iam-policy-binding intake.email.received \
+       --member="serviceAccount:${GMAIL_PUSH_SA}" \
+       --role="roles/pubsub.publisher" >/dev/null 2>&1; then
+  ok "gmail-api-push -> roles/pubsub.publisher on intake.email.received"
+else
+  die "could not grant roles/pubsub.publisher on intake.email.received to
+  ${GMAIL_PUSH_SA}. Gmail's users.watch WILL be refused with a confusing
+  'User not authorized to perform this action' until this binding exists,
+  and Gmail intake will be silently dead. Retry:
+    gcloud pubsub topics add-iam-policy-binding intake.email.received \\
+      --member=serviceAccount:${GMAIL_PUSH_SA} --role=roles/pubsub.publisher"
 fi
 
 # ---------------------------------------------------------------- subscriptions
