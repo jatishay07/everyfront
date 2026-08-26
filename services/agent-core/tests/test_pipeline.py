@@ -840,3 +840,157 @@ def test_a_batch_of_only_generated_documents_runs_no_cascade(monkeypatch):
 
     assert "skipped" in result
     assert cascades == []
+
+
+def _cascade_twice(monkeypatch, s, **kwargs):
+    """Run the analysis cascade twice over an unchanged case -- exactly what a
+    Pub/Sub redelivery, or a second document, does."""
+    _patch_agents_for_document_added(monkeypatch, **kwargs)
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    doc_id = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+    first = s.list_events("c1")
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+    return first, s.list_events("c1")
+
+
+def test_re_analysis_does_not_re_log_facts_the_audit_log_already_holds(monkeypatch):
+    """FIX 2 (the audit log is idempotent). §2.3 requires every handler to
+    tolerate redelivery, and §3.1 gives `events/{event_id}` an explicit id for
+    exactly this. Before this, a second run of the same analysis appended its
+    whole event set again: 137 events for 36 distinct facts on ef-2026-0007,
+    50 for 22 on ef-2026-0002.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+
+    first, second = _cascade_twice(monkeypatch, s, hospital={"name": "Advocate", "nonprofit": True})
+
+    assert [e["event_id"] for e in second] == [e["event_id"] for e in first]
+    assert len(second) == len(first), (
+        f"re-analysis re-logged {len(second) - len(first)} facts the feed already had"
+    )
+
+
+def test_a_narration_that_changes_does_not_make_a_new_event(monkeypatch):
+    """The specific reason content-hashing the DETAIL would not have worked.
+    `lookup/resolve_hospital` logs the model's own sentence, and the model
+    words it differently every run -- ef-2026-0001 carries six differently
+    worded rows saying one thing. The identity is the resolved hospital, not
+    the sentence.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    doc_id = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    monkeypatch.setattr(
+        lookup,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "resolved": True,
+                "hospital": {"name": "Advocate", "nonprofit": True},
+                "citations": [],
+                "note": "resolved",
+            },
+            "I have identified the facility as Advocate Christ Medical Center.",
+        ),
+    )
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    resolved = [e for e in s.list_events("c1") if e["action"] == "resolve_hospital"]
+    assert len(resolved) == 1, f"the same hospital was logged {len(resolved)} times"
+    assert resolved[0]["detail"] == "hospital note"  # the first narration stands
+
+
+def test_two_findings_that_read_identically_are_still_two_rows(monkeypatch):
+    """THE TRAP on the other side of FIX 2, and it is not hypothetical:
+    `rules.audit._cash_price_findings` runs PER LINE, so the same overcharged
+    code on two lines of one bill produces two findings whose kind, prose and
+    citation are byte-identical. They are two real overcharges. Deduping on
+    (agent, action, detail) would have silently halved the finding count while
+    the dashboard's dollar total -- computed separately, from the findings
+    themselves -- kept the full amount. A judge doing arithmetic on screen
+    would have caught the discrepancy.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+    twin = {
+        "kind": "cash_price_delta",
+        "detail": "80053 billed at $220.00 vs the hospital's attested cash price of $110.00",
+        "codes": ["80053"],
+        "amount_cents": 11000,
+        "citation": "45 CFR 180.50",
+    }
+    monkeypatch.setattr(
+        auditor,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "case_id": case_id,
+                "findings": [{**twin, "line_refs": [2]}, {**twin, "line_refs": [7]}],
+                "total_findings_cents": 22000,
+                "line_items_examined": 9,
+                "denial_check": {"ran": False, "reason": "no denial letter"},
+                "source": {},
+            },
+            "two findings",
+        ),
+    )
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    doc_id = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    findings = [e for e in s.list_events("c1") if e["action"].startswith("audit_finding:")]
+    assert len(findings) == 2, (
+        f"{len(findings)} rows for two distinct overcharges on two distinct lines"
+    )
+
+
+def test_a_deadline_recomputed_from_a_corrected_date_is_a_new_row(monkeypatch):
+    """The constraint FIX 2 must not violate: a fact that legitimately CHANGES
+    on re-analysis has to stay visible in the feed. Nothing is rewritten -- the
+    old row stands next to the new one, which is what an audit log is for.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    doc_id = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    monkeypatch.setattr(
+        clock,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "case_id": case_id,
+                "deadlines": [
+                    {
+                        "front": "charity_care",
+                        "name": "Charity care application",
+                        "due": "2026-09-30",
+                        "basis_date": "2026-02-02",
+                        "basis_field": "first_statement_date",
+                        "citation": "26 CFR 1.501(r)-4(b)(1)(iv)",
+                        "days": 240,
+                        "explain": "due 2026-09-30",
+                    }
+                ],
+            },
+            "one deadline",
+        ),
+    )
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    deadlines = [e["detail"] for e in s.list_events("c1") if e["action"] == "compute_deadline"]
+    assert deadlines == ["due 2026-08-29", "due 2026-09-30"], deadlines

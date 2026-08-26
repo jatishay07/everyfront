@@ -29,6 +29,8 @@ this case will ever have" is not knowable in advance.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 
 from . import config, pubsub_client, rules_bridge
@@ -57,8 +59,74 @@ _INT_FIELDS = ("amount_cents", "gfe_amount_cents")
 _BOOL_FIELDS = ("in_collections",)
 
 
-def _log(case_id: str, agent: str, action: str, detail: str, citations: list[str] | None = None):
-    return store.append_event(case_id, agent, action, detail, citations or [])
+def _fact_event_id(case_id: str, agent: str, action: str, fact: object) -> str:
+    """A deterministic `events/{event_id}` for one FACT (contract §3.1 gives
+    the event an explicit id precisely so a caller can choose it).
+
+    Hashed over the case, the agent, the action and a caller-supplied
+    description of the fact itself -- never over the LLM's narration, which is
+    the thing that varies between two runs that established exactly the same
+    thing. `json.dumps(sort_keys=True)` so a dict's key order cannot change
+    the id; `default=str` so a stray date object degrades to something stable
+    rather than raising inside the audit log.
+    """
+    raw = json.dumps(
+        [case_id, agent, action, fact], sort_keys=True, default=str, separators=(",", ":")
+    )
+    return "fact-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _log(
+    case_id: str,
+    agent: str,
+    action: str,
+    detail: str,
+    citations: list[str] | None = None,
+    *,
+    fact: object = None,
+):
+    """Append one row to the audit log / activity feed.
+
+    Pass `fact` for anything ANALYSIS establishes, and the event gets a
+    deterministic id derived from it, so re-establishing the same fact is a
+    no-op instead of a new row (§2.3: idempotent handlers). Leave it off for
+    the filing lifecycle, where each event records a distinct thing that
+    happened in the world.
+
+    WHAT MAKES TWO EVENTS THE SAME EVENT. Not `(agent, action, detail)`:
+    `detail` is frequently the LLM's freeform narration (`lookup`'s
+    `resolve_hospital` logs `lookup_turn["answer"]`, Reader logs its own), and
+    two runs that resolve the same hospital narrate it differently every
+    time -- content-hashing the sentence would have deduplicated nothing,
+    which is exactly why `ef-2026-0001` carries six DIFFERENTLY-WORDED
+    `resolve_hospital` rows saying one thing. An event's identity is the fact
+    it records; the narration is presentation. So `fact` is the deterministic,
+    LLM-free description of what was established -- the resolved EIN, the
+    serialized deadline, the audit finding including its own line references.
+
+    THE TRAP ON THE OTHER SIDE: two genuinely distinct events must not
+    collapse. `rules.audit._cash_price_findings` runs PER LINE, so a bill with
+    the same overcharged code on two lines yields two findings whose kind,
+    description and citation are byte-identical and which are nonetheless two
+    separate overcharges. Their `line_refs` differ, so each finding's whole
+    dict -- not its prose -- is what identifies it, and both rows survive.
+    Reader's per-document events are keyed on `doc_id` for the same reason:
+    "classified as a bill" about document A and about document B is two facts.
+
+    AND A FACT THAT LEGITIMATELY CHANGES STILL SHOWS. A deadline recomputed
+    after a corrected statement date serializes differently, so it hashes
+    differently and lands as a new row next to the old one -- which is what an
+    audit log is for. Nothing is ever rewritten or removed; `append_event`
+    simply declines to write a row that is already there.
+    """
+    return store.append_event(
+        case_id,
+        agent,
+        action,
+        detail,
+        citations or [],
+        event_id=None if fact is None else _fact_event_id(case_id, agent, action, fact),
+    )
 
 
 def is_agent_generated(doc: dict | None) -> bool:
@@ -141,6 +209,12 @@ async def _run_reader(case_id: str, doc_id: str) -> dict:
         "reader",
         "classify_and_extract",
         reader_turn["answer"] or f"classified as {rf['label']}",
+        # One document, one classification. Keyed on the document AND the
+        # label, so a re-read that reaches a different conclusion (a bill on
+        # the second pass, having been unreadable on the first) is a new,
+        # visible fact rather than a silent overwrite -- but a re-read that
+        # agrees with itself is not a second row.
+        fact=[doc_id, rf["label"]],
     )
     # Defect fix (persona 5 WO8, "never invent, always say so"): reader.py's
     # `_scrub_ungrounded` discards any extracted value that matched a known
@@ -156,6 +230,7 @@ async def _run_reader(case_id: str, doc_id: str) -> dict:
             f"discarded {len(rf['scrubbed_fields'])} implausible placeholder value(s) instead of "
             f"reporting them as facts: {', '.join(rf['scrubbed_fields'])}. This document could not "
             "be fully read; those fields are treated as unknown, not zero/epoch/placeholder.",
+            fact=[doc_id, sorted(rf["scrubbed_fields"])],
         )
     return reader_turn
 
@@ -208,7 +283,15 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     lookup_turn = await lookup.run(case_id, case)
     lf = lookup_turn["fact"]
     _log(
-        case_id, "lookup", "resolve_hospital", lookup_turn["answer"] or lf["note"], lf["citations"]
+        case_id,
+        "lookup",
+        "resolve_hospital",
+        lookup_turn["answer"] or lf["note"],
+        lf["citations"],
+        # `note` is built in code (agents/lookup.py's `_resolve_fact`), unlike
+        # the `answer` above it, which is the model talking. Resolving the
+        # same hospital the same way twice is one fact.
+        fact=[lf.get("resolved"), lf.get("ein"), lf.get("note"), lf.get("citations")],
     )
     if lf.get("resolved"):
         hospital = lf["hospital"]
@@ -244,7 +327,11 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     )
     cf = clock_turn["fact"]
     for d in cf["deadlines"]:
-        _log(case_id, "clock", "compute_deadline", d["explain"], [d["citation"]])
+        # The whole serialized deadline, so a due date recomputed from a
+        # corrected statement date shows up as a new row (STATUTE's
+        # `.explain()` spells out the arithmetic, so it changes with it),
+        # while the same deadline recomputed unchanged does not.
+        _log(case_id, "clock", "compute_deadline", d["explain"], [d["citation"]], fact=d)
 
     af = auditor_turn["fact"]
     for finding in af["findings"]:
@@ -254,6 +341,11 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             f"audit_finding:{finding['kind']}",
             finding["detail"],
             [finding["citation"]] if finding["citation"] else [],
+            # The finding INCLUDING its `line_refs`. Two cash-price findings
+            # on two different lines of the same bill carry identical prose
+            # and are two real overcharges -- both must stay in the feed. See
+            # `_log`'s docstring.
+            fact=finding,
         )
     # DEFECT (persona 5 WO7, "ef-2026-0006 reports $0 savings"): with zero
     # findings, the loop above logs nothing at all -- a genuinely clean bill
@@ -273,6 +365,7 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
                 "audit_finding:none",
                 f"{examined} line item(s) examined -- no duplicate, NCCI, or cash-price "
                 "findings. $0.00 audit findings reflects a clean bill.",
+                fact=examined,
             )
         else:
             _log(
@@ -281,6 +374,7 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
                 "audit_skipped",
                 "no line items were extracted from any document on file -- $0.00 audit "
                 "findings reflects missing/unparseable data, not a clean bill.",
+                fact="no-line-items",
             )
     if af["denial_check"]["ran"]:
         _log(
@@ -289,9 +383,18 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             "denial_lawfulness_check",
             af["denial_check"]["detail"],
             [af["denial_check"].get("citation", "")],
+            # `detail` here is `DenialCheck.explain()` from packages/rules --
+            # computed, not narrated, so it is itself the fact.
+            fact=[af["denial_check"]["detail"], af["denial_check"].get("citation", "")],
         )
     elif af["denial_check"].get("reason"):
-        _log(case_id, "auditor", "denial_lawfulness_check_skipped", af["denial_check"]["reason"])
+        _log(
+            case_id,
+            "auditor",
+            "denial_lawfulness_check_skipped",
+            af["denial_check"]["reason"],
+            fact=af["denial_check"]["reason"],
+        )
 
     # select_fronts (via Strategist) needs two things Firestore's JSON-safe
     # case dict doesn't carry as-is: (1) `case["documents"]` to detect an
@@ -320,6 +423,11 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             f"select_front:{front['front']}",
             front["reason"],
             [front["citation"]] if front.get("citation") else [],
+            # Everything analysis owns about the front, minus `status`, which
+            # it does NOT own once a filing is under way (see
+            # `store.upsert_front_from_analysis`). Including it would make the
+            # same decision re-log itself the first time a front is filed.
+            fact={k: v for k, v in front.items() if k != "status"},
         )
 
     # Defect #1: savings_found_cents is built from real, auditable components,
@@ -343,20 +451,18 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     # show).
     examined = af.get("line_items_examined", 0)
     audit_note = "" if examined else " (no line items were extracted -- nothing to audit)"
-    _log(
-        case_id,
-        "auditor",
-        "savings_summary",
-        (
-            f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}"
-            f"{audit_note}. "
-            f"Charity-care free-tier erasure: ${charity_erasure_cents / 100:,.2f} "
-            f"({charity_explain}). Reported savings for this pass: "
-            f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "
-            "applies, already subsumes any billing-error dollars on the same bill)."
-        ),
-        [],
+    savings_detail = (
+        f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}"
+        f"{audit_note}. "
+        f"Charity-care free-tier erasure: ${charity_erasure_cents / 100:,.2f} "
+        f"({charity_explain}). Reported savings for this pass: "
+        f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "
+        "applies, already subsumes any billing-error dollars on the same bill)."
     )
+    # Built entirely from computed numbers and STATUTE's own explanation --
+    # no narration in it -- so the sentence IS the fact. If any figure moves,
+    # the text moves and the feed gets a new, correct row.
+    _log(case_id, "auditor", "savings_summary", savings_detail, [], fact=savings_detail)
 
     # DEFECT (persona 5 WO6, idempotency): this used to be
     # `(case.get(...) or 0) + combined_cents` -- an ACCUMULATION, not a
