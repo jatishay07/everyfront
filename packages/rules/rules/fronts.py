@@ -35,11 +35,31 @@ Front-by-front basis:
     organization" as there defined. CORRECTED 2026-08-25: previously cited
     (b)(20); verified against law.cornell.edu/cfr/text/26/1.501(r)-1 -- the
     "hospital organization" definition is at (b)(18).
+    CORRECTED 2026-08-26 (STATUTE, wo7 -- ef-2026-0006): `hospital.get(
+    "nonprofit", True)` used to default an UNRESOLVED hospital (Lookup could
+    not identify one -- no EIN, no name, `hospital == {}`) to "nonprofit",
+    which marked charity_care APPLICABLE for a facility nobody could name.
+    26 CFR 1.501(r) attaches to one specific "hospital organization"
+    (1.501(r)-1(b)(18)) -- if we do not know which hospital, we cannot
+    assert what it owes. `nonprofit` must now be the literal `True` to
+    proceed; anything else (missing, `None`, or a resolved-but-unconfirmed
+    record) refuses rather than assumes. See `_select_charity_care` below.
   * Debt validation ...... 12 CFR 1006.34(b); 15 USC 1692g(a) -- 30 days from
     the validation notice, and it runs FIRST (above).
   * Audit ................ 42 USC 1395b-7(b) (itemized statement) and 45 CFR
     Part 180 (hospital price transparency) -- performed whenever an itemized
-    bill is on file, unconditionally.
+    bill was actually extracted into usable line items.
+    CORRECTED 2026-08-26 (STATUTE, wo7 -- ef-2026-0006): this front used to
+    go applicable=True off the mere presence of a `documents[].type ==
+    "itemized_bill"` tag, even when zero line items had actually been
+    extracted from it (the Reader failed to parse the document). Combined
+    with `audit.audit_line_items` returning `[]` for an empty input, that
+    silently rendered "we could not read this bill" identically to "we read
+    it and it was clean" -- an absence dressed up as a finding. `_select_audit`
+    now distinguishes three states: no itemized-bill evidence at all; an
+    itemized-bill document on file but no usable line items extracted from
+    it (a failed/incomplete read -- NOT applicable, and said so); and an
+    itemized bill with actual line items (applicable, audit performed).
 """
 
 from __future__ import annotations
@@ -118,11 +138,22 @@ def _select_charity_care(case: dict, today: date) -> FrontDecision:
     state = str(patient.get("state") or "").strip().upper()
     insured = patient.get("insured")
 
-    if hospital.get("nonprofit", True) is False:
+    nonprofit = hospital.get("nonprofit")
+    if nonprofit is False:
         return FrontDecision(
             "charity_care",
             False,
             "hospital is for-profit; no 26 CFR 1.501(r) charity-care obligation applies",
+            "26 CFR 1.501(r)-1(b)(18)",
+        )
+    if nonprofit is not True:
+        return FrontDecision(
+            "charity_care",
+            False,
+            "hospital's tax-exempt (nonprofit) status is not established -- the hospital "
+            "record was never resolved to a specific facility, and 26 CFR 1.501(r) attaches "
+            "to a named 'hospital organization' (1.501(r)-1(b)(18)); an unidentified hospital "
+            "cannot be asserted to owe a charity-care obligation",
             "26 CFR 1.501(r)-1(b)(18)",
         )
 
@@ -271,24 +302,60 @@ def _select_debt_validation(case: dict, today: date) -> FrontDecision:
     )
 
 
-def _has_itemized_bill(case: dict) -> bool:
+def _has_itemized_bill_document(case: dict) -> bool:
+    """True when a document tagged `itemized_bill` is on file.
+
+    This says nothing about whether extraction from that document actually
+    produced anything usable -- see `_usable_line_item_count`. Kept separate
+    so `_select_audit` can tell "no such document was ever provided" apart
+    from "we have it, but could not read it."
+    """
     documents = case.get("documents")
     if isinstance(documents, list):
         for doc in documents:
             if isinstance(doc, dict) and doc.get("type") == "itemized_bill":
                 return True
-    bill = _get(case, "bill")
+    return False
+
+
+def _usable_line_item_count(bill: dict) -> int:
+    """How many of `bill['line_items']` carry at least a usable `code`.
+
+    Mirrors `audit.py`'s own line-validity rule (a dict with a non-empty
+    string `code`) -- kept in lockstep by hand rather than importing that
+    module's private helper, since this is the only place `fronts.py` needs
+    it.
+    """
     items = bill.get("line_items")
-    return bool(items)
+    if not isinstance(items, list):
+        return 0
+    count = 0
+    for item in items:
+        code = item.get("code") if isinstance(item, dict) else None
+        if isinstance(code, str) and code.strip():
+            count += 1
+    return count
 
 
 def _select_audit(case: dict) -> FrontDecision:
-    if _has_itemized_bill(case):
+    bill = _get(case, "bill")
+    usable = _usable_line_item_count(bill)
+    if usable > 0:
         return FrontDecision(
             "audit",
             True,
-            "itemized bill on file; a billing audit is always performed",
+            f"itemized bill on file with {usable} usable line item(s); a billing audit is "
+            "always performed",
             "42 USC 1395b-7(b); 45 CFR Part 180",
+        )
+    if _has_itemized_bill_document(case):
+        return FrontDecision(
+            "audit",
+            False,
+            "an itemized bill document is on file but no usable line items were extracted "
+            "from it -- this is a failed or incomplete read, not a clean bill, and must not "
+            "be reported as an audit that found nothing",
+            "42 USC 1395b-7(b)",
         )
     return FrontDecision("audit", False, "no itemized bill on file yet", "42 USC 1395b-7(b)")
 

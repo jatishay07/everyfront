@@ -149,7 +149,7 @@
         "citation": "42 USC 1395b-7(b); 45 CFR Part 180",
         "deadline": null,
         "front": "audit",
-        "reason": "itemized bill on file; a billing audit is always performed Sequenced after debt validation (12 CFR 1006.34(b); 15 USC 1692g(a)), which must be resolved first -- a pending validation dispute pauses collection activity."
+        "reason": "itemized bill on file with 4 usable line item(s); a billing audit is always performed Sequenced after debt validation (12 CFR 1006.34(b); 15 USC 1692g(a)), which must be resolved first -- a pending validation dispute pauses collection activity."
       }
     ]
   },

@@ -50,6 +50,20 @@ def _real_case(case) -> dict:
     gfe_specs = [d for d in case.documents if d.render == "gfe_pdf"]
     gfe_delta = gfe_specs[0].kwargs["gfe_delta_cents"] if gfe_specs else None
     bill["gfe_amount_cents"] = amount_cents - gfe_delta if gfe_delta and amount_cents else None
+    # Same shape `fixtures/build.py::build_case_json` feeds the real
+    # select_fronts/audit_line_items -- without this, every case here would
+    # look like "an itemized_bill document with zero extracted line items"
+    # to the audit front (see rules.fronts._usable_line_item_count), which
+    # is only actually true of case_06 (the deliberately unparseable bill).
+    bill["line_items"] = [
+        {
+            "code": li.code,
+            "description": li.description,
+            "units": li.units,
+            "charge_cents": li.unit_charge_cents,
+        }
+        for li in case.line_items
+    ]
 
     return {
         "patient": dict(case.patient),
@@ -156,8 +170,26 @@ class TestForProfitHonesty:
 
 
 class TestAuditAgainstTheRealCorpus:
-    def test_audit_applies_whenever_an_itemized_bill_document_exists(self):
+    def test_audit_applies_only_when_usable_line_items_were_actually_extracted(self):
+        """CORRECTED (STATUTE, wo7 -- ef-2026-0006): a `documents[].type ==
+        "itemized_bill"` tag alone used to be enough to mark audit
+        applicable, even for case_06 -- whose document is deliberately
+        unparseable and carries zero line items. An itemized-bill document
+        with nothing extracted from it is a failed read, not a clean bill;
+        it must not be reported as an audit performed. Every case but
+        case_06 has real, non-empty seeded line items (see cases_data.py),
+        so this is the only case in the corpus where the two used to
+        disagree."""
         for case_id, case in REAL_CASES.items():
-            has_itemized_bill_doc = any(doc["type"] == "itemized_bill" for doc in case["documents"])
+            has_usable_line_items = bool(case["bill"]["line_items"])
             d = next(x for x in select_fronts(case, today=TODAY) if x.front == "audit")
-            assert d.applicable is has_itemized_bill_doc, case_id
+            assert d.applicable is has_usable_line_items, case_id
+
+    def test_case_06_unparseable_bill_is_not_reported_as_a_clean_audit(self):
+        d = next(
+            x
+            for x in select_fronts(REAL_CASES["case_06_unparseable_bill"], today=TODAY)
+            if x.front == "audit"
+        )
+        assert d.applicable is False
+        assert "no usable line items were extracted" in d.reason

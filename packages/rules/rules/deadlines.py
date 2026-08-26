@@ -36,6 +36,31 @@ State charity-care overrides are in STATE_FAP_WINDOWS below. A state rule may
 only ever be MORE generous than the federal floor; 1.501(r) sets a minimum, not
 a ceiling. `_resolve_fap_window` enforces that invariant rather than trusting
 the table.
+
+IMPLAUSIBLE BASIS DATES (ADDED 2026-08-26, STATUTE, wo7 -- case ef-2026-0006):
+a bill whose document could not be read still reached this engine with
+`first_statement_date` / `service_date` fields backfilled to `1970-01-01` --
+the Unix epoch, the classic sentinel a failed parser defaults an
+uninitialized timestamp to. This module used to compute a fully-cited
+deadline from it ("due 1970-05-01, per 45 CFR 149.620(c)") -- confidently
+wrong is worse than absent, because the wrong answer is what gets filed.
+Every basis date this module reads is now passed through
+`_valid_basis_date`, which discards (treats as though absent) anything
+earlier than `_MIN_PLAUSIBLE_BASIS_DATE` (2000-01-01). That floor is
+deliberately generous rather than tight:
+  * It is decades before any bill this product will ever actually process
+    (every supported statute here -- 1.501(r) from 2016, the No Surprises
+    Act's PPDR from 2022, IL's 90-day Act as amended in 2022 -- postdates
+    it by a wide margin), so a genuine historical bill is never at risk of
+    being rejected as implausible. An over-eager guard that flags real old
+    bills would be its own bug; this floor is chosen to never be that guard.
+  * It still unambiguously catches the failure mode actually observed: an
+    epoch/zero-value sentinel a broken extractor backfills, not a date a
+    human being could have entered.
+A discarded basis date degrades EXACTLY like a missing one (no Deadline for
+that clock, or a Deadline with `due=None`) -- no new state, no special
+wording, just the same "never guess" path this module already takes for a
+genuinely absent date.
 """
 
 from __future__ import annotations
@@ -58,6 +83,11 @@ ITEMIZED_BILL_DAYS = 30
 # law.cornell.edu/cfr/text/45/149.620 -- the $400 definition is in the
 # definitions paragraph at (a)(2)(ii), not (b).
 PPDR_MIN_DELTA_CENTS = 400_00
+
+# See module docstring, "IMPLAUSIBLE BASIS DATES". A basis date earlier than
+# this cannot describe a real bill in this product's world; it is the
+# signature of a failed extraction's sentinel default, not an old bill.
+_MIN_PLAUSIBLE_BASIS_DATE = date(2000, 1, 1)
 
 
 @dataclass(frozen=True)
@@ -240,8 +270,22 @@ def _resolve_fap_window(state: str) -> tuple[int | None, str]:
     return rule.days, rule.citation
 
 
+def _valid_basis_date(bill: dict, field: str) -> date | None:
+    """`bill.get(field)` as a usable basis date, or `None` when absent,
+    malformed, or implausible (see module docstring, "IMPLAUSIBLE BASIS
+    DATES"). The single choke point every basis-date read in this module
+    goes through, so "never guess from garbage" only has to be enforced once.
+    """
+    value = bill.get(field)
+    if not isinstance(value, date):
+        return None
+    if value < _MIN_PLAUSIBLE_BASIS_DATE:
+        return None
+    return value
+
+
 def _latest_of(bill: dict, fields: tuple[str, ...]) -> tuple[date | None, str]:
-    """Pick the latest populated date among `fields`.
+    """Pick the latest populated, plausible date among `fields`.
 
     Illinois's 90-day clock (210 ILCS 89/15(b)) names four possible triggers --
     discharge, service, Fair Patient Billing Act screening, or public-program
@@ -256,14 +300,15 @@ def _latest_of(bill: dict, fields: tuple[str, ...]) -> tuple[date | None, str]:
     verbatim requirement, and is documented as such rather than presented as
     settled statutory text.
 
-    Returns (None, "") when the case carries none of the fields, so the caller
-    can degrade to "unknown" instead of inventing a date.
+    Returns (None, "") when the case carries none of the fields with a
+    plausible date, so the caller can degrade to "unknown" instead of
+    inventing a date.
     """
     best: date | None = None
     best_field = ""
     for f in fields:
-        v = bill.get(f)
-        if isinstance(v, date) and (best is None or v > best):
+        v = _valid_basis_date(bill, f)
+        if v is not None and (best is None or v > best):
             best, best_field = v, f
     return best, best_field
 
@@ -276,6 +321,9 @@ def compute_deadlines(
     `bill` follows the §3.1 `cases/{case_id}.bill` shape. Missing dates yield a
     Deadline with `due=None` rather than a guess -- an invented deadline is
     worse than an absent one, because the Strategist would file against it.
+    An implausible date (see module docstring, "IMPLAUSIBLE BASIS DATES" --
+    e.g. a failed extraction's `1970-01-01` sentinel) is treated exactly the
+    same as a missing one, via `_valid_basis_date`.
 
     Args:
         bill: the case's bill sub-document.
@@ -301,7 +349,10 @@ def compute_deadlines(
     if rule is not None and rule.days is not None and rule.days >= FAP_WINDOW_DAYS:
         basis, basis_field = _latest_of(bill, rule.runs_from_latest_of)
     else:
-        basis, basis_field = bill.get("first_statement_date"), "first_statement_date"
+        basis, basis_field = (
+            _valid_basis_date(bill, "first_statement_date"),
+            "first_statement_date",
+        )
 
     if window is None:
         out.append(
@@ -335,7 +386,7 @@ def compute_deadlines(
         )
 
     # --- ECA moratorium: collections barred for 120 days from first statement ---
-    first = bill.get("first_statement_date")
+    first = _valid_basis_date(bill, "first_statement_date")
     if isinstance(first, date):
         out.append(
             Deadline(
@@ -364,7 +415,7 @@ def compute_deadlines(
         )
 
     # --- debt validation: 30 days from the validation notice ---
-    notice = bill.get("validation_notice_date")
+    notice = _valid_basis_date(bill, "validation_notice_date")
     if isinstance(notice, date):
         out.append(
             Deadline(
