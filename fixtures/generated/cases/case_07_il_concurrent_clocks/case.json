@@ -68,7 +68,7 @@
     }
   ],
   "expected": {
-    "audit_findings_cents_total": 22000,
+    "audit_findings_cents_total": 121750,
     "audit_findings_reference_model": [
       {
         "citation": "42 USC 1395b-7(b) (itemized statement); duplicate billing is not separately regulated",
@@ -82,6 +82,66 @@
           4
         ],
         "potential_savings_cents": 22000
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "99285"
+        ],
+        "description": "99285 billed at $2,600.00 vs the hospital's attested cash price of $1,690.00 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          0
+        ],
+        "potential_savings_cents": 91000
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "86787"
+        ],
+        "description": "86787 billed at $140.00 vs the hospital's attested cash price of $70.00 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          1
+        ],
+        "potential_savings_cents": 7000
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "80053"
+        ],
+        "description": "80053 billed at $220.00 vs the hospital's attested cash price of $107.50 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          3
+        ],
+        "potential_savings_cents": 11250
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "80053"
+        ],
+        "description": "80053 billed at $220.00 vs the hospital's attested cash price of $107.50 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          4
+        ],
+        "potential_savings_cents": 11250
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "36415"
+        ],
+        "description": "36415 billed at $35.00 vs the hospital's attested cash price of $22.50 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          5
+        ],
+        "potential_savings_cents": 1250
       }
     ],
     "deadlines": [
@@ -180,7 +240,7 @@
     "name": "Aisha Bello",
     "state": "IL"
   },
-  "proves": "The product's actual thesis (README/video: 'five legal clocks running at once, interacting'): this single case has FOUR live Deadline objects on different clocks -- the federal 240-day FAP window, the 120-day ECA moratorium, the 120-day PPDR window, and IL's 90-day state discount -- each with a different basis date and a different due date. It also carries the richest audit trail in the corpus: a real cash-price delta from Advocate's own attested MRF (SPIKE gate (b)), an MUE-style unit excess, an exact duplicate, and an NCCI-style unbundling.",
+  "proves": "The product's actual thesis (README/video: 'five legal clocks running at once, interacting'): this single case has FOUR live Deadline objects on different clocks -- the federal 240-day FAP window, the 120-day ECA moratorium, the 120-day PPDR window, and IL's 90-day state discount -- each with a different basis date and a different due date. It also carries the richest audit trail in the corpus: FIVE real cash-price-delta overcharges against Advocate's own attested MRF (SPIKE gate (b); re-verified 2026-08-26 against the real rules.audit.audit_line_items engine + LEDGER's bundled NCCI table) plus the original exact-duplicate line -- $1,217.50 total. Two originally-seeded theories (an MUE unit excess, an NCCI unbundling) did NOT survive contact with the real CMS tables and were removed rather than kept as decoration.",
   "status": "intake",
   "synthetic_data_notice": "SYNTHETIC \u2014 DEMO. This patient and every document in this case are fictional. Rule 0.6 (BUILD_PLAYBOOK.md \u00a70 / CLAUDE.md).",
   "title": "Uninsured, GFE blown, Illinois \u2014 four clocks at once"

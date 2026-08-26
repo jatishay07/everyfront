@@ -57,8 +57,27 @@ class LineItem:
     description: str
     units: int
     unit_charge_cents: int
-    # Set when this line is a deliberately-seeded audit finding:
-    # "exact_duplicate" | "ptp_unbundling" | "mue_excess" | "cash_price_delta"
+    # NARRATIVE ONLY as of 2026-08-26 (PROOF, WO7 live-verification pass):
+    # `finding`/`finding_note`/`finding_amount_cents` document what THIS
+    # CORPUS intended to seed on a line, for a human reading this file. They
+    # are NOT read by fixtures/build.py -- since fixtures/wo6's rewire onto
+    # STATUTE's real rules engine, `expected.audit_findings_reference_model`
+    # is computed fresh by the REAL `rules.audit.audit_line_items` (with real
+    # NCCI PTP/MUE + a live-verified cash-price snapshot, see build.py) over
+    # just `code`/`units`/`unit_charge_cents` -- it can and does find things
+    # a `finding=` tag here never claimed (cash_price_delta on lines with no
+    # tag at all) and can fail to find things a stale tag here still claims.
+    # Two tags below are exactly that kind of stale claim, corrected in place
+    # rather than silently left to mislead a reader: "ptp_unbundling" against
+    # 36415 assumed a PTP edit pair that does not exist in the real NCCI
+    # table (checked directly, either column order), and "mue_excess" on
+    # case_07's 3-unit 71046 line assumed an "illustrative" ceiling below the
+    # REAL CMS ceiling of 3 -- exactly at it, not over. Both are removed
+    # below; see this PR's HANDOFF for the numbers this changes.
+    # "exact_duplicate" | "cash_price_delta" (the two kinds this corpus's
+    # real, seeded data can still substantiate; "ptp_unbundling"/"mue_excess"
+    # remain valid FUTURE tags if a case is ever added whose codes really do
+    # collide with the live NCCI table).
     finding: str | None = None
     finding_note: str = ""
     finding_amount_cents: int = 0
@@ -278,19 +297,14 @@ CASES: list[CaseFixture] = [
                 ),
                 finding_amount_cents=_cents(210),
             ),
+            # Was tagged "ptp_unbundling" against 99284; checked directly
+            # against the real NCCI table -- no such edit pair exists. See
+            # this class's 2026-08-26 amendment note above.
             LineItem(
                 "36415",
                 "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
                 1,
                 _cents(35),
-                finding="ptp_unbundling",
-                finding_note=(
-                    "36415 billed alongside same-encounter E/M 99284 with no "
-                    "modifier -- a commonly bundled NCCI column-2 code. "
-                    "Verify against LEDGER's live NCCI PTP table (packages/"
-                    "datapipes, WO3, not yet built) before filing."
-                ),
-                finding_amount_cents=_cents(35),
             ),
         ),
         documents=(
@@ -346,15 +360,21 @@ CASES: list[CaseFixture] = [
                 finding_note="Identical infusion line billed twice.",
                 finding_amount_cents=_cents(180),
             ),
+            # This case's hospital (Advocate Christ) has real, live-seeded
+            # cash-price data (build.py's `_CASH_PRICES_BY_EIN`) -- 99285 and
+            # 80048 above, and 36415 below, all price out with real
+            # cash_price_delta findings once the real audit engine runs, even
+            # though no `finding=` tag is hand-set on them here (see this
+            # class's 2026-08-26 amendment note; the generated case.json's
+            # `expected.audit_findings_reference_model` is authoritative).
             LineItem("80048", "BASIC METABOLIC PANEL", 1, _cents(150)),
+            # Was tagged "ptp_unbundling" against 99285; checked directly
+            # against the real NCCI table -- no such edit pair exists.
             LineItem(
                 "36415",
                 "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
                 1,
                 _cents(35),
-                finding="ptp_unbundling",
-                finding_note="Same pattern as case 1 -- 36415 alongside same-day E/M 99285.",
-                finding_amount_cents=_cents(35),
             ),
         ),
         documents=(
@@ -604,9 +624,14 @@ CASES: list[CaseFixture] = [
             "window, the 120-day ECA moratorium, the 120-day PPDR window, "
             "and IL's 90-day state discount -- each with a different basis "
             "date and a different due date. It also carries the richest "
-            "audit trail in the corpus: a real cash-price delta from "
-            "Advocate's own attested MRF (SPIKE gate (b)), an MUE-style unit "
-            "excess, an exact duplicate, and an NCCI-style unbundling."
+            "audit trail in the corpus: FIVE real cash-price-delta "
+            "overcharges against Advocate's own attested MRF (SPIKE gate "
+            "(b); re-verified 2026-08-26 against the real "
+            "rules.audit.audit_line_items engine + LEDGER's bundled NCCI "
+            "table) plus the original exact-duplicate line -- $1,217.50 "
+            "total. Two originally-seeded theories (an MUE unit excess, an "
+            "NCCI unbundling) did NOT survive contact with the real CMS "
+            "tables and were removed rather than kept as decoration."
         ),
         patient={
             "name": "Aisha Bello",
@@ -625,6 +650,21 @@ CASES: list[CaseFixture] = [
             "collector_name": None,
             "validation_notice_date": None,
         },
+        # AMENDED 2026-08-26 (PROOF, WO7 live-verification pass): the real
+        # audit engine (build.py, wired to LEDGER's bundled NCCI + the real
+        # cash-price snapshot -- see this PR's HANDOFF) finds FIVE
+        # cash_price_delta overcharges on this bill (every code Advocate
+        # publishes a cash price for is billed above it: 99285, 86787,
+        # both 80053 lines, and 36415), not just the one 86787 finding this
+        # corpus originally seeded. The "mue_excess" tag below was wrong --
+        # the REAL CMS MUE ceiling for 71046 is 3, and this line bills
+        # exactly 3 units, at the ceiling, not over it -- and "ptp_unbundling"
+        # assumed a PTP edit pair that does not exist in the real table.
+        # Both are removed. See fixtures/generated/cases/case_07_.../case.json
+        # for the authoritative, real-engine-computed finding list ($1,217.50
+        # total) -- this module's `finding=` tags stay illustrative/partial,
+        # not exhaustively hand-kept in sync with every code the real
+        # cash-price snapshot happens to cover.
         line_items=(
             LineItem("99285", "EMERGENCY DEPT VISIT, HIGH COMPLEXITY", 1, _cents(2_600)),
             LineItem(
@@ -642,21 +682,10 @@ CASES: list[CaseFixture] = [
                 ),
                 finding_amount_cents=_cents(70),
             ),
-            LineItem(
-                "71046",
-                "CHEST X-RAY, 2 VIEWS",
-                3,
-                _cents(95),
-                finding="mue_excess",
-                finding_note=(
-                    "3 units billed in one line for a code with an "
-                    "illustrative 1-unit/day MUE ceiling -- flagged as 2 "
-                    "excess units. NOT cross-checked against a live CMS NCCI "
-                    "MUE table (packages/datapipes has no NCCI pipeline yet, "
-                    "WO3); verify before citing in a real filing."
-                ),
-                finding_amount_cents=_cents(95 * 2),
-            ),
+            # 3 units billed; the REAL CMS MUE ceiling for 71046 is 3
+            # (packages/datapipes/datapipes/data/ncci.sqlite, checked
+            # directly) -- at the ceiling, not over it. No finding.
+            LineItem("71046", "CHEST X-RAY, 2 VIEWS", 3, _cents(95)),
             LineItem("80053", "COMPREHENSIVE METABOLIC PANEL", 1, _cents(220)),
             LineItem(
                 "80053",
@@ -667,14 +696,13 @@ CASES: list[CaseFixture] = [
                 finding_note="Same metabolic panel billed twice.",
                 finding_amount_cents=_cents(220),
             ),
+            # Was tagged "ptp_unbundling" against 99285; checked directly
+            # against the real NCCI table -- no such edit pair exists.
             LineItem(
                 "36415",
                 "COLLECTION OF VENOUS BLOOD BY VENIPUNCTURE",
                 1,
                 _cents(35),
-                finding="ptp_unbundling",
-                finding_note="36415 alongside same-day E/M 99285, no modifier.",
-                finding_amount_cents=_cents(35),
             ),
         ),
         documents=(

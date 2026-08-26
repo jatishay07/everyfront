@@ -27,22 +27,34 @@ reference_model.py` is deleted -- its own docstring said to delete it the day
 this switch happened, and nothing outside this comment referenced it as a
 Python import (only in docstrings, now updated).
 
-`audit_line_items` accepts optional `ptp_lookup`/`mue_lookup`/
-`cash_price_lookup` callables (LEDGER's NCCI/MRF data). This module
-deliberately passes NONE of them -- matching exactly what the live pipeline's
-Auditor does today (`services/agent-core/agent_core/agents/auditor.py`'s
-`_facts()` calls `rules_bridge.audit_line_items(items,
-cash_price_lookup=cash_price_lookup)` with no `ptp_lookup`/`mue_lookup` at
-all; `cash_price_lookup` itself is None unless a *live* MRF fetch succeeds
-against the resolved hospital's real `mrf_url`, which this offline corpus
-build can't reproduce deterministically). Concretely this means
-`cases_data.py`'s seeded `ptp_unbundling` and `mue_excess` LineItem findings
-will NEVER be counted in `audit_findings_cents_total` here, because they are
-structurally unreachable in the live system too -- see this PR's HANDOFF to
-SWARM/LEDGER. Only `exact_duplicate` findings (detected unconditionally, no
-external table needed) count today; a live MRF fetch may ALSO surface a real
-`cash_price_delta` finding this static corpus doesn't predict -- that would
-be a pleasant surplus, never a promise this corpus makes and fails to keep.
+AMENDED 2026-08-26 (PROOF, WO7 live-verification pass): the paragraph above
+was accurate against the Auditor as it stood before LEDGER's wo6 PR
+(`56d913c`, "wire NCCI + reliable cash-price findings into the billing
+audit") -- which had already merged to `main` by the time this module's own
+"no ptp_lookup/mue_lookup at all, ever" claim was written, but the live
+Cloud Run deployment that claim was checked against had not yet been
+redeployed past the PREVIOUS commit (confirmed directly: the deployed
+revision's source bundle was byte-identical to `f35251d`, three commits
+behind). The claim was true of what was LIVE, not of what was actually
+MERGED. `services/agent-core/agent_core/agents/auditor.py` today builds
+`ptp_lookup`/`mue_lookup` from `agent_core.ncci_cache` (LEDGER's bundled
+`packages/datapipes/datapipes/data/ncci.sqlite` snapshot -- no network, so
+this offline corpus build can reproduce it exactly) and a `cash_price_lookup`
+that PREFERS `hospital["cash_prices"]`, a value LEDGER's seed pipeline writes
+into Firestore once per hospital, offline, straight from the same MRF (only
+falling back to a live-bounded fetch for codes that pre-cache doesn't cover).
+So this module now passes REAL `ptp_lookup`/`mue_lookup` (bundled NCCI,
+`_ncci_lookups()` below) and a REAL `cash_price_lookup` per hospital
+(`_CASH_PRICES_BY_EIN` below -- a small, dated, provenance-cited snapshot of
+the two real hospitals' live-seeded `cash_prices`, captured 2026-08-26 via
+`GET /hospitals/{ein}` against the deployed project; Sutter Bay and Prairie
+Crossing carry no MRF cash-price data, matching their `Hospital.verification_note`
+in cases_data.py). `audit_findings_cents_total` now uses
+`rules.audit.total_savings_cents` (the per-line-max dedup rule), not a naive
+sum, matching the live Auditor exactly -- see that function's own docstring
+for why a naive sum would over-claim once a line can be named by more than
+one theory (duplicate AND cash-price-delta, e.g. case_07's repeated 80053
+line).
 """
 
 from __future__ import annotations
@@ -55,8 +67,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(REPO_ROOT / "packages" / "rules"))
+sys.path.insert(0, str(REPO_ROOT / "packages" / "datapipes"))
 
-from rules.audit import audit_line_items  # noqa: E402
+from rules.audit import PTPEdit, audit_line_items, total_savings_cents  # noqa: E402
 from rules.deadlines import compute_deadlines  # noqa: E402
 from rules.denial import check_denial_lawfulness  # noqa: E402
 from rules.eligibility import screen_eligibility  # noqa: E402
@@ -65,6 +78,73 @@ from rules.fronts import select_fronts  # noqa: E402
 from fixtures.cases_data import WATERMARK, CaseFixture, Hospital  # noqa: E402
 
 TODAY = date(2026, 8, 25)  # CLAUDE.md currentDate -- see docstring in cases_data.py
+
+# Real, live-seeded cash prices for the two hospitals in this corpus LEDGER's
+# MRF pipeline actually resolved a price for (see this module's 2026-08-26
+# docstring amendment) -- captured via `GET /hospitals/{ein}` against the
+# deployed project on 2026-08-26. Sutter Bay (94-0562680) and Prairie
+# Crossing (00-0000001, synthetic) both carry `cash_prices: None` live --
+# matching cases_data.py's own `Hospital.verification_note` for each -- so
+# they are honestly absent here too, not backfilled with a guess.
+_CASH_PRICES_BY_EIN: dict[str, dict[str, int]] = {
+    "36-2169147": {  # Advocate Christ Medical Center
+        "80053": 10750,
+        "71046": 16000,
+        "80048": 6250,
+        "96365": 39000,
+        "36415": 2250,
+        "86787": 7000,
+        "99285": 169000,
+    },
+    "94-6174066": {  # Stanford Health Care
+        "73610": 73280,
+        "29405": 106520,
+        "80048": 41400,
+        "99283": 199520,
+    },
+}
+
+
+def _cash_price_lookup_for(hospital_ein: str | None):
+    prices = _CASH_PRICES_BY_EIN.get(hospital_ein or "")
+    if not prices:
+        return None
+    return prices.get
+
+
+def _ncci_lookups():
+    """Real `(ptp_lookup, mue_lookup)` from LEDGER's bundled NCCI snapshot --
+    no network, same table `agent_core.ncci_cache` opens live. Degrades to
+    `(None, None)` if `packages/datapipes` or its bundled sqlite file isn't
+    available in this environment, matching the "never fabricate a finding"
+    contract every lookup in `rules.audit` already honors."""
+    try:
+        from datapipes.ncci import load_default
+    except ImportError:
+        return None, None
+    try:
+        table = load_default()
+    except Exception:  # noqa: BLE001 -- offline corpus build must not crash
+        return None, None
+
+    def ptp_lookup(code_a: str, code_b: str):
+        result = table.lookup(code_a, code_b)
+        if not result.matched:
+            return None
+        return PTPEdit(
+            column1_code=result.column1,
+            column2_code=result.column2,
+            modifier_allowed=bool(result.allowed_with_modifier),
+        )
+
+    def mue_lookup(code: str):
+        result = table.mue(code)
+        return result.mue_value if result is not None else None
+
+    return ptp_lookup, mue_lookup
+
+
+_PTP_LOOKUP, _MUE_LOOKUP = _ncci_lookups()
 
 # renderer name -> path relative to a case's directory. The single source of
 # truth for where each document ends up; generate.py's RENDERERS re-exports
@@ -170,10 +250,15 @@ def build_case_json(case: CaseFixture, hospitals: dict[str, Hospital]) -> dict:
         "documents": [{"type": d.type} for d in case.documents],
     }
     fronts = select_fronts(fronts_case, today=TODAY)
-    # No ptp_lookup/mue_lookup/cash_price_lookup -- see docstring: this
-    # matches the live Auditor's own call exactly, so a fixture never
-    # promises a dollar amount the deployed pipeline can't produce.
-    findings = audit_line_items(bill["line_items"])
+    # Real ptp_lookup/mue_lookup (bundled NCCI, offline) + a real, dated
+    # cash_price_lookup snapshot -- see this module's 2026-08-26 docstring
+    # amendment for why these are no longer hardcoded to None.
+    findings = audit_line_items(
+        bill["line_items"],
+        ptp_lookup=_PTP_LOOKUP,
+        mue_lookup=_MUE_LOOKUP,
+        cash_price_lookup=_cash_price_lookup_for(case.bill.get("hospital_ein")),
+    )
     denial_check = None
     if case.denial_demanded_docs:
         denial_check = check_denial_lawfulness(
@@ -225,7 +310,7 @@ def build_case_json(case: CaseFixture, hospitals: dict[str, Hospital]) -> dict:
             # stand-in -- see this module's 2026-08-25 docstring amendment.
             "fronts_reference_model": [asdict(f) for f in fronts],
             "audit_findings_reference_model": [asdict(f) for f in findings],
-            "audit_findings_cents_total": sum(f.potential_savings_cents or 0 for f in findings),
+            "audit_findings_cents_total": total_savings_cents(findings),
             "denial_check_reference_model": (asdict(denial_check) if denial_check else None),
         },
     }

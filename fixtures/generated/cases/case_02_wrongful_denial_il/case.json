@@ -56,7 +56,7 @@
     }
   ],
   "expected": {
-    "audit_findings_cents_total": 18000,
+    "audit_findings_cents_total": 99000,
     "audit_findings_reference_model": [
       {
         "citation": "42 USC 1395b-7(b) (itemized statement); duplicate billing is not separately regulated",
@@ -70,6 +70,42 @@
           2
         ],
         "potential_savings_cents": 18000
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "99285"
+        ],
+        "description": "99285 billed at $2,400.00 vs the hospital's attested cash price of $1,690.00 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          0
+        ],
+        "potential_savings_cents": 71000
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "80048"
+        ],
+        "description": "80048 billed at $150.00 vs the hospital's attested cash price of $62.50 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          3
+        ],
+        "potential_savings_cents": 8750
+      },
+      {
+        "citation": "45 CFR 180.40, 180.50 (hospital price transparency; discounted cash price, eff. Jan. 1, 2021)",
+        "codes": [
+          "36415"
+        ],
+        "description": "36415 billed at $35.00 vs the hospital's attested cash price of $22.50 for 1 unit(s)",
+        "kind": "cash_price_delta",
+        "lines": [
+          4
+        ],
+        "potential_savings_cents": 1250
       }
     ],
     "deadlines": [
