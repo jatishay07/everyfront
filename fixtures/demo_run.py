@@ -30,26 +30,23 @@ for this 3-document fixture). Step 2's poll is kept as a defensive fallback
 (the response already carries everything needed to log step 2's summary
 immediately), not because it is expected to loop.
 
-RE-VERIFIED live 2026-08-26 (PROOF WO8, post `ca9fd40`): injection is faster
-now (~108s observed this session for this same 3-document fixture, in line
-with the CEO's own briefing of "45-90s" -- some run-to-run variance is
-normal), but a REAL run this session ended `BLOCKED: not every approved
-front reached status=filed` and exited 1 -- step 3's three approve_filing
-calls for a case with multiple applicable fronts (this fixture's own
-audit+charity_care+ppdr) can now race with each other, because `ca9fd40`
-moved Filer off the synchronous in-request path (where fronts were
-necessarily filed one at a time, in order) onto async Pub/Sub push, and nothing
-serializes two `finalize_filing` calls for the SAME case_id. See this PR's
-HANDOFF (services/agent-core/agent_core/pipeline.py's `run_filer`,
-services/agent-core/agent_core/store.py's `upsert_front`) for the confirmed
-root cause and live reproduction -- this is a backend bug, not a bug in this
-script: it reported the real state honestly (a `filings/` record existed for
-the "stuck" front, but the case's own `fronts[].status` had been clobbered
-back to "open" by a concurrent sibling write). Until that lands, DO NOT
-re-run `approve_filing` on a front this script (or an operator) sees "stuck"
-after a BLOCKED exit -- a front left at "open" (not "filing") by this race
-has no guard against being filed a SECOND time; re-approving it risks a
-genuine duplicate filing, not just a duplicate click.
+RE-VERIFIED live 2026-08-26, twice consecutively, post-fix (FORGE): exit 0
+both times at 120.3s and 129.4s of the 240s budget, with "all approved fronts
+filed" -- the §4 persona 7 WO4 acceptance. Injection ran ~88s and ~95s for
+this 3-document fixture; some run-to-run variance is normal.
+
+Earlier that day this script exited 1 with `BLOCKED: not every approved front
+reached status=filed`, and it was right to: three real backend defects
+(non-atomic `fronts[]` writes, re-analysis reopening a filed front, and
+writes resurrecting a purged case) each erased a front's "filed" status while
+a genuine `filings/{filing_id}` record sat underneath. All three are fixed
+and deployed. The BLOCKED path stays exactly as written -- it reported real
+state honestly and is how the defects were found.
+
+If a front ever does look "stuck" again, do NOT re-run `approve_filing` on it
+before checking `filings/` for that case and front: a front left at "open"
+(not "filing") has no guard against being filed a SECOND time, so re-approving
+risks a genuine duplicate filing, not just a duplicate click.
 """
 
 from __future__ import annotations

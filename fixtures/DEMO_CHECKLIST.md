@@ -1,27 +1,32 @@
 # Demo recording checklist
 
-## STOP -- read this before scheduling a recording session
+## CLEARED -- the WO4 blocker is fixed (verified live 2026-08-26)
 
-**WO4's "twice in a row" acceptance currently FAILS live, reproducibly, as of
-2026-08-26.** A real `make demo-run` this session injected the flagship
-fixture successfully (beats 1-2 fine) but exited `BLOCKED: not every approved
-front reached status=filed` at beat 3/4 -- confirmed via direct Firestore
-inspection to be a REAL backend race, not a fluke of this one run: when 2+
-fronts on the same case are approved close together (exactly what the
-flagship fixture does -- audit + charity_care + ppdr, and what a live
-recording's beat 3 does on camera), their asynchronous Filer runs
-(`services/agent-core/agent_core/pipeline.py`'s `run_filer`,
-`.../store.py`'s `upsert_front`) race on the case's single shared `fronts[]`
-array via a non-atomic read-modify-write, and the loser's real, sent filing
-gets silently erased from the case's own status field (though a genuine
-`filings/{filing_id}` record with `status: "sent"` still exists -- the
-filing itself is real; only the case's on-screen status is wrong).
-Reproduced 3-for-3 today across `ef-2026-0001` (the flagship), `ef-2026-0003`,
-and `ef-2026-0007`. Full reproduction + root cause + a data-repair script for
-the 3 currently-affected cases are in this PR's HANDOFF -- **do not schedule
-a real recording session until this is fixed and a `make demo-reset && make
-demo-run` cycle has actually passed twice in a row again post-fix.** Treat
-everything else in this checklist as ready; this is the one open blocker.
+**`demo-reset && demo-run` has now passed twice consecutively against the
+deployed system**, exit 0 both times, at 120.3s and 129.4s of a 240s budget.
+The `BLOCKED: not every approved front reached status=filed` failure this
+section used to lead with is gone: the live corpus shows **0 fronts
+inconsistent with their own `filings/` records** (it was 5, across
+`ef-2026-0001`, `-0003` and `-0007`), no stray cases, and PROOF's live banner
+reconciliation passes 3/3.
+
+The symptom PROOF root-caused had three independent causes, all now fixed and
+deployed (FORGE, revision `ef-agent-core-00025-k54`):
+
+1. Non-atomic read-modify-write of the shared `fronts[]` array -- exactly as
+   diagnosed here. Now a Firestore transaction, plus a `set_front_status`
+   that re-reads the entry inside it instead of writing a caller's snapshot.
+2. **Re-analysis reopening filed fronts.** The Filer stores its generated PDF
+   as a case document, which republishes `case.document.added`, which re-runs
+   the hierarchy; `select_fronts` is pure and returns every applicable front
+   at "open", overwriting "filed". No transaction could have fixed this one.
+3. **Writes resurrecting purged cases.** `.set(merge=True)` creates a missing
+   document, so a late write after `demo_reset`'s rename-and-delete brought
+   the old `demo-<fixture>-<uuid>` case back as a zombie in `GET /cases`.
+
+Each has a regression test verified to fail against the pre-fix code. Nothing
+in this checklist is blocked any more -- but re-run one full cycle yourself
+before the recording session regardless, per §5 (rehearsals x3).
 
 PROOF (persona 7), WO4 + WO6 task 3 + WO8 task 2. Paper checklist for the
 recording session (BUILD_PLAYBOOK.md §5: rehearsals ×3, then record). Print
