@@ -1,9 +1,16 @@
-"""agent_core.agents.strategist -- persona 5 WO8's stopgap veto over
-`rules.fronts`' real bug at `packages/rules/rules/fronts.py:121`
-(`_select_charity_care`: `hospital.get("nonprofit", True) is False` treats an
-UNRESOLVED hospital the same as a CONFIRMED nonprofit). See
-`strategist._veto_charity_care_without_a_resolved_hospital`'s docstring for
-the live repro (ef-2026-0006) and the HANDOFF to STATUTE.
+"""agent_core.agents.strategist -- persona 5 WO8 regression coverage over
+STATUTE's real fix for the ef-2026-0006 defect (commit 69f4531):
+`rules.fronts._select_charity_care` now requires a hospital's `nonprofit`
+field to be the literal `True` to proceed, and `_select_audit` requires
+actual usable line items, not just a document classification tag.
+
+This persona used to carry its own local veto here as a stopgap while that
+fix lived only upstream in a HANDOFF; it has been deleted now that STATUTE's
+real fix lands the correct behavior directly out of `rules_bridge.select_fronts`
+(see `_facts`'s comment) -- keeping a second copy after the real fix landed
+would be exactly the duplicated-logic drift risk §2.1 exists to prevent.
+These tests exist to prove the delegation actually produces the right
+answer end-to-end, not to reimplement the check a second time.
 
 `_facts` is a pure function over `rules_bridge.select_fronts` (no LLM, no
 Firestore), so these are plain unit tests.
@@ -20,7 +27,7 @@ def _front(fronts: list[dict], name: str) -> dict:
     return next(f for f in fronts if f["front"] == name)
 
 
-def test_charity_care_vetoed_when_no_hospital_resolved():
+def test_charity_care_not_applicable_when_no_hospital_resolved():
     """The exact ef-2026-0006 repro: a CA patient whose income alone would
     otherwise qualify for free care, but whose hospital was never resolved
     (Lookup returned nothing, so `case["hospital"]` is absent)."""
@@ -37,12 +44,12 @@ def test_charity_care_vetoed_when_no_hospital_resolved():
     fact = strategist._facts("c1", case)
     cc = _front(fact["fronts"], "charity_care")
     assert cc["applicable"] is False
-    assert "no hospital could be resolved" in cc["reason"]
+    assert "not established" in cc["reason"]
     assert cc["deadline"] is None
     assert cc["status"] == "na"
 
 
-def test_charity_care_vetoed_when_hospital_is_an_empty_dict():
+def test_charity_care_not_applicable_when_hospital_is_an_empty_dict():
     case = {
         "patient": {
             "state": "CA",
@@ -56,12 +63,9 @@ def test_charity_care_vetoed_when_hospital_is_an_empty_dict():
     fact = strategist._facts("c1", case)
     cc = _front(fact["fronts"], "charity_care")
     assert cc["applicable"] is False
-    assert "no hospital could be resolved" in cc["reason"]
 
 
-def test_charity_care_untouched_when_hospital_is_resolved_and_nonprofit():
-    """The veto must be a no-op the moment a hospital is genuinely resolved --
-    it should not touch STATUTE's own determination in the normal case."""
+def test_charity_care_applicable_when_hospital_is_resolved_and_nonprofit():
     case = {
         "patient": {
             "state": "CA",
@@ -75,12 +79,22 @@ def test_charity_care_untouched_when_hospital_is_resolved_and_nonprofit():
     fact = strategist._facts("c1", case)
     cc = _front(fact["fronts"], "charity_care")
     assert cc["applicable"] is True
-    assert "no hospital could be resolved" not in cc["reason"]
 
 
-def test_other_fronts_are_not_touched_by_the_veto():
-    """The veto is scoped to charity_care only -- ppdr/debt_validation/audit
-    decisions must pass through untouched even when no hospital resolved."""
+def test_audit_not_applicable_with_zero_usable_line_items():
+    """The other half of ef-2026-0006: a document classified as an itemized
+    bill, but nothing was actually extracted from it (a failed read)."""
+    case = {
+        "patient": {"state": "CA", "insured": False},
+        "bill": {"line_items": []},
+        "documents": [{"type": "itemized_bill"}],
+    }
+    fact = strategist._facts("c1", case)
+    audit = _front(fact["fronts"], "audit")
+    assert audit["applicable"] is False
+
+
+def test_other_fronts_unaffected_when_real_data_is_present():
     case = {
         "patient": {"state": "CA", "insured": False},
         "bill": {
@@ -90,6 +104,7 @@ def test_other_fronts_are_not_touched_by_the_veto():
             # `rules_bridge.select_fronts` with no injected `today`, so this
             # must be relative to the real current date, not a fixed one.
             "first_statement_date": date.today() - timedelta(days=10),
+            "line_items": [{"code": "99213", "units": 1, "charge_cents": 15000}],
         },
         "documents": [{"type": "itemized_bill"}],
     }
