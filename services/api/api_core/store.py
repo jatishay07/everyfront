@@ -133,16 +133,36 @@ class CaseStore:
         with self._lock:
             return [dict(v, case_id=k) for k, v in self._cases.items()]
 
-    def update_case(self, case_id: str, patch: dict) -> dict:
+    def update_case(self, case_id: str, patch: dict) -> dict | None:
+        """Merge `patch` into an EXISTING case. Returns None, writing nothing,
+        if the case is gone.
+
+        `.set(..., merge=True)` happily creates a document that does not
+        exist, which meant a late write could resurrect a purged case as a
+        half-empty zombie. Seen live 2026-08-26: `fixtures/demo_reset.py`
+        renames each reseeded case (copy to `ef-2026-000N`, delete the
+        original) as soon as its filings settle, but the Filer's own
+        generated PDF lands as a case document and re-triggers analysis --
+        whose trailing write recreated `demo-case_08_lawful_denial_ca-65c0a5df`
+        13 seconds after the delete, with no `patient`, no `bill` and no
+        `created_at`. A stray case in `GET /cases` is a judge-visible defect:
+        it breaks PROOF's "corpus is exactly the 8 named cases" guard and
+        would appear in the case list on camera.
+        """
         patch = {**patch, "updated_at": _now_iso()}
         if self._client is not None:
-            self._client.collection("cases").document(case_id).set(patch, merge=True)
+            ref = self._client.collection("cases").document(case_id)
+            if not ref.get().exists:
+                return None
+            ref.set(patch, merge=True)
         else:
             with self._lock:
-                self._cases.setdefault(case_id, {}).update(patch)
+                if case_id not in self._cases:
+                    return None
+                self._cases[case_id].update(patch)
         return self.get_case(case_id)
 
-    def upsert_front(self, case_id: str, front: dict) -> dict:
+    def upsert_front(self, case_id: str, front: dict) -> dict | None:
         """Insert or replace one `fronts[]` entry, keyed by `front["front"]`.
 
         Atomic. Firestore has no array-upsert-by-key primitive, so this is
@@ -170,7 +190,47 @@ class CaseStore:
         """
         return self._write_fronts(case_id, lambda fronts: _merge_front(fronts, front))
 
-    def set_front_status(self, case_id: str, front: str, status: str) -> dict:
+    #: Front statuses owned by the filing lifecycle, not by analysis. Once a
+    #: front reaches one of these, only the approve/file path may move it --
+    #: see `upsert_front_from_analysis`.
+    _FILING_OWNED_STATUSES = ("filing", "filed", "won", "lost")
+
+    def upsert_front_from_analysis(self, case_id: str, front: dict) -> dict | None:
+        """Upsert a front that re-analysis just recomputed, WITHOUT reopening
+        one the filing lifecycle already owns.
+
+        Analysis is not a one-shot: every `case.document.added` re-runs the
+        whole hierarchy, and the Filer itself stores each generated PDF as a
+        document -- so filing a front publishes an event that re-analyses the
+        case. `select_fronts` is pure and has no idea anything has been filed,
+        so it returns every applicable front at status "open", and a plain
+        `upsert_front` then wrote that "open" straight over a sibling front's
+        "filed".
+
+        Observed live on ef-2026-0007, 2026-08-26: audit filed 08:40:46 and
+        charity_care 08:40:51, then re-analyses at 08:40:50 and 08:40:52-54
+        reset both to "open" -- while `filings/` held three real "sent"
+        records. ppdr kept its "filed" only because its filing happened to
+        land after the last re-analysis. This is the second, independent
+        cause of the same symptom PROOF reported, and no transaction can fix
+        it: both writers are behaving exactly as written.
+
+        Everything else on the entry -- applicable, reason, citation,
+        deadline -- IS analysis's to update, and still is.
+        """
+
+        def _apply(fronts: list[dict]) -> list[dict]:
+            for existing in fronts:
+                if existing.get("front") == front.get("front"):
+                    merged = dict(front)
+                    if existing.get("status") in self._FILING_OWNED_STATUSES:
+                        merged["status"] = existing["status"]
+                    return _merge_front(fronts, merged)
+            return _merge_front(fronts, front)
+
+        return self._write_fronts(case_id, _apply)
+
+    def set_front_status(self, case_id: str, front: str, status: str) -> dict | None:
         """Atomically set one front's `status`, touching nothing else.
 
         Reads the entry fresh inside the transaction rather than trusting the
@@ -187,7 +247,7 @@ class CaseStore:
 
         return self._write_fronts(case_id, _apply)
 
-    def _write_fronts(self, case_id: str, mutate) -> dict:
+    def _write_fronts(self, case_id: str, mutate) -> dict | None:
         """Apply `mutate(fronts) -> fronts` to a fresh read of
         `cases/{case_id}.fronts` and persist the result atomically."""
         if self._client is not None:
@@ -198,14 +258,18 @@ class CaseStore:
             @firestore.transactional
             def _txn(transaction) -> None:
                 snap = ref.get(transaction=transaction)
-                data = snap.to_dict() if snap.exists else {}
+                if not snap.exists:  # never resurrect a purged case -- see update_case
+                    return
+                data = snap.to_dict() or {}
                 fronts = mutate(copy.deepcopy(data.get("fronts") or []))
                 transaction.set(ref, {"fronts": fronts, "updated_at": _now_iso()}, merge=True)
 
             _txn(self._client.transaction())
         else:
             with self._lock:
-                case = self._cases.setdefault(case_id, {})
+                case = self._cases.get(case_id)
+                if case is None:
+                    return None
                 case["fronts"] = mutate(copy.deepcopy(case.get("fronts") or []))
                 case["updated_at"] = _now_iso()
         return self.get_case(case_id)

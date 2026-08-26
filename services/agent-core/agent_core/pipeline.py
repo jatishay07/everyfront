@@ -208,7 +208,11 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
         bill_now = case.get("bill") or {}
         if resolved_ein and not (bill_now.get("hospital_ein") or "").strip():
             patch["bill"] = {**bill_now, "hospital_ein": resolved_ein}
-        case = store.update_case(case_id, patch)
+        # `or case`: if this case was purged mid-run (a demo reset, a manual
+        # delete), update_case now writes nothing and returns None rather than
+        # resurrecting it. Finish the cascade against the local copy -- every
+        # later write is a no-op too, so nothing is left behind.
+        case = store.update_case(case_id, patch) or case
 
     # Clock needs only bill/patient; Auditor needs `case["hospital"]` (just
     # set above) solely for its denial-lawfulness sub-check. Neither depends
@@ -285,7 +289,10 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     strategist_turn = await strategist.run(case_id, case)
     sf = strategist_turn["fact"]
     for front in sf["fronts"]:
-        store.upsert_front(case_id, front)
+        # NOT `upsert_front`: re-analysis must not reopen a front the filing
+        # lifecycle already owns -- see that method's docstring for the live
+        # ef-2026-0007 trace.
+        store.upsert_front_from_analysis(case_id, front)
         _log(
             case_id,
             "strategist",

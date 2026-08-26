@@ -722,3 +722,37 @@ def test_two_concurrent_filings_on_one_case_do_not_clobber_each_other(monkeypatc
     }
     completed = [p for t, p in published if t == pipeline.config.TOPIC_FILING_COMPLETED]
     assert {p["filing_id"] for p in completed} == {"filing-1", "filing-2"}
+
+
+def test_reanalysis_triggered_by_a_filing_does_not_reopen_the_filed_front(monkeypatch):
+    """The second cause of the same live symptom, at the pipeline level.
+
+    The Filer stores its generated PDF as a case document; that publishes
+    `case.document.added`; that re-runs the hierarchy. Strategist's fronts
+    come back at "open" because `select_fronts` is pure and knows nothing
+    about filings -- and used to be written straight over "filed".
+
+    Live trace, ef-2026-0007 (2026-08-26): audit filed 08:40:46, charity_care
+    08:40:51, re-analyses at 08:40:50 and 08:40:52-54 reset both to "open"
+    while `filings/` held three real "sent" records.
+    """
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+
+    s.create_case("c1", {"patient": {"state": "IL", "insured": False}})
+    doc_id = s.add_document("c1", {"raw_text": "a bill", "type": None})
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+    assert s.get_case("c1")["fronts"][0]["status"] == "open"
+
+    # The front is approved and filed...
+    s.set_front_status("c1", "charity_care", "filed")
+
+    # ...and the Filer's own generated PDF lands as a document, re-analysing.
+    generated = s.add_document("c1", {"type": "generated_application", "raw_text": "a bill"})
+    asyncio.run(pipeline.on_document_added("c1", generated))
+
+    front = s.get_case("c1")["fronts"][0]
+    assert front["status"] == "filed", "re-analysis reopened a front that was already filed"
+    assert front["reason"] == "nonprofit hospital"  # analysis still owns everything else
