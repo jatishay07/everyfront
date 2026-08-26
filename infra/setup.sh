@@ -324,40 +324,79 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/iam.serviceAccountTokenCreator" --condition=None >/dev/null 2>&1 || true
 ok "Pub/Sub granted token-creator"
 
-# ---------------------------------------------------------------- budget guard
-# §6, amended 2026-08-21: tripwire at $50 against a $150 balance.
-log "Budget alerts"
-if [[ -n "$BILLING_ACCOUNT" ]]; then
-  if gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
-       --format='value(displayName)' 2>/dev/null | grep -qx "everyfront-guard"; then
-    skip "budget everyfront-guard"
+# ---------------------------------------------------------------- secrets
+# The secret NAMES and who may read each one. No VALUES are ever created here
+# -- `gcloud secrets create` with no `--data-file` makes an empty secret with
+# zero versions, which is exactly what we want: the shape of the credential
+# store is infrastructure (ATLAS), the credentials themselves are minted by a
+# human and landed by `services/intake/scripts/go_live.sh` (RELAY), which
+# describes-then-`versions add`es and therefore works unchanged against a
+# pre-created secret.
+#
+# Creating them here is what makes per-secret least privilege possible at all:
+# you cannot bind a policy to a secret that does not exist, and go_live.sh runs
+# long after setup.sh. Before this, both ef-intake and ef-agent held
+# roles/secretmanager.secretAccessor at PROJECT scope, so the moment go_live.sh
+# created its eleven secrets, ef-intake -- which legitimately needs three --
+# could read lob-api-key, phaxio-api-secret and every other vendor credential.
+#
+# COUPLING, on purpose and stated out loud: this list must stay a superset of
+# go_live.sh's SECRET_SPECS. Add a secret there and not here and its consumer
+# gets a hard access denial at revision start (loud, not silent) -- which is
+# the failure direction we want, but it still costs someone twenty minutes.
+log "Secret Manager (names + per-secret access)"
+SECRET_RECORDS="
+google-oauth-client-id|ef-intake ef-agent
+google-oauth-client-secret|ef-intake ef-agent
+google-oauth-refresh-token|ef-intake ef-agent
+phaxio-api-key|ef-agent
+phaxio-api-secret|ef-agent
+lob-api-key|ef-agent
+demo-fax-allowlist|ef-agent
+demo-mail-allowlist|ef-agent
+google-calendar-id|ef-agent
+google-drive-root-folder-id|ef-agent
+google-drive-advocate-email|ef-agent
+"
+while IFS='|' read -r secret readers; do
+  [ -z "$secret" ] && continue
+  if gcloud secrets describe "$secret" >/dev/null 2>&1; then
+    skip "$secret"
   else
-    gcloud billing budgets create --billing-account="$BILLING_ACCOUNT" \
-      --display-name="everyfront-guard" --budget-amount=150USD \
-      --threshold-rule=percent=0.33 --threshold-rule=percent=0.66 \
-      --threshold-rule=percent=0.90 --threshold-rule=percent=1.0 >/dev/null 2>&1 \
-      && ok "budget alerts at 33/66/90/100% of \$150" \
-      || printf '    \033[33mwarn\033[0m budget create failed (needs billing.budgets.create) -- set it in the console\n'
+    gcloud secrets create "$secret" --replication-policy=automatic >/dev/null
+    ok "$secret (empty -- go_live.sh adds the version)"
   fi
-else
-  printf '    \033[33mwarn\033[0m BILLING_ACCOUNT unset, skipping budget alerts\n'
-fi
+  _policy="$(gcloud secrets get-iam-policy "$secret" --format='value(bindings.members)' 2>/dev/null || true)"
+  for reader in $readers; do
+    email="${reader}@${PROJECT_ID}.iam.gserviceaccount.com"
+    case "$_policy" in
+      *"$email"*) continue ;;
+    esac
+    if gcloud secrets add-iam-policy-binding "$secret" \
+         --member="serviceAccount:${email}" \
+         --role="roles/secretmanager.secretAccessor" >/dev/null 2>&1; then
+      ok "  accessor: $reader -> $secret"
+    else
+      warn "could not grant $reader accessor on $secret -- its consumer revision will fail to start"
+    fi
+  done
+done <<< "$SECRET_RECORDS"
 
-# ---------------------------------------------------------------- dead-letter alerting
-# §2.3 requires handlers tolerate redelivery, but a poison message that
-# exhausts max-delivery-attempts (5, set above) and lands in `dead-letter`
-# must not then vanish silently. `ef-dead-letter` gives it somewhere to land;
-# without this alert nothing ever looks at that somewhere -- confirmed live
-# 2026-08-25: `ef-dead-letter` sat with zero subscribers reading it and zero
-# monitoring policies of any kind on the project, so a dead-lettered message
-# would sit unnoticed until its 7-day retention silently dropped it. This is
-# the "something would notice" half of WO4/WO6 task 4.
-log "Dead-letter alerting"
+# ---------------------------------------------------------- notification channel
+# ONE email channel, shared by the budget alerts and the dead-letter alert
+# policy below. It used to be created inside the dead-letter section, which ran
+# after the budget -- which is why the live budget had `notificationsRule: {}`
+# (confirmed 2026-08-26) and depended entirely on Google's default "everyone
+# with a Billing Account Admin/User role gets mail" behaviour. That default is
+# real but invisible: nothing in the project named a recipient, so nobody could
+# tell by reading the config whether a $150 overrun would reach a human.
+log "Notification channel"
+CHANNEL_NAME=""
+ALERT_EMAIL="${ALERT_EMAIL:-$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1)}"
 gcloud components install alpha --quiet >/dev/null 2>&1 || true
 if ! gcloud alpha monitoring channels list --format='value(name)' >/dev/null 2>&1; then
-  printf '    \033[33mwarn\033[0m gcloud alpha monitoring is unavailable (managed install?) -- set up a dead-letter alert by hand\n'
+  warn "gcloud alpha monitoring unavailable (managed install?) -- budget and dead-letter alerts will name no recipient"
 else
-  ALERT_EMAIL="${ALERT_EMAIL:-$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1)}"
   CHANNEL_NAME="$(gcloud alpha monitoring channels list \
     --filter='displayName="everyfront-ops-email"' --format='value(name)' 2>/dev/null | head -1)"
   if [[ -n "$CHANNEL_NAME" ]]; then
