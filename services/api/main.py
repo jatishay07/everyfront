@@ -270,6 +270,11 @@ async def inject_bill(req: InjectBillRequest) -> dict:
         # complete (see api_core/agent_core_client.py's docstring for why).
         publish(config.TOPIC_CASE_DOCUMENT_ADDED, {"case_id": case_id, "doc_id": doc_id})
 
+    # NOTE: the publishes above and this synchronous batch call are two routes
+    # to the same work. agent-core dedupes on `doc:{case_id}:{doc_id}` so the
+    # cascade runs once per document regardless of which arrives first -- see
+    # its /pubsub/document-added handler. Without that, this endpoint produced
+    # four cascades for a three-document case.
     try:
         pipeline_result = await agent_core_process_documents(case_id, doc_ids)
     except httpx.HTTPError as exc:
