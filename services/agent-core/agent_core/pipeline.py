@@ -328,11 +328,11 @@ def _log_patient_statements(case_id: str, case: dict, stated: dict) -> None:
         return
     patient = case.get("patient") or {}
     reconciliation = statedfacts.reconcile(patient, stated)
-    gaps = {
-        field: record
-        for field, record in facts.items()
-        if field not in patient or patient.get(field) in (None, "", [])
-    }
+    # `overlay`'s own `filled` IS the set of gaps a statement is speaking
+    # into -- taken from there rather than re-deriving "what counts as empty"
+    # a second time, which is how two copies of one rule start to drift.
+    _, filled = statedfacts.overlay(patient, stated)
+    gaps = {field: facts[field] for field in filled}
 
     if gaps:
         _log(
