@@ -117,7 +117,10 @@ def test_a_failed_attachment_is_retried_on_redelivery_not_skipped_as_duplicate(m
         f"success; publish attempts={len(published)}"
     )
     assert result[0]["gcs_uri"] == "gs://b/bill.pdf"
-    assert fake_dedupe.released == [("gmail_attachment", "msg_1:bill.pdf")]
+    # `0` is the MIME part's immutable `partId`, now part of the claim key --
+    # see gmail_client.extract_pdf_attachments for why a filename alone was
+    # dropping same-named attachments.
+    assert fake_dedupe.released == [("gmail_attachment", "msg_1:0:bill.pdf")]
 
 
 def test_a_successful_attachment_stays_claimed_so_the_retry_does_not_double_publish(monkeypatch):

@@ -61,7 +61,15 @@ def process_new_message(message_id: str) -> list[dict]:
 
     published: list[dict] = []
     for att in gmail_client.extract_pdf_attachments(message):
-        claim_key = f"{message_id}:{att['filename']}"
+        # Keyed on the MIME part's immutable id, NOT on the filename. Two
+        # attachments in one email may share a name (`scan.pdf` twice is
+        # ordinary), and a filename-keyed claim dropped the second one with no
+        # event, no object and no log -- see
+        # `gmail_client.extract_pdf_attachments` for the full account and
+        # `tests/test_gmail_transport.py` for the regression that found it.
+        # The filename stays in the key so a renamed re-send is still treated
+        # as a new document rather than an already-seen part.
+        claim_key = f"{message_id}:{att['part_id']}:{att['filename']}"
         if not dedupe.claim("gmail_attachment", claim_key):
             continue
 
@@ -71,7 +79,7 @@ def process_new_message(message_id: str) -> list[dict]:
         try:
             content = gmail_client.fetch_attachment_bytes(message_id, att["attachment_id"])
             gcs_uri = storage.upload_attachment(
-                message_id, att["filename"], content, att["mime_type"]
+                message_id, att["part_id"], att["filename"], content, att["mime_type"]
             )
             doc_id = hashlib.sha1(claim_key.encode()).hexdigest()[:16]  # noqa: S324 -- id derivation
             # `raw_text` travels IN the event, extracted here rather than left for

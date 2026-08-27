@@ -169,20 +169,51 @@ def fetch_message(message_id: str) -> dict:
 
 def extract_pdf_attachments(message: dict) -> list[dict]:
     """Walk a message's MIME tree; return PDF parts as
-    `[{"filename", "attachment_id", "mime_type"}, ...]`.
+    `[{"filename", "attachment_id", "mime_type", "part_id"}, ...]`.
 
     WO1 scopes this to PDF bills specifically ("stores raw attachments (PDF
     bills) to GCS") -- a non-PDF attachment (e.g. an inline signature image)
     is intentionally skipped rather than stored, to keep the intake surface
     matching what the rest of the pipeline expects to classify.
+
+    `part_id` IS LOAD-BEARING, not decoration. Nothing else about an
+    attachment is unique within a message:
+
+    * `filename` is not. One email can carry two PDFs both called `bill.pdf`
+      or `scan.pdf` -- two pages exported by the same scanner app, a bill and
+      a re-send, a forward that re-attaches. Before this field existed, the
+      pipeline keyed both its dedupe claim and its GCS object path on
+      `(message_id, filename)`, so the SECOND such attachment was claimed as
+      an already-seen duplicate and dropped: no event, no GCS object, no
+      error, no log line. A legal document vanished and the handler returned
+      `{"status": "ok"}`. That is HANDOFF.md's bug pattern exactly -- reported
+      success while doing nothing -- and it was found by the transport-level
+      harness in `tests/test_gmail_transport.py`, not by the 53 tests that
+      passed over it.
+    * `attachmentId` is unique but NOT stable: Gmail's own reference describes
+      it only as an id "that can be retrieved in a separate
+      `messages.attachments.get` request", with no stability guarantee across
+      calls, and it is known to differ between two `messages.get` responses
+      for the same message. Keying dedupe on it would turn a redelivery into
+      a duplicate publish -- trading a silent drop for a silent double.
+
+    `partId` is the one identifier Gmail documents as stable: "The immutable
+    ID of the message part" (`MessagePart.partId`, Gmail v1 discovery
+    document, google-api-python-client 2.199.0). It is unique within a
+    message and identical on every fetch of it.
+
+    The walk position (`"0"`, `"1"`, `"1.0"`, ...) is used as a fallback if a
+    response ever omits `partId`, so this never depends on a field being
+    present -- the fallback reproduces the same numbering Gmail itself uses.
     """
     out: list[dict] = []
 
     def _is_pdf(filename: str, mime_type: str) -> bool:
         return filename.lower().endswith(".pdf") or mime_type == "application/pdf"
 
-    def walk(parts: list[dict]) -> None:
-        for part in parts or []:
+    def walk(parts: list[dict], prefix: str = "") -> None:
+        for index, part in enumerate(parts or []):
+            part_id = part.get("partId") or f"{prefix}{index}"
             filename = part.get("filename") or ""
             body = part.get("body", {})
             mime_type = part.get("mimeType", "")
@@ -192,14 +223,16 @@ def extract_pdf_attachments(message: dict) -> list[dict]:
                         "filename": filename,
                         "attachment_id": body["attachmentId"],
                         "mime_type": mime_type or "application/pdf",
+                        "part_id": part_id,
                     }
                 )
             if part.get("parts"):
-                walk(part["parts"])
+                walk(part["parts"], prefix=f"{part_id}.")
 
     payload = message.get("payload", {})
     walk(payload.get("parts", []))
-    # Single-part messages carry the attachment directly on the payload.
+    # Single-part messages carry the attachment directly on the payload, whose
+    # own `partId` is `""` -- the fallback numbering gives it `"0"`.
     if (
         not payload.get("parts")
         and payload.get("filename")
