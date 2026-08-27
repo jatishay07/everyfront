@@ -127,12 +127,27 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         },
     )
 
+    # Was anything actually transmitted? Taken from RELAY's own result, never
+    # inferred from the vendor-id string -- see delivery_bridge.simulated_flag
+    # for the contract and for why an absent key is not `False`. Computed once
+    # here so `filings/{filing_id}`, the Filer's fact, and the audit-trail
+    # narration in pipeline.run_filer cannot disagree with each other.
+    simulated = delivery_bridge.simulated_flag(vendor_result)
+
     filing = {
         "case_id": case_id,
         "front": front,
         "channel": channel,
         "vendor_id": vendor_result.get("vendor_id"),
         "status": vendor_result.get("status", "sent"),
+        # HANDOFF.md defect #6, second half: `simulated` lived only inside
+        # `proof` (and only when RELAY happened to send it), so the top-level
+        # `filings/{filing_id}` record a judge, the dashboard and
+        # `GET /cases/{id}` all read said `status: "sent"` with no flag at
+        # all next to it. Always present, always a bool -- a filing record
+        # that omits this is a filing record that overclaims by default.
+        "simulated": simulated,
+        "vendor": vendor_result.get("vendor"),
         "form_id": form_id,
         "pdf_bytes": len(pdf_bytes),
         "doc_id": doc_id,
@@ -153,7 +168,7 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
         "channel": channel,
         "vendor_id": vendor_result.get("vendor_id"),
         "status": filing["status"],
-        "simulated": bool(vendor_result.get("simulated")),
+        "simulated": simulated,
         "form_id": form_id,
         "pdf_bytes": len(pdf_bytes),
         "doc_id": doc_id,
@@ -171,4 +186,9 @@ async def run(case_id: str, case: dict, front: str, filing_id: str | None = None
     # `front` is safe to keep: it is never renamed and names no case.
     prompt = f"Report the filing just sent for the {front!r} front. Call get_filer_result first."
     turn = await common.run_agent_turn(NAME, config.GEMINI_MODEL, INSTRUCTION, [tool], prompt)
-    return {"fact": fact, "filing_id": filing_id, **turn}
+    # `pdf` rides back OUT of the fact, not inside it: `fact` is handed to the
+    # model as a tool result and is hashed into `events/{event_id}`
+    # (pipeline._fact_event_id), and neither wants 190KB of PDF. It is here so
+    # `pipeline.run_filer` can mirror this exact artifact to the case's Drive
+    # folder AFTER the filing is durable -- see there.
+    return {"fact": fact, "filing_id": filing_id, "pdf": pdf_bytes, **turn}

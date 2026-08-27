@@ -40,6 +40,29 @@ def health() -> dict:
     return {"ok": True}
 
 
+def normalize_filing(filing: dict) -> dict:
+    """Guarantee `filings/{filing_id}.simulated` is present and a bool on the
+    way out of this API.
+
+    `agent_core.agents.filer` now always writes it (see that module and
+    `agent_core.delivery_bridge.simulated_flag`), but every filing already in
+    Firestore was written before it did -- live, `GET /cases/{id}` returns
+    records reading `{"status": "sent", "vendor_id": "fake-ltr_...",
+    "simulated": None}`. A judge, the dashboard and `web/lib/types.ts` all
+    read this field; `None` renders as nothing at all, which on a banner
+    saying "12 filings sent" is indistinguishable from a live send.
+
+    A record that does not say is not evidence that it was real, so a missing
+    or null flag reads as SIMULATED -- the direction that can only understate
+    what this system did. `False` is only ever reported when the delivery
+    layer explicitly said the send was live, which is what makes a real
+    Phaxio/Lob send report itself truthfully the day a key exists. Same rule,
+    same reasoning, as `simulated_flag` on the write side.
+    """
+    value = filing.get("simulated")
+    return {**filing, "simulated": value if isinstance(value, bool) else True}
+
+
 # --- contract §3.3 --------------------------------------------------------
 
 
@@ -57,7 +80,7 @@ def get_case(case_id: str) -> dict:
         raise HTTPException(status_code=404, detail=f"no such case {case_id!r}")
     case["documents"] = store.list_documents(case_id)
     case["events"] = store.list_events(case_id)
-    case["filings"] = store.list_filings(case_id)
+    case["filings"] = [normalize_filing(f) for f in store.list_filings(case_id)]
     return case
 
 
@@ -101,6 +124,13 @@ def dashboard_stats() -> dict:
     cases = store.list_cases()
     today = datetime.now(UTC).date()
     week_from_now = today + timedelta(days=7)
+    # One query for the whole caseload, indexed by (case, front) -- the same
+    # enumeration `filings_sent` walks below, so `filings_simulated` is by
+    # construction a SUBSET of it and the banner's own arithmetic holds.
+    simulated_by_front = {
+        (f.get("case_id"), f.get("front")): normalize_filing(f)["simulated"]
+        for f in store.list_filings()
+    }
 
     open_cases = 0
     hospital_eins: set[str] = set()
@@ -110,6 +140,7 @@ def dashboard_stats() -> dict:
     ppdr_eligible = 0
     unlawful_denials_flagged = 0
     filings_sent = 0
+    filings_simulated = 0
 
     for case in cases:
         if case.get("status") != "closed":
@@ -147,6 +178,12 @@ def dashboard_stats() -> dict:
                 ppdr_eligible += 1
             if front.get("status") == "filed":
                 filings_sent += 1
+                # Absent from `filings/` entirely (a front marked filed whose
+                # filing record is missing) is as unknown as an absent flag,
+                # and unknown is not "live" -- `.get(key, True)`, never
+                # `.get(key)`. That default is the whole of defect #6.
+                if simulated_by_front.get((case.get("case_id"), front.get("front")), True):
+                    filings_simulated += 1
 
     return {
         "open_cases": open_cases,
@@ -158,6 +195,31 @@ def dashboard_stats() -> dict:
         "unlawful_denials_flagged": unlawful_denials_flagged,
         "audit_findings_cents": sum(c.get("audit_findings_cents") or 0 for c in cases),
         "filings_sent": filings_sent,
+        # ADDED (SWARM WO8) -- a §3.4 amendment, see the HANDOFF in this PR.
+        # How many of `filings_sent` did not actually leave the building.
+        #
+        # WHY A SEPARATE COUNT RATHER THAN RELABELLING `filings_sent`.
+        # Three candidate designs; only one is true in both directions:
+        #   (a) `"12 filings sent"` with a literal "(simulated)" baked into
+        #       the number -- makes it a string, breaks web/lib/types.ts's
+        #       `filings_sent: number` and every arithmetic check PROOF runs,
+        #       and hardcodes a claim that becomes a LIE the moment a real
+        #       Lob key exists.
+        #   (b) count only live sends, so `filings_sent` reads 0 today --
+        #       underclaims just as badly as 12 overclaims. Those filings are
+        #       real work: the actual CMS PPDR form and two hospitals' own FAP
+        #       applications, rendered, allowlist-checked, sent through the
+        #       vendor interface, with proof recorded. Zero is not what
+        #       happened either, and §4 persona 8 rewards accuracy, not
+        #       modesty.
+        #   (c) two integers. The banner renders "12 filings sent
+        #       (12 simulated)"; a judge can do the subtraction; and NOTHING
+        #       has to be re-labelled the day a vendor key is minted -- the
+        #       simulated count simply falls, on its own, truthfully, because
+        #       both numbers are derived from what the delivery layer reports
+        #       per filing rather than from a constant somebody has to
+        #       remember to change.
+        "filings_simulated": filings_simulated,
         # The honest headline: this whole caseload ran without a human doing
         # the work. See BUILD_PLAYBOOK.md §7.
         "human_hours": 0,
