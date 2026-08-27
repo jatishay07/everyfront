@@ -4,6 +4,21 @@
 
 Gmail push webhook -> Pub/Sub -> GCS. Publishes case.document.added.
 
+**The email BODY travels too, as a `patient_statement` document** (SWARM,
+2026-08-27). A bill's attachments say nothing about household size -- no §3.1
+document type can -- and without it charity care cannot be screened at all,
+so a patient writing "Household of three, I make about $32,000 a year" in the
+covering note was the difference between a $2,625 bill being erased and $210
+of duplicate-billing findings. The body is stored to GCS beside the
+attachments and published on the same topic with `doc_type:
+"patient_statement"`, which is the ONE type an intake event may declare (a
+PDF's type is Gemma's to classify). It is published only when the same
+message also carries a PDF -- INBOX admits every newsletter the demo account
+receives, and a body-per-email would open a case per email. Downstream it is
+a strictly weaker source than any document: see
+`services/agent-core/agent_core/statedfacts.py` and the §3.1 HANDOFF in
+`services/agent-core/README.md`.
+
 ---
 
 ## Making Gmail intake live (WO7)
@@ -81,6 +96,13 @@ pipeline will not pick it up.
    own header comment for the full list of optional vars (Phaxio/Lob keys,
    fax/mail allowlists, Calendar id, Drive folder/advocate email) and exactly
    what stays off without each one.
+
+   **If you set `PHAXIO_API_KEY`, set `PHAXIO_API_MODE=test` too.** A Phaxio
+   test key carries no `test_` prefix (unlike Lob's), so
+   `packages/delivery/delivery/vendors/credentials.py` refuses to send at all
+   without it -- "silence is refusal". Both now ride through to
+   `ef-agent-core`; before this they did not, and the fax channel would have
+   stayed dead while reporting a simulated send.
 
 3. **(One command, not optional) Verify, stage by stage.**
    ```

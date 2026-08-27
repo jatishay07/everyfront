@@ -20,6 +20,7 @@ from collections.abc import Callable
 from datetime import date
 
 from .. import config, genai_client
+from ..factmerge import PATIENT_STATEMENT_TYPE as STATEMENT_TYPE
 from . import common
 
 NAME = "reader"
@@ -255,13 +256,203 @@ def _scrub_ungrounded(extraction: dict) -> tuple[dict, list[str]]:
     return cleaned, scrubbed
 
 
+# --- the patient's own words (§3.1 `patient_statement`) --------------------
+
+STATEMENT_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "household_size": {
+            "type": "integer",
+            "nullable": True,
+            "description": "The number of people in the patient's household, ONLY if the "
+            "message states it as a present fact about themselves (e.g. 'Household of "
+            "three' -> 3, 'there are 4 of us' -> 4). Null for anything hypothetical, "
+            "conditional, future or past ('my son MIGHT move back in', 'if my mother comes "
+            "to live with us', 'we USED to be five'), and null if you are counting people "
+            "mentioned in the message yourself rather than reading a number the patient "
+            "stated. Never infer a household from who is mentioned.",
+        },
+        "household_size_quote": {
+            "type": "string",
+            "nullable": True,
+            "description": "The words that state the household size, copied from the "
+            "message CHARACTER FOR CHARACTER -- not paraphrased, not re-punctuated, not "
+            "re-cased. Null whenever household_size is null.",
+        },
+        "annual_income_cents": {
+            "type": "integer",
+            "nullable": True,
+            "description": "The patient's CURRENT annual household income in integer cents "
+            "('about $32,000 a year' -> 3200000), only if the message states it. Null for a "
+            "past income ('I used to make $80,000 before I got sick'), an hourly or monthly "
+            "figure you would have to multiply out yourself, an amount that is plainly the "
+            "BILL rather than an income, or an expectation about the future.",
+        },
+        "annual_income_quote": {
+            "type": "string",
+            "nullable": True,
+            "description": "The words stating the income, copied character for character. "
+            "Null whenever annual_income_cents is null.",
+        },
+        "uninsured_self_pay": {
+            "type": "boolean",
+            "nullable": True,
+            "description": "True ONLY if the message explicitly says the patient has no "
+            "insurance or is paying out of pocket ('I'm uninsured and paying out of "
+            "pocket'). False ONLY if it explicitly says they HAVE coverage (names a plan or "
+            "insurer). Null if the message does not say either way, if the coverage is "
+            "described as lapsed/pending/uncertain, or if you would have to infer it.",
+        },
+        "coverage_quote": {
+            "type": "string",
+            "nullable": True,
+            "description": "The words stating the coverage status, copied character for "
+            "character. Null whenever uninsured_self_pay is null.",
+        },
+    },
+}
+
+STATEMENT_INSTRUCTION = (
+    "The text below is the body of an email a patient wrote to a medical-bill advocacy "
+    "service. It is NOT a document -- it is a person talking, and what they say will be "
+    "treated as their own unverified claim, never as a proven fact. Your job is to record "
+    "ONLY what they explicitly stated about themselves, and to return null for everything "
+    "else. Prefer null over a guess in every ambiguous case: a null costs the patient one "
+    "clarifying question, while a wrong number could erase or fail to erase thousands of "
+    "dollars of debt on a claim they never made. Do not infer, do not average, do not count "
+    "people up yourself, do not convert a maybe into a yes. A sentence about what MIGHT "
+    "happen, what USED to be true, or what someone is CONSIDERING states nothing. For every "
+    "field you do fill in, you MUST also return the accompanying *_quote field containing "
+    "the exact words from the message that state it, copied character for character -- if "
+    "you cannot point to the words, you do not have the fact, and both fields must be null. "
+    "Extract nothing about the hospital, the bill, the amount owed or the dates; those come "
+    "from documents, not from what someone remembers."
+)
+
+#: (value field -> quote field) for every fact a statement may carry.
+_STATEMENT_QUOTE_FIELDS: dict[str, str] = {
+    "household_size": "household_size_quote",
+    "annual_income_cents": "annual_income_quote",
+    "uninsured_self_pay": "coverage_quote",
+}
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_for_quote_match(text: str) -> str:
+    """Fold the differences a faithful quote may still carry: case, and the
+    line wrapping a mail client inserts mid-sentence.
+
+    Nothing else is folded. Punctuation and digits are left exactly as they
+    are, because a quote that differs from the message in a DIGIT is not a
+    quote, and that is the case this check exists to catch.
+    """
+    return _WHITESPACE_RE.sub(" ", text).strip().casefold()
+
+
+def _ground_statement(extraction: dict, doc_text: str) -> tuple[dict, list[str]]:
+    """Drop every stated fact whose quote does not literally appear in the
+    message. Returns `(cleaned, names_of_ungrounded_fields)`.
+
+    THIS IS THE GUARANTEE, not the prompt. `_scrub_ungrounded` above exists
+    because a well-instructed model still emitted `00-0000000` for an EIN it
+    could not read; the same posture applies with more force here, because
+    prose has no fixed shape to sanity-check a number against. Requiring the
+    model to point at the words it read a fact from, and then CHECKING that
+    those words are in the message, turns "did it make this up?" from a
+    judgement into a substring test. A fabricated fact has to come with a
+    fabricated quote, and a fabricated quote is not in the text.
+
+    Both the value and its quote are dropped together, so downstream sees a
+    field the message never mentioned -- which `agent_core.statedfacts` and
+    `rules.fronts` already handle as "not stated", the honest degrade.
+    """
+    if not isinstance(extraction, dict) or "_extraction_error" in extraction:
+        return extraction, []
+
+    cleaned = dict(extraction)
+    haystack = _normalize_for_quote_match(doc_text or "")
+    ungrounded: list[str] = []
+    for value_field, quote_field in _STATEMENT_QUOTE_FIELDS.items():
+        if cleaned.get(value_field) is None:
+            cleaned.pop(quote_field, None)
+            continue
+        quote = cleaned.get(quote_field)
+        grounded = (
+            isinstance(quote, str)
+            and quote.strip() != ""
+            and _normalize_for_quote_match(quote) in haystack
+        )
+        if not grounded:
+            cleaned[value_field] = None
+            cleaned.pop(quote_field, None)
+            ungrounded.append(value_field)
+    return cleaned, ungrounded
+
+
+async def _run_statement(case_id: str, doc_id: str, doc_text: str) -> dict:
+    """Reader for a `patient_statement`: extraction only, no classification.
+
+    Gemma is deliberately NOT called. Its job (§4 persona 5 WO1) is to sort an
+    incoming document into one of the six §3.1 evidence types, and an email
+    body is none of them -- asking would spend a model call to obtain a label
+    that must then be thrown away, and the answer would be a wrong one that
+    some later reader of the audit trail takes seriously. `services/intake`
+    knows what this is because it put the bytes there itself; there is no
+    classification question to answer.
+    """
+    raw_extraction = genai_client.gemini_extract_json(
+        doc_text, STATEMENT_SCHEMA, STATEMENT_INSTRUCTION
+    )
+    extraction, ungrounded = _ground_statement(raw_extraction, doc_text)
+    return {
+        "case_id": case_id,
+        "doc_id": doc_id,
+        "label": STATEMENT_TYPE,
+        "gemma_raw": "",
+        "gemma_error": None,
+        "gemma_fallback_used": False,
+        "extraction": extraction,
+        "scrubbed_fields": [],
+        # Distinct from `scrubbed_fields` on purpose: that names a value that
+        # LOOKED like a fabricated placeholder; this names a value the model
+        # could not point to words for. Two different failures deserve two
+        # different sentences in the audit trail.
+        "ungrounded_fields": ungrounded,
+        "citations": [],
+    }
+
+
 async def run(case_id: str, doc_id: str, doc_text: str, doc_type_hint: str | None = None) -> dict:
     """Classify + extract one document. Returns the fact + LLM narration.
 
     `doc_text` is the best-effort text for this document (OCR/plaintext -- how
     it got there is RELAY's intake pipeline; this agent only ever sees text).
+
+    A `patient_statement` (the body of the email the bill came attached to)
+    takes a different route entirely -- see `_run_statement`. It is prose, not
+    a document; nothing it says may become a canonical fact
+    (`factmerge.PATIENT_STATEMENT_TYPE`), and every value it yields must be
+    backed by a verbatim quote from the message itself.
     """
     model = config.GEMINI_MODEL
+    if doc_type_hint == STATEMENT_TYPE:
+        fact = await _run_statement(case_id, doc_id, doc_text)
+        tool = common.make_fact_tool(
+            "get_reader_result",
+            "Return what the patient stated in their own words, and what could not be "
+            "grounded in the message text.",
+            fact,
+        )
+        prompt = (
+            f"The patient's own message (document id={doc_id}) was just added. Call "
+            "get_reader_result and state what they claimed about themselves, making clear "
+            "that these are their own unverified statements rather than facts from a "
+            "document."
+        )
+        turn = await common.run_agent_turn(NAME, model, INSTRUCTION, [tool], prompt)
+        return {"fact": fact, **turn}
+
     classification = genai_client.gemma_classify(doc_text)
     raw_extraction = genai_client.gemini_extract_json(
         doc_text, EXTRACTION_SCHEMA, EXTRACTION_INSTRUCTION

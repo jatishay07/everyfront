@@ -70,6 +70,14 @@ declare -a SECRET_SPECS=(
   "google-oauth-refresh-token:GOOGLE_OAUTH_REFRESH_TOKEN"
   "phaxio-api-key:PHAXIO_API_KEY"
   "phaxio-api-secret:PHAXIO_API_SECRET"
+  # Not a credential, but it rides the same rail because it gates one: a
+  # Phaxio TEST key carries no `test_` prefix (unlike Lob's), so
+  # packages/delivery/delivery/vendors/credentials.py refuses to send at all
+  # unless PHAXIO_API_MODE is exactly `test` -- "silence is refusal". Without
+  # this entry a real Phaxio key would be wired into ef-agent-core and the fax
+  # channel would stay dead, reporting a simulated send. Requested by RELAY in
+  # packages/delivery/README.md.
+  "phaxio-api-mode:PHAXIO_API_MODE"
   "lob-api-key:LOB_API_KEY"
   "demo-fax-allowlist:DEMO_FAX_ALLOWLIST"
   "demo-mail-allowlist:DEMO_MAIL_ALLOWLIST"
@@ -166,6 +174,7 @@ for pair in "GOOGLE_OAUTH_CLIENT_ID:google-oauth-client-id" \
             "GOOGLE_OAUTH_REFRESH_TOKEN:google-oauth-refresh-token" \
             "PHAXIO_API_KEY:phaxio-api-key" \
             "PHAXIO_API_SECRET:phaxio-api-secret" \
+            "PHAXIO_API_MODE:phaxio-api-mode" \
             "LOB_API_KEY:lob-api-key" \
             "DEMO_FAX_ALLOWLIST:demo-fax-allowlist" \
             "DEMO_MAIL_ALLOWLIST:demo-mail-allowlist" \

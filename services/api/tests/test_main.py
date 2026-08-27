@@ -469,3 +469,116 @@ def test_inject_bill_publishes_only_after_agent_core_has_processed(monkeypatch):
         f"published before agent-core had processed anything: {order}"
     )
     assert order[1:] == [("publish", d) for d in doc_ids]
+
+
+# --------------------------------------------------------------------------
+# Provisional determinations and the §3.4 banner (SWARM, patient-stated facts)
+#
+# `fronts[].provisional` marks a determination that rests on something the
+# patient stated in the email their bill was attached to -- most often
+# household size, which no §3.1 document type can carry -- rather than on any
+# document. The determination is real arithmetic over STATUTE's own
+# thresholds and the case detail shows all of it; what it is NOT is an
+# eligibility this system has established, and §3.4 is the banner a judge
+# does arithmetic against (§7: "true, visible, and unfakeable").
+#
+# This project has been here before. The last correction to these numbers
+# made them smaller because it made them true (hospitals 5 -> 4,
+# charity_eligible 6 -> 5, filings_sent 11 -> 7). "4 charity-eligible" has to
+# mean four patients screened on evidence, not three plus a sentence somebody
+# typed into an email.
+# --------------------------------------------------------------------------
+def test_a_provisional_front_is_not_counted_as_eligible(monkeypatch):
+    c, s = client_with_store(monkeypatch)
+    s.create_case(
+        "c1",
+        {
+            "bill": {"hospital_ein": "94-0562680", "amount_cents": 262_500},
+            "fronts": [
+                {
+                    "front": "charity_care",
+                    "applicable": True,
+                    "status": "open",
+                    "provisional": True,
+                    "rests_on": ["household_size"],
+                },
+                {
+                    "front": "ppdr",
+                    "applicable": True,
+                    "status": "open",
+                    "provisional": True,
+                    "rests_on": ["insured"],
+                },
+            ],
+        },
+    )
+    stats = c.get("/dashboard/stats").json()
+    assert stats["charity_eligible"] == 0
+    assert stats["ppdr_eligible"] == 0
+
+
+def test_an_established_front_is_still_counted(monkeypatch):
+    """The other direction, and the one that matters more: nothing about the
+    provisional rule may quietly stop counting a determination that DID rest
+    on documents. A front written before `provisional` existed has no such
+    key at all, and must read as established."""
+    c, s = client_with_store(monkeypatch)
+    s.create_case(
+        "c1",
+        {
+            "bill": {"hospital_ein": "94-0562680", "amount_cents": 262_500},
+            "fronts": [
+                {
+                    "front": "charity_care",
+                    "applicable": True,
+                    "status": "open",
+                    "provisional": False,
+                    "rests_on": [],
+                },
+                # No `provisional` key at all -- the pre-existing shape.
+                {"front": "ppdr", "applicable": True, "status": "open"},
+            ],
+        },
+    )
+    stats = c.get("/dashboard/stats").json()
+    assert stats["charity_eligible"] == 1
+    assert stats["ppdr_eligible"] == 1
+
+
+def test_a_provisional_case_still_shows_its_whole_determination(monkeypatch):
+    """Not counted is not hidden. `GET /cases/{id}` returns the front with its
+    provenance intact -- `provisional`, `rests_on`, the reason that leads with
+    where the number came from -- and `patient_stated` beside `patient`, so a
+    judge can see exactly which of the two a determination is standing on."""
+    c, s = client_with_store(monkeypatch)
+    s.create_case(
+        "c1",
+        {
+            "patient": {"state": "CA", "insured": False, "annual_income_cents": 3_200_000},
+            "patient_stated": {
+                "household_size": {
+                    "value": 3,
+                    "quote": "Household of three",
+                    "source": "patient_statement",
+                    "source_doc_id": "body01",
+                }
+            },
+            "fronts": [
+                {
+                    "front": "charity_care",
+                    "applicable": True,
+                    "status": "open",
+                    "provisional": True,
+                    "rests_on": ["household_size"],
+                    "reason": "[PROVISIONAL -- rests on the patient's own statement] ...",
+                }
+            ],
+        },
+    )
+    case = c.get("/cases/c1").json()
+    assert "household_size" not in case["patient"]
+    assert case["patient_stated"]["household_size"]["quote"] == "Household of three"
+    front = case["fronts"][0]
+    assert front["provisional"] is True
+    assert front["rests_on"] == ["household_size"]
+    assert front["reason"].startswith("[PROVISIONAL")

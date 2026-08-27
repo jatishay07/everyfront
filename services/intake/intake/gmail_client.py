@@ -13,7 +13,7 @@ from __future__ import annotations
 import base64
 import os
 
-from . import state
+from . import state, text_extract
 from .google_auth import load_user_credentials
 
 # read-only is sufficient: watching for new mail and reading messages/
@@ -240,6 +240,85 @@ def extract_pdf_attachments(message: dict) -> list[dict]:
     ):
         walk([payload])
     return out
+
+
+def _decode_body_data(data: str) -> str:
+    """Gmail's URL-safe base64 body payload -> text. `""` on anything that
+    does not decode, never an exception: a single mis-encoded part must not
+    cost a patient the attachments that arrived in the same email.
+
+    `validate=True`, unlike `fetch_attachment_bytes` below. Without it,
+    `b64decode` silently DISCARDS every character outside the alphabet and
+    decodes whatever is left -- so a corrupt or wrongly-typed body part comes
+    back as a short run of mojibake rather than as an error, and that mojibake
+    would be stored to GCS and published as prose a patient wrote. An
+    extraction over garbage is exactly the input that invites a model to
+    compose something plausible. Whitespace is stripped first because it is
+    the one thing a transport may legitimately insert into a base64 payload.
+    """
+    try:
+        compact = "".join(data.split())
+        padded = compact + "=" * (-len(compact) % 4)
+        # `b64decode(altchars=...)`, not `urlsafe_b64decode`, only because the
+        # urlsafe wrapper does not expose `validate`.
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+        return raw.decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 -- a bad body part must not take down intake
+        return ""
+
+
+def extract_body_text(message: dict) -> str:
+    """The human-written body of the email, as plain text. `""` if it has none.
+
+    WHY THIS EXISTS. Everything this system knew about a case came off a PDF,
+    and the one fact no PDF can carry is household size: a pay stub states an
+    employee's earnings, never who else lives in their home (see
+    `agent_core.factmerge.UNSOURCEABLE_PATIENT_FACTS`). Patients state it in
+    the covering email -- "Household of three, I make about $32,000 a year" --
+    and this service threw that sentence away. It is not evidence in the sense
+    a document is, and the pipeline treats it as strictly weaker (see the
+    `patient_statement` document type in `agent_core.factmerge`); but
+    discarding it entirely means the one input that decides whether a $2,625
+    bill is erased can never reach the system at all.
+
+    Prefers `text/plain` and falls back to a de-tagged `text/html`, both
+    walked depth-first: multipart/alternative carries the same body twice and
+    the plain part is the one the patient actually typed. A part with a
+    `filename` is an attachment, not the body, and is skipped -- that is
+    `extract_pdf_attachments`'s job and double-counting it here would publish
+    a bill's text a second time as if the patient had written it.
+
+    NOT DE-QUOTED. A reply carries the quoted thread beneath it, and stripping
+    that is a heuristic ("On ... wrote:" in a dozen locales) that can silently
+    eat real prose. The downstream extraction is grounded on a verbatim quote
+    that must appear in this text (`agent_core.agents.reader`), so extra text
+    can only ever cost tokens -- never manufacture a fact.
+    """
+    plain: list[str] = []
+    html: list[str] = []
+
+    def walk(part: dict) -> None:
+        if part.get("filename"):
+            return
+        mime = (part.get("mimeType") or "").lower()
+        data = (part.get("body") or {}).get("data")
+        if data:
+            if mime.startswith("text/plain"):
+                plain.append(_decode_body_data(data))
+            elif mime.startswith("text/html"):
+                html.append(_decode_body_data(data))
+        for child in part.get("parts") or []:
+            walk(child)
+
+    walk(message.get("payload") or {})
+    for candidate in plain:
+        if candidate.strip():
+            return candidate.strip()[: text_extract.MAX_CHARS]
+    for candidate in html:
+        converted = text_extract.html_to_text(candidate)
+        if converted:
+            return converted
+    return ""
 
 
 def fetch_attachment_bytes(message_id: str, attachment_id: str) -> bytes:

@@ -172,9 +172,32 @@ def dashboard_stats() -> dict:
             # charity_care once screen_eligibility says free/discounted, so
             # "applicable" already IS "eligible" here -- no separate
             # eligibility field exists in the §3.1 fronts[] shape.
-            if front.get("front") == "charity_care" and front.get("applicable"):
+            #
+            # PROVISIONAL FRONTS ARE NOT COUNTED (SWARM, patient-stated
+            # facts). `fronts[].provisional` marks a determination that rests
+            # on something the patient stated in their email and no document
+            # establishes -- most often household size, which no §3.1 document
+            # type can carry. The determination is real arithmetic and it is
+            # shown in full on the case; what it is not is an eligibility this
+            # system has established, and §3.4 is the banner a judge does
+            # arithmetic against. This project's own history is the argument:
+            # the last correction to these numbers made them smaller because
+            # it made them true, and "4 charity-eligible" must mean four
+            # patients screened on evidence, not three plus a sentence
+            # somebody typed. Understating is the only safe direction here --
+            # the case detail carries the whole provisional determination, so
+            # nothing is hidden, it is merely not aggregated as fact.
+            if (
+                front.get("front") == "charity_care"
+                and front.get("applicable")
+                and not front.get("provisional")
+            ):
                 charity_eligible += 1
-            if front.get("front") == "ppdr" and front.get("applicable"):
+            if (
+                front.get("front") == "ppdr"
+                and front.get("applicable")
+                and not front.get("provisional")
+            ):
                 ppdr_eligible += 1
             if front.get("status") == "filed":
                 filings_sent += 1
