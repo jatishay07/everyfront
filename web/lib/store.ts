@@ -93,7 +93,15 @@ export function approveFiling(
     ts,
     agent: "filer",
     action: channel === "fax" ? "Filed via fax" : "Filed via certified mail",
-    detail: `Sent in test mode via ${channel === "fax" ? "Phaxio" : "Lob"}. Vendor confirmation ${vendorId}.`,
+    // Leads with the same code-built `[SIMULATED]` prefix the real Filer
+    // writes (agent_core.pipeline._SIMULATED_PREFIX), so an operator clicking
+    // Approve in mock mode reads the same sentence they would read live —
+    // and so the prefix survives truncation in the activity feed either way.
+    detail:
+      `[SIMULATED] no live fax/mail vendor credentials are configured, so this filing was ` +
+      `recorded by a fake vendor -- the form was really rendered and really passed the ` +
+      `destination allowlist, but nothing left the building. Vendor confirmation ${vendorId} ` +
+      `via ${channel === "fax" ? "Phaxio" : "Lob"}.`,
     citations: [f.citation],
   });
 
@@ -104,8 +112,15 @@ export function approveFiling(
     channel,
     vendor_id: vendorId,
     status: "sent",
+    // No mock send reaches a vendor, so this is `true` and never a parameter.
+    // The value the UI reads comes from the delivery layer's own report; the
+    // mock delivery layer's honest report is "simulated".
+    simulated: true,
+    vendor: "fake",
     proof:
-      channel === "fax" ? { phaxio_id: vendorId } : { lob_id: vendorId, tracking: null },
+      channel === "fax"
+        ? { phaxio_id: vendorId, simulated: true }
+        : { lob_id: vendorId, tracking: null, simulated: true },
     sent_at: ts,
   });
 

@@ -18,6 +18,7 @@
  */
 import { CITE } from "./citations";
 import { dateOnlyToUTCms } from "./format";
+import { isSimulated } from "./simulated";
 import type {
   CaseDetail,
   CaseEvent,
@@ -968,8 +969,21 @@ function filing(
     status,
     proof:
       channel === "fax"
-        ? { phaxio_id: vendor_id }
-        : { lob_id: vendor_id, tracking: `9400 1000 0000 ${dayOffset.toString().padStart(4, "0")} 0000 00` },
+        ? { phaxio_id: vendor_id, simulated: true }
+        : {
+            lob_id: vendor_id,
+            tracking: `9400 1000 0000 ${dayOffset.toString().padStart(4, "0")} 0000 00`,
+            simulated: true,
+          },
+    // Every filing in this corpus is `simulated: true`, and it stays that way
+    // even though a `false` here would make the mixed-mode banner easier to
+    // eyeball. No mock send has ever reached a vendor, so marking one live
+    // would be exactly the overclaim the whole flag exists to stop — the mock
+    // API is not exempt from §0.6 just because its data is synthetic. The
+    // mixed case is proven by `describeFilingMix` being total over it, not by
+    // seeding a lie here.
+    simulated: true,
+    vendor: "fake",
     sent_at: addDaysTime(dayOffset, 10, 0),
   };
 }
@@ -986,6 +1000,7 @@ export function computeStats(cases: CaseDetail[]): DashboardStats {
   let charityEligible = 0;
   let ppdrEligible = 0;
   let filingsSent = 0;
+  let filingsSimulated = 0;
   let auditFindings = 0;
   let totalBilled = 0;
   let unlawful = 0;
@@ -1005,7 +1020,14 @@ export function computeStats(cases: CaseDetail[]): DashboardStats {
       }
     }
     for (const filing of c.filings) {
-      if (filing.status === "sent" || filing.status === "delivered") filingsSent += 1;
+      if (filing.status === "sent" || filing.status === "delivered") {
+        filingsSent += 1;
+        // Incremented inside the same branch that increments `filingsSent`,
+        // so `filings_simulated` is by construction a SUBSET of it and the
+        // banner's arithmetic holds — the same structure, for the same
+        // reason, as services/api/main.py's stats loop.
+        if (isSimulated(filing)) filingsSimulated += 1;
+      }
     }
   }
 
@@ -1019,6 +1041,7 @@ export function computeStats(cases: CaseDetail[]): DashboardStats {
     unlawful_denials_flagged: unlawful,
     audit_findings_cents: auditFindings,
     filings_sent: filingsSent,
+    filings_simulated: filingsSimulated,
     human_hours: 0,
   };
 }

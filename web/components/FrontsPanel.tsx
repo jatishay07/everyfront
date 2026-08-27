@@ -1,41 +1,66 @@
 import { formatDate } from "@/lib/format";
-import type { Front } from "@/lib/types";
+import { isSimulated } from "@/lib/simulated";
+import type { Filing, Front } from "@/lib/types";
 import { ApproveFilingButton } from "./ApproveFilingButton";
 import { CitationChip } from "./CitationChip";
 import { DeadlineChip } from "./DeadlineChip";
 import { FrontBadge } from "./FrontBadge";
+import { SimulatedBadge } from "./SimulatedBadge";
 
 export function FrontsPanel({
   caseId,
   fronts,
+  filings = [],
   onApproved,
 }: {
   caseId: string;
   fronts: Front[];
+  /** The case's filings, so a front badged "Filed" can say what kind of
+   *  filed. `status: "filed"` on its own is the same unqualified claim the
+   *  banner was making, one level down. */
+  filings?: Filing[];
   onApproved: () => void;
 }) {
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      {fronts.map((f) => (
-        <div
-          key={f.front}
-          className={`flex flex-col gap-3 rounded-xl border px-4 py-3.5 ${
-            f.applicable ? "border-ink-800 bg-ink-900/50" : "border-ink-800/60 bg-ink-950/40"
-          }`}
-        >
-          <div className="flex items-center justify-between gap-2">
-            <FrontBadge front={f} />
-            <DeadlineChip deadline={f.deadline} />
-          </div>
-          <p className="text-sm leading-relaxed text-ink-300">{f.reason}</p>
-          <CitationChip citation={f.citation} />
-          {f.applicable && f.status === "open" && (
-            <div className="pt-1">
-              <ApproveFilingButton caseId={caseId} front={f.front} onApproved={onApproved} />
+      {fronts.map((f) => {
+        // Match on front, the way services/api's stats endpoint indexes
+        // `simulated_by_front`. A front marked filed whose filing record is
+        // missing entirely is as unknown as an absent flag, and `isSimulated`
+        // resolves both the same way: unknown is not evidence of a live send.
+        const filing = filings.find((x) => x.front === f.front);
+        const filed = f.status === "filed" || f.status === "won" || f.status === "lost";
+        return (
+          <div
+            key={f.front}
+            className={`flex flex-col gap-3 rounded-xl border px-4 py-3.5 ${
+              f.applicable ? "border-ink-800 bg-ink-900/50" : "border-ink-800/60 bg-ink-950/40"
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <FrontBadge front={f} />
+              <DeadlineChip deadline={f.deadline} />
             </div>
-          )}
-        </div>
-      ))}
+            <p className="text-sm leading-relaxed text-ink-300">{f.reason}</p>
+            <CitationChip citation={f.citation} />
+            {f.applicable && filed && (
+              <div className="flex items-center gap-2">
+                <SimulatedBadge simulated={isSimulated(filing)} />
+                {filing?.vendor_id && (
+                  <span className="truncate font-mono text-[11px] text-ink-500" title={filing.vendor_id}>
+                    {filing.vendor_id}
+                  </span>
+                )}
+              </div>
+            )}
+            {f.applicable && f.status === "open" && (
+              <div className="pt-1">
+                <ApproveFilingButton caseId={caseId} front={f.front} onApproved={onApproved} />
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

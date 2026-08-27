@@ -146,8 +146,58 @@ export interface Filing {
   channel: FilingChannel;
   vendor_id: string;
   status: "sent" | "delivered" | "failed";
-  proof: { phaxio_id?: string; lob_id?: string; tracking?: string | null };
+  proof: {
+    phaxio_id?: string;
+    lob_id?: string;
+    tracking?: string | null;
+    /** RELAY's own per-send report, mirrored into `proof` by the Filer. The
+     *  top-level `simulated` below is the field to read; this one is the
+     *  vendor result it was derived from. */
+    simulated?: boolean | null;
+    vendor?: string;
+  };
   sent_at: string;
+
+  /**
+   * Did this filing actually leave the building?
+   *
+   * `services/api/main.py::normalize_filing` guarantees a bool on the way out
+   * of `GET /cases/{id}`, and `agent_core.agents.filer` always writes one
+   * now — so the contract says "required boolean". It is typed OPTIONAL here
+   * anyway, deliberately:
+   *
+   *   - The currently deployed API revision predates `normalize_filing`
+   *     (verified 2026-08-26: `curl {API_BASE}/cases/ef-2026-0001` returns
+   *     filings with `proof.simulated: true` and NO top-level key at all).
+   *     Typing it `boolean` would tell TypeScript a field is always there
+   *     that today's production API does not send, and `undefined` would
+   *     then render as nothing — which next to `status: "sent"` is
+   *     indistinguishable from a real send. That is the exact defect this
+   *     field exists to close.
+   *   - Firestore also still holds pre-flag records written as
+   *     `{"simulated": null}`.
+   *
+   * Optional forces every read through `lib/simulated.ts::isSimulated`,
+   * which resolves absent/null to SIMULATED — the same direction, for the
+   * same reason, as the backend's `normalize_filing` and
+   * `delivery_bridge.simulated_flag`. A record that does not say it was real
+   * is not evidence that it was.
+   */
+  simulated?: boolean | null;
+
+  /** Present on every live filing (verified via curl), absent from the §3.1
+   *  shape. `vendor: "fake"` is RELAY's recording stub. Never sniffed to
+   *  decide `simulated` — see delivery_bridge.simulated_flag's own note on
+   *  why a vendor-id prefix is not a fact about transmission. */
+  vendor?: string;
+  form_id?: string;
+  doc_id?: string;
+  gcs_uri?: string | null;
+  pdf_bytes?: number;
+  /** Where this WOULD have gone: fax number or provider name, allowlist-
+   *  checked before the send. Worth showing next to a simulated filing —
+   *  it's what makes "test mode" a description rather than an excuse. */
+  real_destination?: string | null;
 }
 
 export interface Hospital {
@@ -188,5 +238,21 @@ export interface DashboardStats {
   unlawful_denials_flagged: number;
   audit_findings_cents: number;
   filings_sent: number;
+  /**
+   * How many of `filings_sent` were test-mode sends — a §3.4 amendment
+   * (services/api/main.py, SWARM WO8). By construction a SUBSET of
+   * `filings_sent`, never a replacement for it: those filings are real work
+   * (the real CMS PPDR form, two hospitals' own FAP applications, rendered,
+   * allowlist-checked, proof recorded), they just didn't reach a vendor.
+   *
+   * Optional for the same reason as `Filing.simulated`: the deployed API
+   * revision does not send this key yet (verified 2026-08-26 —
+   * `curl {API_BASE}/dashboard/stats` returns the ten §3.4 keys and no
+   * eleventh). Read it through `lib/simulated.ts::simulatedFilingCount`,
+   * which resolves an absent count to `filings_sent` rather than to 0. Zero
+   * simulated is a claim that every filing was really transmitted, and an
+   * API that never mentioned the subject has not made that claim.
+   */
+  filings_simulated?: number;
   human_hours: number;
 }

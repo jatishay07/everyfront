@@ -3,10 +3,12 @@
 import Link from "next/link";
 import { getCase } from "@/lib/api";
 import { formatUSD } from "@/lib/format";
+import { describeFilingMix, isSimulated } from "@/lib/simulated";
 import { usePolling } from "@/hooks/usePolling";
 import { CitationChip } from "./CitationChip";
 import { DocumentGallery } from "./DocumentGallery";
 import { EventTimeline } from "./EventTimeline";
+import { FilingsList } from "./FilingsList";
 import { DeadlineLadder, FrontsPanel } from "./FrontsPanel";
 
 const POLL_MS = 5000;
@@ -57,6 +59,13 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
     );
   }
 
+  // Counted off this case's own `filings[]`, exactly as the banner counts off
+  // the caseload's — same helper, same "absent means simulated" default, so
+  // the case page and the Command Center can never tell a judge two different
+  // stories about the same send.
+  const filings = c.filings ?? [];
+  const filingMix = describeFilingMix(filings.length, filings.filter((f) => isSimulated(f)).length);
+
   return (
     <div className="space-y-8">
       <div>
@@ -105,7 +114,7 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
         <SummaryStat label="Billed" value={formatUSD(c.bill?.amount_cents ?? 0)} />
         <SummaryStat label="Savings found" value={formatUSD(c.savings_found_cents ?? 0)} accent="green" />
         <SummaryStat label="Audit findings" value={formatUSD(c.audit_findings_cents ?? 0)} accent="amber" />
-        <SummaryStat label="Filings sent" value={String(c.filings?.length ?? 0)} />
+        <SummaryStat label="Filings sent" value={String(filings.length)} note={filingMix.note} />
       </div>
 
       <section>
@@ -120,7 +129,12 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
           <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-400">
             Fronts
           </h2>
-          <FrontsPanel caseId={c.case_id} fronts={c.fronts ?? []} onApproved={refresh} />
+          <FrontsPanel
+            caseId={c.case_id}
+            fronts={c.fronts ?? []}
+            filings={filings}
+            onApproved={refresh}
+          />
         </section>
 
         <section>
@@ -135,9 +149,16 @@ export function CaseDetailView({ caseId }: { caseId: string }) {
 
       <section>
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-400">
+          Filings
+        </h2>
+        <FilingsList filings={filings} />
+      </section>
+
+      <section>
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-ink-400">
           Documents
         </h2>
-        <DocumentGallery documents={c.documents ?? []} />
+        <DocumentGallery documents={c.documents ?? []} filings={filings} />
       </section>
     </div>
   );
@@ -147,10 +168,15 @@ function SummaryStat({
   label,
   value,
   accent = "default",
+  note,
 }: {
   label: string;
   value: string;
   accent?: "default" | "green" | "amber";
+  /** Same treatment as the Command Center's banner tile: the qualifier sits
+   *  beside the numeral, never under it, so the row's height is fixed and a
+   *  5s poll that changes it cannot reflow the page below. */
+  note?: string;
 }) {
   const color =
     accent === "green" ? "text-green-300" : accent === "amber" ? "text-amber-300" : "text-ink-100";
@@ -159,7 +185,12 @@ function SummaryStat({
       <span className="block text-[11px] font-medium uppercase tracking-wide text-ink-400">
         {label}
       </span>
-      <span className={`tabular block text-lg font-bold ${color}`}>{value}</span>
+      <span className="flex h-7 items-center gap-2">
+        <span className={`tabular shrink-0 text-lg font-bold ${color}`}>{value}</span>
+        {note && (
+          <span className="min-w-0 truncate text-[11px] font-medium text-ink-400">{note}</span>
+        )}
+      </span>
     </div>
   );
 }
