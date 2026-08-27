@@ -190,61 +190,21 @@ class CaseStore:
         """
         return self._write_fronts(case_id, lambda fronts: _merge_front(fronts, front))
 
-    #: Front statuses owned by the filing lifecycle, not by analysis. Once a
-    #: front reaches one of these, only the approve/file path may move it --
-    #: see `upsert_front_from_analysis`.
-    _FILING_OWNED_STATUSES = ("filing", "filed", "won", "lost")
-
-    def upsert_front_from_analysis(self, case_id: str, front: dict) -> dict | None:
-        """Upsert a front that re-analysis just recomputed, WITHOUT reopening
-        one the filing lifecycle already owns.
-
-        Analysis is not a one-shot: every `case.document.added` re-runs the
-        whole hierarchy. `select_fronts` is pure and has no idea anything has
-        been filed, so it returns every applicable front at status "open", and
-        a plain `upsert_front` wrote that "open" straight over a sibling
-        front's "filed".
-
-        Observed live on ef-2026-0007, 2026-08-26: audit filed 08:40:46 and
-        charity_care 08:40:51, then re-analyses at 08:40:50 and 08:40:52-54
-        reset both to "open" -- while `filings/` held three real "sent"
-        records. ppdr kept its "filed" only because its filing happened to
-        land after the last re-analysis. This is a second, independent cause
-        of the same symptom PROOF reported, and no transaction can fix it:
-        both writers are behaving exactly as written.
-
-        CORRECTION 2026-08-26 (FORGE, same day): this docstring originally
-        claimed those re-analyses were triggered by the Filer -- "the Filer
-        itself stores each generated PDF as a document, so filing a front
-        publishes an event that re-analyses the case." That is FALSE and it
-        was my inference from the timestamps above, not something I checked.
-        `filer.run` calls `store.add_document`, which publishes nothing; the
-        only publishers of `case.document.added` in this repo are
-        `services/api`'s `/demo/inject_bill` and `services/intake`. The real
-        driver is a Pub/Sub redelivery storm: `ef-document-added` has a 60s
-        ack deadline against a cascade that takes 60-130s, so the same
-        document is redelivered mid-cascade and up to five concurrent
-        cascades run per document -- which is also why the interleaving
-        *looked* filing-triggered.
-
-        The behaviour this method guards against is real and the fix stands.
-        The mechanism I attributed it to was wrong, and a wrong mechanism in
-        a docstring is how the next person debugs the wrong thing.
-
-        Everything else on the entry -- applicable, reason, citation,
-        deadline -- IS analysis's to update, and still is.
-        """
-
-        def _apply(fronts: list[dict]) -> list[dict]:
-            for existing in fronts:
-                if existing.get("front") == front.get("front"):
-                    merged = dict(front)
-                    if existing.get("status") in self._FILING_OWNED_STATUSES:
-                        merged["status"] = existing["status"]
-                    return _merge_front(fronts, merged)
-            return _merge_front(fronts, front)
-
-        return self._write_fronts(case_id, _apply)
+    #: `upsert_front_from_analysis` deliberately does NOT live here.
+    #:
+    #: REMOVED 2026-08-27 (FORGE). services/api never runs an analysis pass --
+    #: `grep -rn upsert_front_from_analysis services/api` found only its own
+    #: definition -- so this was dead code sitting in a file whose header
+    #: promises it stays byte-for-byte identical to agent-core's. That promise
+    #: is exactly what makes a dead copy dangerous: the next person to change
+    #: the rule in agent-core reasonably updates this one too, and the two
+    #: silently diverge in a method nothing calls until something does.
+    #:
+    #: `rules_bridge.py` was the same shape (526a8b9): a reimplementation
+    #: nothing was supposed to reach, which then answered from a stale copy
+    #: after the real bug was fixed upstream. agent-core's
+    #: `write_analysis`/`upsert_front_from_analysis` are the only writers of
+    #: analysis output, and agent-core is the only service that computes it.
 
     def set_front_status(self, case_id: str, front: str, status: str) -> dict | None:
         """Atomically set one front's `status`, touching nothing else.

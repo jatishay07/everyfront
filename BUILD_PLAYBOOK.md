@@ -106,6 +106,17 @@ cases/{case_id}
            # unlawful_denials_flagged but nothing in this shape let you derive it.
            # Set by check_denial_lawfulness (26 CFR 1.501(r)-4(b)(3)).
   savings_found_cents: int
+  analysis_evidence: [str]               # AMENDED 2026-08-27 (FORGE): NOT a
+           # cross-agent field -- services/agent-core's own bookkeeping, like
+           # `_processed_messages/`. One `{doc_id}#{content-hash}` token per
+           # classified document that the analysis pass which wrote the current
+           # values actually consumed. A pass whose evidence is a STRICT SUBSET
+           # of what is recorded here is refused inside the same transaction.
+           # Documented rather than hidden because it appears in GET /cases:
+           # three concurrent cascades for a 3-attachment email used to race,
+           # and the LAST to finish won regardless of what it had read, so a
+           # cascade that never saw the pay stub overwrote one that had.
+           # Consumers may ignore it; nothing outside agent-core may write it.
   created_at, updated_at
 
 cases/{case_id}/documents/{doc_id}
