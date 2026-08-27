@@ -36,8 +36,9 @@ def test_process_new_message_stores_attachment_and_publishes_event(monkeypatch):
     monkeypatch.setattr(
         pipeline.storage,
         "upload_attachment",
-        lambda mid, filename, content, ct: (
-            uploads.append((mid, filename, content, ct)) or f"gs://bucket/intake/{mid}/{filename}"
+        lambda mid, part_id, filename, content, ct: (
+            uploads.append((mid, part_id, filename, content, ct))
+            or f"gs://bucket/intake/{mid}/{part_id}/{filename}"
         ),
     )
     published = []
@@ -50,12 +51,15 @@ def test_process_new_message_stores_attachment_and_publishes_event(monkeypatch):
     assert len(result) == 1
     event = result[0]
     assert event["case_id"] == "case-thread_1"
-    assert event["gcs_uri"] == "gs://bucket/intake/msg_1/bill.pdf"
+    # The `0` segment is the MIME part's immutable `partId` -- see
+    # storage.py's docstring for why the object path is per-PART, not
+    # per-filename.
+    assert event["gcs_uri"] == "gs://bucket/intake/msg_1/0/bill.pdf"
     assert event["filename"] == "bill.pdf"
     # WO7: not a real PDF, so extraction degrades to "" rather than raising --
     # the field is still present so agent-core has something to key off of.
     assert event["raw_text"] == ""
-    assert uploads == [("msg_1", "bill.pdf", b"%PDF fake bytes", "application/pdf")]
+    assert uploads == [("msg_1", "0", "bill.pdf", b"%PDF fake bytes", "application/pdf")]
     assert published == [("case.document.added", event)]
 
 
