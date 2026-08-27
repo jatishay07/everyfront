@@ -58,7 +58,7 @@ def _stub_cascade(monkeypatch, sink: list, *, delay: float = 0.0):
     """Stub out everything below the handler: this suite is about routing and
     dedupe, not about re-testing the hierarchy (test_pipeline.py does that)."""
 
-    async def _cascade(case_id, case):
+    async def _cascade(case_id, case, pass_evidence=None):
         sink.append(case_id)
         if delay:
             await asyncio.sleep(delay)

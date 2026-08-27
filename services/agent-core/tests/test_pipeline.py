@@ -11,9 +11,10 @@ in test_rules_bridge.py, test_genai_client.py, etc.) or hitting a real model.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import copy
 
-from _helpers import async_fake_turn, make_memory_store
+from _helpers import async_fake_turn, fake_turn, make_memory_store
 from agent_core import pipeline
 from agent_core.agents import auditor, clock, filer, lookup, reader, strategist, verifier
 
@@ -650,9 +651,9 @@ def test_process_case_documents_runs_readers_concurrently_and_cascade_once(monke
     cascade_calls = []
     orig_run_cascade = pipeline._run_cascade
 
-    async def counting_cascade(case_id, case):
+    async def counting_cascade(case_id, case, pass_evidence=None):
         cascade_calls.append(case_id)
-        return await orig_run_cascade(case_id, case)
+        return await orig_run_cascade(case_id, case, pass_evidence)
 
     monkeypatch.setattr(pipeline, "_run_cascade", counting_cascade)
     _patch_agents_for_cascade(
@@ -820,7 +821,7 @@ def test_a_newly_uploaded_income_proof_still_re_runs_the_analysis(monkeypatch):
 
 
 def _counting_cascade(sink: list):
-    async def _cascade(case_id, case):
+    async def _cascade(case_id, case, pass_evidence=None):
         sink.append(case_id)
         return {}
 
@@ -1647,3 +1648,218 @@ def test_the_resolved_hospital_record_backfills_a_state_no_document_stated(monke
     assert case["patient"]["state"] == "CA"
     backfill = next(e for e in s.list_events("c1") if e["action"] == "state_from_hospital_record")
     assert "no document on file stated a state" in backfill["detail"]
+
+
+# ---------------------------------------------------------------------------
+# CONVERGENCE. After every cascade for a case has finished, in ANY completion
+# order, the stored analysis must equal what a single cascade over all the
+# documents produces.  (Live defect: case-1a043f4f4ae26dfa, 2026-08-26.)
+# ---------------------------------------------------------------------------
+
+#: Names the pass a coroutine belongs to, so the gated stubs below can hold a
+#: SPECIFIC cascade at a SPECIFIC step. A contextvar and not an argument
+#: because `strategist.run(case_id, case)` is the contract and a task gets its
+#: own copy of the context at creation, which is exactly the per-cascade scope
+#: needed here.
+_ANALYSIS_PASS: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "analysis_pass", default=None
+)
+
+_SUTTER = {
+    "ein": "94-0562680",
+    "name": "Sutter Bay Hospitals",
+    "nonprofit": True,
+    "state": "CA",
+    "free_care_max_fpl_pct": 200,
+    "discounted_care_max_fpl_pct": 400,
+}
+
+
+def _patch_real_strategist_and_auditor(monkeypatch, *, reached=None, release=None, seen=None):
+    """Strategist and Auditor that really depend on what their pass can see.
+
+    Strategist calls STATUTE's own `select_fronts` through
+    `strategist._facts`, so the reason text is the real thing -- which is the
+    point: the live symptom was a reason that named the wrong missing fact.
+    Auditor counts the line items actually on file at the moment it runs.
+
+    `reached`/`release` turn each pass's Strategist into a gate, making the
+    interleaving explicit rather than lucky.
+    """
+    monkeypatch.setattr(
+        auditor,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "case_id": case_id,
+                "findings": [],
+                "total_findings_cents": 100_00 * len(auditor.all_line_items(case_id)),
+                "line_items_examined": len(auditor.all_line_items(case_id)),
+                "denial_check": {"ran": False, "reason": "no denial letter"},
+                "source": {},
+            },
+            "audited",
+        ),
+    )
+
+    async def _strategist(case_id, case):
+        fact = strategist._facts(case_id, case)  # STATUTE's select_fronts, for real
+        name = _ANALYSIS_PASS.get()
+        if name is not None and seen is not None:
+            seen[name] = fact["fronts"]
+        if name is not None and reached is not None:
+            reached[name].set()
+            await release[name].wait()
+        return fake_turn(fact, "strategy")
+
+    monkeypatch.setattr(strategist, "run", _strategist)
+
+
+def test_concurrent_cascades_converge_whatever_order_they_finish_in(monkeypatch):
+    """THE property test for the stale-cascade race, and the one that matters.
+
+    An email with three PDFs publishes three `case.document.added` events;
+    `ef-document-added`'s 60s ack deadline against a 60-130s cascade adds
+    redeliveries on top. Every one of them runs the whole
+    Reader -> merge -> Lookup -> {Clock, Auditor} -> Strategist pass and ends
+    by writing the entire `fronts[]` reason/applicable set from whatever
+    documents existed when IT started. Last writer wins -- and "last" means
+    last to FINISH, not best informed:
+
+        16:03:22  reader      merge_document_facts  (the bill, alone)
+        16:03:46  strategist  charity_care: "annual household income was not
+                              stated in any document on file..."
+        16:04:01  reader      merge_document_facts  (all three)
+        16:04:30  strategist  charity_care: "household size was not stated..."
+
+    The reason STORED afterwards was the 16:03:46 one, from a pass that never
+    saw the $32,000 pay stub -- while `patient.annual_income_cents` on the same
+    Firestore document read 3,200,000. The case contradicted itself on screen.
+
+    THE INTERLEAVING IS EXPLICIT, not timed. Every pass is held at its own
+    Strategist until all three are in flight, and then released in REVERSE
+    order, so the worst-informed cascade is guaranteed to be the last writer --
+    the exact shape that produced the live defect, made deterministic the way
+    `test_two_concurrent_filings_on_one_case_do_not_clobber_each_other`'s
+    `asyncio.Barrier` made the filing race deterministic.
+
+    THE ASSERTION IS CONVERGENCE, not "the reason looks right": the raced case
+    must end up byte-identical to a case that saw all three documents in ONE
+    cascade. Fronts, savings, audit findings -- everything the pass writes.
+    """
+    # The reference: one cascade, every document present. This is the answer.
+    ref_store = make_memory_store()
+    _seed_merge_case(ref_store, monkeypatch, hospital=_SUTTER)
+    _patch_real_strategist_and_auditor(monkeypatch)
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+    reference = ref_store.get_case("c1")
+
+    # The race: three cascades, one per document, finishing in reverse order.
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch, hospital=_SUTTER)
+    order = ["gfe-only", "gfe+bill", "all-three"]
+    doc_for = dict(zip(order, ["d-gfe", "d-bill", "d-income"], strict=True))
+    seen: dict[str, list] = {}
+
+    async def _drive():
+        reached = {name: asyncio.Event() for name in order}
+        release = {name: asyncio.Event() for name in order}
+        _patch_real_strategist_and_auditor(monkeypatch, reached=reached, release=release, seen=seen)
+
+        async def _pass(name: str):
+            _ANALYSIS_PASS.set(name)
+            return await pipeline.on_document_added("c1", doc_for[name])
+
+        tasks = {}
+        for name in order:  # each cascade reaches its Strategist before the next starts
+            tasks[name] = asyncio.create_task(_pass(name))
+            await reached[name].wait()
+        for name in reversed(order):  # ...and they finish in the opposite order
+            release[name].set()
+            await tasks[name]
+
+    asyncio.run(_drive())
+    raced = s.get_case("c1")
+
+    # The passes really did disagree -- otherwise this test proves nothing.
+    def _charity(fronts):
+        return next(f["reason"] for f in fronts if f["front"] == "charity_care")
+
+    assert _charity(seen["gfe-only"]) != _charity(seen["all-three"])
+    assert "income" in _charity(seen["gfe-only"])
+    assert "household size" in _charity(seen["all-three"])
+
+    assert raced["fronts"] == reference["fronts"], (
+        "the last cascade to finish overwrote a better-informed one: stored "
+        f"{_charity(raced['fronts'])!r}, expected {_charity(reference['fronts'])!r}"
+    )
+    assert raced["savings_found_cents"] == reference["savings_found_cents"]
+    assert raced["audit_findings_cents"] == reference["audit_findings_cents"]
+    assert raced["patient"] == reference["patient"]
+    assert raced["bill"] == reference["bill"]
+
+
+def test_a_superseded_cascade_does_not_narrate_its_stale_answer(monkeypatch):
+    """Half the live symptom was in the activity feed, not just the case:
+    ef-2026-0006's feed carried "annual household income was not stated in any
+    document on file" AFTER the pass that had read the pay stub. A superseded
+    pass logs ONE row saying it was superseded, and none of its conclusions."""
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch, hospital=_SUTTER)
+    order = ["gfe-only", "all-three"]
+    doc_for = {"gfe-only": "d-gfe", "all-three": "d-income"}
+
+    async def _drive():
+        reached = {name: asyncio.Event() for name in order}
+        release = {name: asyncio.Event() for name in order}
+        _patch_real_strategist_and_auditor(monkeypatch, reached=reached, release=release)
+
+        async def _pass(name: str):
+            _ANALYSIS_PASS.set(name)
+            return await pipeline.on_document_added("c1", doc_for[name])
+
+        tasks = {}
+        for name in order:
+            tasks[name] = asyncio.create_task(_pass(name))
+            await reached[name].wait()
+        # The bill is read by neither pass's Reader here; `d-bill` stays
+        # unclassified, so "all-three" is really "the gfe and the pay stub" --
+        # still a strict superset of "gfe-only", which is what matters.
+        for name in reversed(order):
+            release[name].set()
+            await tasks[name]
+
+    asyncio.run(_drive())
+
+    charity_rows = [e for e in s.list_events("c1") if e["action"] == "select_front:charity_care"]
+    stale = [r for r in charity_rows if "annual household income was not stated" in r["detail"]]
+    assert not stale, (
+        "the superseded pass narrated its stale conclusion into the activity feed: "
+        f"{stale[0]['detail'][:120]!r} -- while patient.annual_income_cents on the same case "
+        f"reads {s.get_case('c1')['patient'].get('annual_income_cents')!r}"
+    )
+    assert len(charity_rows) == 1
+    # ...and the dropped pass is not silent about having been dropped.
+    assert "analysis_superseded" in [e["action"] for e in s.list_events("c1")]
+
+
+def test_re_analysis_with_the_same_documents_writes_and_logs_nothing_new(monkeypatch):
+    """§2.3 from the other side. The guard must not turn a redelivery into a
+    no-op that behaves DIFFERENTLY from the first run: identical evidence is
+    not weaker evidence, so the pass writes -- and, writing the same values,
+    changes nothing and adds no rows."""
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch, hospital=_SUTTER)
+    _patch_real_strategist_and_auditor(monkeypatch)
+
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+    first_case = s.get_case("c1")
+    first_events = [e["event_id"] for e in s.list_events("c1")]
+
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+    second_case = s.get_case("c1")
+
+    assert [e["event_id"] for e in s.list_events("c1")] == first_events
+    for field in ("fronts", "savings_found_cents", "audit_findings_cents", "patient", "bill"):
+        assert second_case[field] == first_case[field]
+    assert "analysis_superseded" not in [e["action"] for e in s.list_events("c1")]
