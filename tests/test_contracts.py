@@ -29,6 +29,9 @@ EXPECTED_TOPICS = {
 # §3.4 the demo stat object -- "the 40% criterion on screen".
 EXPECTED_STAT_KEYS = {
     "open_cases",
+    # AMENDED 2026-08-26 (FORGE), with §3.4 -- see the playbook for why two
+    # integers rather than relabelling filings_sent.
+    "filings_simulated",
     "hospitals",
     "deadlines_this_week",
     "total_billed_cents",

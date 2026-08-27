@@ -158,8 +158,16 @@ POST /cases                       {patient, bill} → case_id           # ADDED 
 {"open_cases": 0, "hospitals": 0, "deadlines_this_week": 0,
  "total_billed_cents": 0, "charity_eligible": 0, "ppdr_eligible": 0,
  "unlawful_denials_flagged": 0, "audit_findings_cents": 0,
- "filings_sent": 0, "human_hours": 0}
+ "filings_sent": 0, "filings_simulated": 0, "human_hours": 0}
 ```
+AMENDED 2026-08-26 (FORGE): `filings_simulated` added. Every filing this system
+has made is a recording stub, but the object said only `filings_sent`, so the
+banner read "12 filings sent" with nothing on screen distinguishing a stub from
+a certified letter. Two integers rather than a relabelled one: a judge can
+subtract, `filings_sent` stays a number for `web/lib/types.ts` and PROOF's
+arithmetic checks, and neither figure needs rewording the day a real vendor key
+exists -- the simulated count falls on its own. Absent or null reads as
+SIMULATED, never live (defect #6: "every filing was reported as a live send").
 
 ## 3.5 Rules engine public API (packages/rules — DOMAIN implements, AGENTS consume)
 ```python

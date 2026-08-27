@@ -87,6 +87,13 @@ def test_dashboard_stats_has_every_contract_3_4_key(api):
         "unlawful_denials_flagged",
         "audit_findings_cents",
         "filings_sent",
+        # AMENDED 2026-08-26 (FORGE, on PROOF's behalf -- flagged by the agent
+        # that added it). Every filing so far is a recording stub, and the
+        # banner said only "filings sent". This assertion is `==`, not `<=`,
+        # deliberately: an UNEXPECTED key is drift worth failing on. That
+        # strictness is why it had to be updated here in the same change that
+        # added the key, rather than discovered live during a rehearsal.
+        "filings_simulated",
         "human_hours",
     }
     assert set(stats) == expected_keys
