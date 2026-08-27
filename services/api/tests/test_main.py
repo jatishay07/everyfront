@@ -173,11 +173,15 @@ def test_get_case_filings_always_carry_a_simulated_flag(monkeypatch):
         vendor_id="fake-ltr_1f0ae92e7adb44e3946e",
     )
 
+    # And the shape the live API actually returned before this change, with an
+    # explicit null rather than an absent key.
+    _seed_filing(s, "f2", case_id="c1", front="ppdr", channel="fax", status="sent", simulated=None)
+
     filings = c.get("/cases/c1").json()["filings"]
 
-    assert len(filings) == 1
-    assert filings[0]["simulated"] is True, filings[0]
-    assert filings[0]["simulated"] is not None
+    assert len(filings) == 2
+    assert all(f["simulated"] is True for f in filings), filings
+    assert all(f["simulated"] is not None for f in filings)
 
 
 def test_get_case_reports_a_genuinely_live_filing_as_not_simulated(monkeypatch):

@@ -657,14 +657,14 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             "citation": denial_check["citation"],
         }
     store.update_case(case_id, case_patch)
-
-    # Calendar LAST, and only after every Firestore write above has landed:
-    # the case's analysis is the product, the calendar is a copy of it. See
-    # `_sync_deadlines_to_calendar` -- it cannot raise, so nothing below this
-    # line depends on Google being reachable.
-    await _sync_deadlines_to_calendar(case_id, case, cf["deadlines"])
-
     pubsub_client.publish(config.TOPIC_CASE_ANALYSIS_COMPLETE, {"case_id": case_id})
+
+    # Calendar LAST: after every Firestore write AND after the analysis is
+    # announced. The case is the product; the calendar is a copy of it, so
+    # nothing -- not a subscriber, not `/demo/inject_bill`'s caller -- waits
+    # on Google to learn that the analysis finished. See
+    # `_sync_deadlines_to_calendar`; it cannot raise.
+    await _sync_deadlines_to_calendar(case_id, case, cf["deadlines"])
 
     return {
         "lookup": lookup_turn,
