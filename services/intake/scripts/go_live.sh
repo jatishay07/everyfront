@@ -78,6 +78,41 @@ declare -a SECRET_SPECS=(
   "google-drive-advocate-email:GOOGLE_DRIVE_ADVOCATE_EMAIL"
 )
 
+# Reject a value that is obviously not the credential it claims to be, BEFORE
+# writing it to Secret Manager and redeploying two services around it.
+#
+# 2026-08-26: the three placeholders from a copy-pasted command
+# (`GOOGLE_OAUTH_CLIENT_ID='<client id>'`) were accepted verbatim, stored as
+# secret versions, wired into ef-intake and ef-agent-core, and only surfaced
+# four steps later as an opaque HTTP 500 from the watch call, whose real cause
+# -- `invalid_client: The OAuth client was not found.` -- was buried in a Cloud
+# Run traceback. Single quotes meant the shell never complained. Every one of
+# those steps was working correctly; the input was wrong and nothing looked at
+# it. Checking shape here costs nothing and turns a 4-step debug into one line.
+_reject() { die "GOOGLE_OAUTH_$1 $2
+  Re-run with the real values printed by mint_oauth_token.py. Do not paste the
+  placeholder text from a command template."; }
+
+if [ -n "${GOOGLE_OAUTH_CLIENT_ID:-}" ]; then
+  case "$GOOGLE_OAUTH_CLIENT_ID" in
+    *[[:space:]]*|*'<'*|*'>'*) _reject CLIENT_ID "contains whitespace or angle brackets -- that is placeholder text, not a client id." ;;
+    *.apps.googleusercontent.com) : ;;
+    *) _reject CLIENT_ID "does not end in .apps.googleusercontent.com, so Google's token endpoint will reject it with 'invalid_client: The OAuth client was not found.'" ;;
+  esac
+fi
+if [ -n "${GOOGLE_OAUTH_CLIENT_SECRET:-}" ]; then
+  case "$GOOGLE_OAUTH_CLIENT_SECRET" in
+    *[[:space:]]*|*'<'*|*'>'*) _reject CLIENT_SECRET "contains whitespace or angle brackets -- that is placeholder text, not a client secret." ;;
+  esac
+  [ "${#GOOGLE_OAUTH_CLIENT_SECRET}" -lt 20 ] && _reject CLIENT_SECRET "is only ${#GOOGLE_OAUTH_CLIENT_SECRET} characters; a real one is far longer."
+fi
+if [ -n "${GOOGLE_OAUTH_REFRESH_TOKEN:-}" ]; then
+  case "$GOOGLE_OAUTH_REFRESH_TOKEN" in
+    *[[:space:]]*|*'<'*|*'>'*) _reject REFRESH_TOKEN "contains whitespace or angle brackets -- that is placeholder text, not a refresh token." ;;
+  esac
+  [ "${#GOOGLE_OAUTH_REFRESH_TOKEN}" -lt 30 ] && _reject REFRESH_TOKEN "is only ${#GOOGLE_OAUTH_REFRESH_TOKEN} characters; a real one is far longer."
+fi
+
 log "Secret Manager (agreement §2.4 -- no secrets in code, ever)"
 declare -a CREATED_SECRETS=()
 for spec in "${SECRET_SPECS[@]}"; do
