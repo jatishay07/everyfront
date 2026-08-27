@@ -106,6 +106,17 @@ cases/{case_id}
            # unlawful_denials_flagged but nothing in this shape let you derive it.
            # Set by check_denial_lawfulness (26 CFR 1.501(r)-4(b)(3)).
   savings_found_cents: int
+  analysis_evidence: [str]               # AMENDED 2026-08-27 (FORGE): NOT a
+           # cross-agent field -- services/agent-core's own bookkeeping, like
+           # `_processed_messages/`. One `{doc_id}#{content-hash}` token per
+           # classified document that the analysis pass which wrote the current
+           # values actually consumed. A pass whose evidence is a STRICT SUBSET
+           # of what is recorded here is refused inside the same transaction.
+           # Documented rather than hidden because it appears in GET /cases:
+           # three concurrent cascades for a 3-attachment email used to race,
+           # and the LAST to finish won regardless of what it had read, so a
+           # cascade that never saw the pay stub overwrote one that had.
+           # Consumers may ignore it; nothing outside agent-core may write it.
   created_at, updated_at
 
 cases/{case_id}/documents/{doc_id}
@@ -158,8 +169,16 @@ POST /cases                       {patient, bill} → case_id           # ADDED 
 {"open_cases": 0, "hospitals": 0, "deadlines_this_week": 0,
  "total_billed_cents": 0, "charity_eligible": 0, "ppdr_eligible": 0,
  "unlawful_denials_flagged": 0, "audit_findings_cents": 0,
- "filings_sent": 0, "human_hours": 0}
+ "filings_sent": 0, "filings_simulated": 0, "human_hours": 0}
 ```
+AMENDED 2026-08-26 (FORGE): `filings_simulated` added. Every filing this system
+has made is a recording stub, but the object said only `filings_sent`, so the
+banner read "12 filings sent" with nothing on screen distinguishing a stub from
+a certified letter. Two integers rather than a relabelled one: a judge can
+subtract, `filings_sent` stays a number for `web/lib/types.ts` and PROOF's
+arithmetic checks, and neither figure needs rewording the day a real vendor key
+exists -- the simulated count falls on its own. Absent or null reads as
+SIMULATED, never live (defect #6: "every filing was reported as a live send").
 
 ## 3.5 Rules engine public API (packages/rules — DOMAIN implements, AGENTS consume)
 ```python

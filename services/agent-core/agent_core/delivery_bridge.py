@@ -27,8 +27,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from delivery.calendar_sync import CALENDAR_SCOPES, sync_deadlines
+from delivery.drive_sync import mirror_case_filings
+from delivery.google_auth import MissingCredentialsError, load_user_credentials
 from delivery.pdf.engine import fill_form
 from delivery.vendors.filing import send_filing
+
+__all__ = [
+    "form_for_front",
+    "channel_for_front",
+    "render_filing_pdf",
+    "deliver",
+    "simulated_flag",
+    "google_sync_configured",
+    "sync_deadlines",
+    "mirror_case_filings",
+    "drive_filename",
+]
 
 # front -> the form RELAY renders for it (delivery/pdf/forms.py FORM_REGISTRY).
 # charity_care resolves per hospital: a hospital's own FAP application is the
@@ -102,3 +117,65 @@ def deliver(
         pdf=pdf,
         destination=destination,
     )
+
+
+def simulated_flag(vendor_result: dict[str, Any]) -> bool:
+    """Was this send a simulation? Read from what RELAY actually returned.
+
+    THE CONTRACT THIS DEPENDS ON. `delivery.vendors.filing.send_filing()`
+    returns `"simulated": bool` on every result -- `True` when the send fell
+    back to `FakeFaxVendor`/`FakeMailVendor` (no Phaxio/Lob credentials
+    configured, which is every send today), `False` when a real vendor
+    actually transmitted. It is derived there from `VendorResult.vendor`
+    ("fake" | "phaxio" | "lob"), the one fact that function computes
+    first-hand. This bridge does NOT re-derive it, and specifically does not
+    sniff the `fake-` prefix on `vendor_id`: a vendor-id format is a string
+    RELAY is free to change, not a statement about whether anything left the
+    building.
+
+    WHY AN ABSENT KEY IS NOT `False`. HANDOFF.md defect #6 in full: the Filer
+    read `vendor_result.get("simulated")` for weeks while `send_filing` never
+    set the key, so `bool(None)` made every simulated filing report itself as
+    live. `.get()` with a falsy default is what turned a missing fact into a
+    confident false claim. Absence now means "the delivery layer did not tell
+    us", and an untold fact is not evidence of a real send -- so it reads as
+    simulated, the direction that can only ever understate what this system
+    did. A genuine live send says so explicitly (`False`) and is reported as
+    live, which is the other half of the honesty requirement.
+    """
+    value = vendor_result.get("simulated")
+    return value if isinstance(value, bool) else True
+
+
+def google_sync_configured() -> bool:
+    """True if the demo account's OAuth refresh token is configured.
+
+    `sync_deadlines` and `mirror_case_filings` both swallow
+    `MissingCredentialsError` and return `[]` / `None` -- deliberately, so a
+    missing Google integration can never fail a filing. That makes their
+    empty result ambiguous to a CALLER, though: `[]` is also what a case with
+    no dated deadline returns (California charity care has no deadline at
+    all -- HSC §127405(e)(3)). The audit trail has to be able to say which
+    happened, because "nothing to put on a calendar" and "there is no
+    calendar" are different facts about this system and only one of them is a
+    missing integration.
+    """
+    try:
+        load_user_credentials(CALENDAR_SCOPES)
+    except MissingCredentialsError:
+        return False
+    return True
+
+
+def drive_filename(front: str, form_id: str) -> str:
+    """The per-case Drive filename for one front's filing.
+
+    Deliberately carries NO filing id or timestamp. `mirror_case_filings`
+    updates an existing file of the same name inside the case folder rather
+    than creating a second one, so a redelivered `filing.requested`, or a
+    front re-filed after a correction, leaves the advocate's folder holding
+    ONE current document per front instead of four copies of the same letter.
+    Same reasoning as `calendar_sync._stable_event_id`, and the same defect
+    it avoids -- §2.3's idempotency requirement applied to an artifact store.
+    """
+    return f"{front}_{form_id}.pdf"

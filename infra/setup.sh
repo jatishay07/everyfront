@@ -19,6 +19,7 @@ BILLING_ACCOUNT="${BILLING_ACCOUNT:-}"
 log()  { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '    \033[32mok\033[0m   %s\n' "$*"; }
 skip() { printf '    \033[2m--\033[0m   %s (exists)\n' "$*"; }
+warn() { printf '    \033[33mwarn\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[1;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- preflight
@@ -39,6 +40,12 @@ fi
 gcloud config set project "$PROJECT_ID" >/dev/null
 gcloud config set run/region "$REGION" >/dev/null
 ok "default project and region set ($REGION)"
+
+# Resolved once, here, because three later sections need it: the Pub/Sub
+# service agent's address (dead-letter permissions + token-creator) and the
+# budget/monitoring sections.
+PROJECT_NUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+PUBSUB_AGENT="service-${PROJECT_NUM}@gcp-sa-pubsub.iam.gserviceaccount.com"
 
 # ---------------------------------------------------------------- billing
 # Cloud Run, Vertex, and Firestore all refuse to work without billing. Fail
@@ -110,7 +117,7 @@ if curl -sS -m 90 -X PATCH \
     -H "Content-Type: application/json" -d "$_index_payload" >/dev/null 2>&1; then
   ok "events.ts collection-group index (may take a few minutes to build)"
 else
-  printf '    \033[33mwarn\033[0m could not set the events.ts index -- GET /events will 500 until it exists\n'
+  warn "could not set the events.ts index -- GET /events will 500 until it exists"
 fi
 
 # ---------------------------------------------------------------- buckets
@@ -146,6 +153,46 @@ if gcloud pubsub topics describe dead-letter >/dev/null 2>&1; then
   skip "dead-letter"
 else
   gcloud pubsub topics create dead-letter >/dev/null; ok "dead-letter"
+fi
+
+# ------------------------------------------------- Gmail -> Pub/Sub publisher
+# THE grant that makes Gmail intake work at all, and the single most commonly
+# missed step in a Gmail-to-Pub/Sub setup. `users.watch` does NOT publish as
+# the caller: Gmail publishes as its own fixed system account, which must hold
+# roles/pubsub.publisher ON THIS EXACT TOPIC. No project-level binding we make
+# elsewhere covers it, because the principal is not ours -- it is a single
+# global account shared by every Gmail API user on earth.
+#
+# Worse, `users.watch` does not merely fail later: it sends a test message to
+# the topic at watch-registration time and REFUSES the watch outright if the
+# publish is denied --
+#
+#   400 FAILED_PRECONDITION -- "Error sending test message to Cloud PubSub
+#   projects/<p>/topics/intake.email.received : User not authorized to
+#   perform this action."
+#
+# so the mailbox is never watched at all. Confirmed absent live 2026-08-26
+# (ATLAS infra audit): the topic's IAM policy was empty (`etag: ACAB`, zero
+# bindings) and the string `gmail-api-push` appeared nowhere in this repo. It
+# belongs in the idempotent bootstrap, not in a runbook step someone has to
+# remember, because forgetting it produces the project's signature failure
+# mode -- a green transcript over a completely dead feature.
+GMAIL_PUSH_SA="gmail-api-push@system.gserviceaccount.com"
+log "Gmail push publisher"
+if gcloud pubsub topics get-iam-policy intake.email.received \
+     --format='value(bindings.members)' 2>/dev/null | grep -q "$GMAIL_PUSH_SA"; then
+  skip "gmail-api-push publisher on intake.email.received"
+elif gcloud pubsub topics add-iam-policy-binding intake.email.received \
+       --member="serviceAccount:${GMAIL_PUSH_SA}" \
+       --role="roles/pubsub.publisher" >/dev/null 2>&1; then
+  ok "gmail-api-push -> roles/pubsub.publisher on intake.email.received"
+else
+  die "could not grant roles/pubsub.publisher on intake.email.received to
+  ${GMAIL_PUSH_SA}. Gmail's users.watch WILL be refused with a confusing
+  'User not authorized to perform this action' until this binding exists,
+  and Gmail intake will be silently dead. Retry:
+    gcloud pubsub topics add-iam-policy-binding intake.email.received \\
+      --member=serviceAccount:${GMAIL_PUSH_SA} --role=roles/pubsub.publisher"
 fi
 
 # ---------------------------------------------------------------- subscriptions
@@ -189,17 +236,71 @@ else
   ok "ef-dead-letter -> dead-letter"
 fi
 
+# ------------------------------------------- make dead-lettering actually work
+# Attaching `--dead-letter-topic` above is NOT enough. Pub/Sub forwards a
+# dead-lettered message as its own service agent, which needs
+# roles/pubsub.publisher on the dead-letter TOPIC and roles/pubsub.subscriber
+# on each SUBSCRIPTION doing the forwarding. Neither is implied by anything
+# else granted here. Confirmed live 2026-08-26: every topic and subscription
+# policy in the project was empty (`etag: ACAB`), and roles/pubsub.serviceAgent
+# -- which the agent DOES hold at project level -- contains ten permissions,
+# all of them iam/resourcemanager/serviceusage, and no `pubsub.topics.publish`
+# whatsoever (`gcloud iam roles describe roles/pubsub.serviceAgent`).
+#
+# So all five subscriptions carried a dead-letter policy that could never fire:
+# a poison message would retry to max-delivery-attempts, then sit until the
+# 1-day retention silently dropped it, and the `everyfront-dead-letter-nonempty`
+# alert further down -- which exists and is enabled -- could never trigger,
+# because nothing could ever reach the topic it watches. Same class of defect
+# as the five PULL subscriptions with no subscriber: infrastructure that is
+# present, correct-looking, and structurally incapable of doing its job.
+#
+# Not fatal on failure, unlike the Gmail grant above: a project without these
+# still processes every healthy message, it just loses the safety net. Warn
+# loudly rather than halting a bootstrap over it.
+log "Dead-letter delivery permissions"
+if gcloud pubsub topics get-iam-policy dead-letter \
+     --format='value(bindings.members)' 2>/dev/null | grep -q "$PUBSUB_AGENT"; then
+  skip "pubsub service agent publisher on dead-letter"
+elif gcloud pubsub topics add-iam-policy-binding dead-letter \
+       --member="serviceAccount:${PUBSUB_AGENT}" \
+       --role="roles/pubsub.publisher" >/dev/null 2>&1; then
+  ok "pubsub service agent -> publisher on dead-letter"
+else
+  warn "could not grant publisher on dead-letter -- dead-lettering will silently drop messages"
+fi
+while IFS='|' read -r topic sub; do
+  [ -z "$topic" ] && continue
+  if gcloud pubsub subscriptions get-iam-policy "$sub" \
+       --format='value(bindings.members)' 2>/dev/null | grep -q "$PUBSUB_AGENT"; then
+    skip "  pubsub service agent subscriber on $sub"
+  elif gcloud pubsub subscriptions add-iam-policy-binding "$sub" \
+         --member="serviceAccount:${PUBSUB_AGENT}" \
+         --role="roles/pubsub.subscriber" >/dev/null 2>&1; then
+    ok "  pubsub service agent -> subscriber on $sub"
+  else
+    warn "could not grant subscriber on $sub -- its dead-letter policy cannot fire"
+  fi
+done <<< "$SUB_RECORDS"
+
 # ---------------------------------------------------------------- service accounts
 log "Service accounts (least privilege)"
 # macOS ships bash 3.2, which has no associative arrays. Parallel
 # "name|roles" records keep this runnable on the dev machine AND on Cloud Shell.
+#
+# roles/secretmanager.secretAccessor is deliberately NOT in this list. It used
+# to be, at PROJECT scope, for ef-intake and ef-agent -- which meant ef-intake,
+# whose only legitimate need is the three google-oauth-* values, could read
+# every vendor key in the project (lob-api-key, phaxio-api-secret, ...) the
+# moment those secrets existed. Secrets are now bound one at a time, per
+# consumer, in the section below. WO1 says least privilege and this repo is
+# public with a README that makes claims about its own security posture.
 SA_RECORDS="
-ef-intake|roles/pubsub.publisher roles/storage.objectAdmin roles/secretmanager.secretAccessor
-ef-agent|roles/pubsub.publisher roles/pubsub.subscriber roles/datastore.user roles/storage.objectAdmin roles/aiplatform.user roles/secretmanager.secretAccessor
+ef-intake|roles/pubsub.publisher roles/storage.objectAdmin
+ef-agent|roles/pubsub.publisher roles/pubsub.subscriber roles/datastore.user roles/storage.objectAdmin roles/aiplatform.user
 ef-api|roles/datastore.user roles/pubsub.publisher roles/storage.objectViewer
 ef-web|
 "
-PROJECT_NUM="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 while IFS='|' read -r sa roles; do
   [ -z "$sa" ] && continue
   email="${sa}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -223,40 +324,79 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --role="roles/iam.serviceAccountTokenCreator" --condition=None >/dev/null 2>&1 || true
 ok "Pub/Sub granted token-creator"
 
-# ---------------------------------------------------------------- budget guard
-# §6, amended 2026-08-21: tripwire at $50 against a $150 balance.
-log "Budget alerts"
-if [[ -n "$BILLING_ACCOUNT" ]]; then
-  if gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
-       --format='value(displayName)' 2>/dev/null | grep -qx "everyfront-guard"; then
-    skip "budget everyfront-guard"
+# ---------------------------------------------------------------- secrets
+# The secret NAMES and who may read each one. No VALUES are ever created here
+# -- `gcloud secrets create` with no `--data-file` makes an empty secret with
+# zero versions, which is exactly what we want: the shape of the credential
+# store is infrastructure (ATLAS), the credentials themselves are minted by a
+# human and landed by `services/intake/scripts/go_live.sh` (RELAY), which
+# describes-then-`versions add`es and therefore works unchanged against a
+# pre-created secret.
+#
+# Creating them here is what makes per-secret least privilege possible at all:
+# you cannot bind a policy to a secret that does not exist, and go_live.sh runs
+# long after setup.sh. Before this, both ef-intake and ef-agent held
+# roles/secretmanager.secretAccessor at PROJECT scope, so the moment go_live.sh
+# created its eleven secrets, ef-intake -- which legitimately needs three --
+# could read lob-api-key, phaxio-api-secret and every other vendor credential.
+#
+# COUPLING, on purpose and stated out loud: this list must stay a superset of
+# go_live.sh's SECRET_SPECS. Add a secret there and not here and its consumer
+# gets a hard access denial at revision start (loud, not silent) -- which is
+# the failure direction we want, but it still costs someone twenty minutes.
+log "Secret Manager (names + per-secret access)"
+SECRET_RECORDS="
+google-oauth-client-id|ef-intake ef-agent
+google-oauth-client-secret|ef-intake ef-agent
+google-oauth-refresh-token|ef-intake ef-agent
+phaxio-api-key|ef-agent
+phaxio-api-secret|ef-agent
+lob-api-key|ef-agent
+demo-fax-allowlist|ef-agent
+demo-mail-allowlist|ef-agent
+google-calendar-id|ef-agent
+google-drive-root-folder-id|ef-agent
+google-drive-advocate-email|ef-agent
+"
+while IFS='|' read -r secret readers; do
+  [ -z "$secret" ] && continue
+  if gcloud secrets describe "$secret" >/dev/null 2>&1; then
+    skip "$secret"
   else
-    gcloud billing budgets create --billing-account="$BILLING_ACCOUNT" \
-      --display-name="everyfront-guard" --budget-amount=150USD \
-      --threshold-rule=percent=0.33 --threshold-rule=percent=0.66 \
-      --threshold-rule=percent=0.90 --threshold-rule=percent=1.0 >/dev/null 2>&1 \
-      && ok "budget alerts at 33/66/90/100% of \$150" \
-      || printf '    \033[33mwarn\033[0m budget create failed (needs billing.budgets.create) -- set it in the console\n'
+    gcloud secrets create "$secret" --replication-policy=automatic >/dev/null
+    ok "$secret (empty -- go_live.sh adds the version)"
   fi
-else
-  printf '    \033[33mwarn\033[0m BILLING_ACCOUNT unset, skipping budget alerts\n'
-fi
+  _policy="$(gcloud secrets get-iam-policy "$secret" --format='value(bindings.members)' 2>/dev/null || true)"
+  for reader in $readers; do
+    email="${reader}@${PROJECT_ID}.iam.gserviceaccount.com"
+    case "$_policy" in
+      *"$email"*) continue ;;
+    esac
+    if gcloud secrets add-iam-policy-binding "$secret" \
+         --member="serviceAccount:${email}" \
+         --role="roles/secretmanager.secretAccessor" >/dev/null 2>&1; then
+      ok "  accessor: $reader -> $secret"
+    else
+      warn "could not grant $reader accessor on $secret -- its consumer revision will fail to start"
+    fi
+  done
+done <<< "$SECRET_RECORDS"
 
-# ---------------------------------------------------------------- dead-letter alerting
-# §2.3 requires handlers tolerate redelivery, but a poison message that
-# exhausts max-delivery-attempts (5, set above) and lands in `dead-letter`
-# must not then vanish silently. `ef-dead-letter` gives it somewhere to land;
-# without this alert nothing ever looks at that somewhere -- confirmed live
-# 2026-08-25: `ef-dead-letter` sat with zero subscribers reading it and zero
-# monitoring policies of any kind on the project, so a dead-lettered message
-# would sit unnoticed until its 7-day retention silently dropped it. This is
-# the "something would notice" half of WO4/WO6 task 4.
-log "Dead-letter alerting"
+# ---------------------------------------------------------- notification channel
+# ONE email channel, shared by the budget alerts and the dead-letter alert
+# policy below. It used to be created inside the dead-letter section, which ran
+# after the budget -- which is why the live budget had `notificationsRule: {}`
+# (confirmed 2026-08-26) and depended entirely on Google's default "everyone
+# with a Billing Account Admin/User role gets mail" behaviour. That default is
+# real but invisible: nothing in the project named a recipient, so nobody could
+# tell by reading the config whether a $150 overrun would reach a human.
+log "Notification channel"
+CHANNEL_NAME=""
+ALERT_EMAIL="${ALERT_EMAIL:-$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1)}"
 gcloud components install alpha --quiet >/dev/null 2>&1 || true
 if ! gcloud alpha monitoring channels list --format='value(name)' >/dev/null 2>&1; then
-  printf '    \033[33mwarn\033[0m gcloud alpha monitoring is unavailable (managed install?) -- set up a dead-letter alert by hand\n'
+  warn "gcloud alpha monitoring unavailable (managed install?) -- budget and dead-letter alerts will name no recipient"
 else
-  ALERT_EMAIL="${ALERT_EMAIL:-$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -1)}"
   CHANNEL_NAME="$(gcloud alpha monitoring channels list \
     --filter='displayName="everyfront-ops-email"' --format='value(name)' 2>/dev/null | head -1)"
   if [[ -n "$CHANNEL_NAME" ]]; then
@@ -271,14 +411,75 @@ else
     if [[ -n "$CHANNEL_NAME" ]]; then
       ok "notification channel -> $ALERT_EMAIL"
     else
-      printf '    \033[33mwarn\033[0m could not create a notification channel (needs monitoring.notificationChannels.create) -- dead-letter alert skipped\n'
+      warn "could not create a notification channel (needs monitoring.notificationChannels.create)"
     fi
   fi
+fi
 
+# ---------------------------------------------------------------- budget guard
+# §6, amended 2026-08-21: $150 balance with tripwires at 33/66/90/100%.
+#
+# Two things the original create missed, both confirmed against the live budget
+# 2026-08-26. (1) `notificationsRule: {}` -- no channel was ever attached, see
+# the section above. (2) `budgetFilter` carried only calendarPeriod and credit
+# treatment, so the budget measured the WHOLE billing account, not this project;
+# on a shared billing account another project's spend would trip our alert and
+# ours would hide under someone else's headroom. --filter-projects scopes it.
+#
+# Applied on the update path too, not just create: the budget already exists in
+# every project this has ever run against, so a create-only guard would skip
+# straight past the defect forever.
+log "Budget alerts"
+_budget_flags=(
+  --budget-amount=150USD
+  --filter-projects="projects/${PROJECT_ID}"
+)
+if [[ -n "$CHANNEL_NAME" ]]; then
+  _budget_flags+=(--notifications-rule-monitoring-notification-channels="$CHANNEL_NAME")
+fi
+if [[ -n "$BILLING_ACCOUNT" ]]; then
+  BUDGET_ID="$(gcloud billing budgets list --billing-account="$BILLING_ACCOUNT" \
+    --filter='displayName="everyfront-guard"' --format='value(name)' 2>/dev/null | head -1)"
+  if [[ -n "$BUDGET_ID" ]]; then
+    if gcloud billing budgets update "$BUDGET_ID" "${_budget_flags[@]}" >/dev/null 2>&1; then
+      ok "budget everyfront-guard reconciled (scoped to $PROJECT_ID${CHANNEL_NAME:+, -> $ALERT_EMAIL})"
+    else
+      warn "budget update failed (needs billing.budgets.update) -- check notificationsRule/budgetFilter in the console"
+    fi
+  else
+    if gcloud billing budgets create --billing-account="$BILLING_ACCOUNT" \
+         --display-name="everyfront-guard" "${_budget_flags[@]}" \
+         --threshold-rule=percent=0.33 --threshold-rule=percent=0.66 \
+         --threshold-rule=percent=0.90 --threshold-rule=percent=1.0 >/dev/null 2>&1; then
+      ok "budget alerts at 33/66/90/100% of \$150 (scoped to $PROJECT_ID)"
+    else
+      warn "budget create failed (needs billing.budgets.create) -- set it in the console"
+    fi
+  fi
+else
+  warn "BILLING_ACCOUNT unset, skipping budget alerts"
+fi
+
+# ---------------------------------------------------------------- dead-letter alerting
+# §2.3 requires handlers tolerate redelivery, but a poison message that
+# exhausts max-delivery-attempts (5, set above) and lands in `dead-letter`
+# must not then vanish silently. `ef-dead-letter` gives it somewhere to land;
+# without this alert nothing ever looks at that somewhere -- confirmed live
+# 2026-08-25: `ef-dead-letter` sat with zero subscribers reading it and zero
+# monitoring policies of any kind on the project, so a dead-lettered message
+# would sit unnoticed until its 7-day retention silently dropped it. This is
+# the "something would notice" half of WO4/WO6 task 4.
+#
+# The policy is only half the mechanism: the Pub/Sub service agent needs the
+# two IAM bindings granted in "Dead-letter delivery permissions" above or
+# nothing ever reaches `dead-letter` and this alert cannot fire, however
+# correct it looks in the console.
+log "Dead-letter alerting"
+if [[ -n "$CHANNEL_NAME" ]]; then
   if gcloud alpha monitoring policies list \
        --filter='displayName="everyfront-dead-letter-nonempty"' --format='value(name)' 2>/dev/null | grep -q .; then
     skip "alert policy everyfront-dead-letter-nonempty"
-  elif [[ -n "$CHANNEL_NAME" ]]; then
+  else
     _policy_json="$(mktemp)"
     cat > "$_policy_json" <<POLICY_EOF
 {
@@ -307,10 +508,12 @@ POLICY_EOF
          --notification-channels="$CHANNEL_NAME" >/dev/null 2>&1; then
       ok "alert: ef-dead-letter non-empty -> $ALERT_EMAIL"
     else
-      printf '    \033[33mwarn\033[0m could not create the dead-letter alert policy (needs monitoring.alertPolicies.create)\n'
+      warn "could not create the dead-letter alert policy (needs monitoring.alertPolicies.create)"
     fi
     rm -f "$_policy_json"
   fi
+else
+  warn "no notification channel -- dead-letter alert skipped, a poison message would go unnoticed"
 fi
 
 log "Setup complete for $PROJECT_ID"

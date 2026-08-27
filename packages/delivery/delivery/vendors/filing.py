@@ -68,6 +68,34 @@ def read_vendor_map(vendor: str, vendor_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _resolve_simulated(result: VendorResult) -> bool:
+    """The `simulated` flag `filings/{filing_id}` is built from -- see the
+    contract in `base.VendorResult`'s docstring, which this function is the
+    enforcement of.
+
+    History (HANDOFF.md defect #6, which recurred): `agent_core.agents.filer`
+    has read `vendor_result.get("simulated")` since persona 5 WO6, but this
+    dict once carried no such key at all, so every filing -- fake vendor
+    included -- was stored and narrated as a LIVE send. It was then fixed by
+    deriving it as `result.vendor == "fake"`, which is a subtler version of
+    the same lie: a Phaxio or Lob call made with TEST credentials has a
+    vendor name that isn't "fake" and still sends nothing. Only the vendor
+    client knows which mode it was in, so only the vendor client may say.
+
+    Two fail-closed rules on top of whatever the client said, because the
+    dangerous direction of this flag is over-claiming a live send:
+
+      * a non-boolean or missing value becomes True;
+      * `vendor == "fake"` becomes True regardless of what was returned.
+    """
+    simulated = getattr(result, "simulated", None)
+    if not isinstance(simulated, bool):
+        simulated = True
+    if result.vendor == "fake":
+        simulated = True
+    return simulated
+
+
 def send_filing(
     *,
     filing_id: str,
@@ -94,6 +122,7 @@ def send_filing(
     result: VendorResult = client.send(filing_id, pdf, destination)
     _write_vendor_map(result.vendor, result.vendor_id, filing_id, case_id)
     return {
+        "simulated": _resolve_simulated(result),
         "case_id": case_id,
         "front": front,
         "channel": channel,
@@ -102,26 +131,6 @@ def send_filing(
         "status": result.status,
         "proof": result.proof,
         "sent_at": result.sent_at.isoformat(),
-        # BUG FOUND live (RELAY WO8, item 2 spot-check): `agent_core.agents.filer`
-        # (services/agent-core) has read `vendor_result.get("simulated")` since
-        # persona 5 WO6 -- both to build `filings/{filing_id}`'s own `simulated`
-        # flag and to pick "SIMULATED" vs "live" in the human-readable event
-        # narration (`pipeline.py`'s `run_filer`) -- but this dict never
-        # actually carried a `"simulated"` key, so `.get("simulated")` was
-        # always `None` -> `bool(None)` == `False`. Every filing that fell back
-        # to `FakeFaxVendor`/`FakeMailVendor` (i.e. every filing, absent real
-        # Phaxio/Lob keys -- see this package's README) was therefore logged
-        # and stored as `simulated: false` / narrated as "live" even though
-        # `vendor == "fake"` right there in the same dict said otherwise. This
-        # is the exact "reports success while it's actually a placeholder"
-        # failure mode BUILD_PLAYBOOK.md's WO8 brief calls out by name -- the
-        # two facts (`vendor` and `simulated`) had simply never been made to
-        # agree. `vendor` is the one fact this function actually computes
-        # (`result.vendor` comes straight from whichever `VendorClient` ran,
-        # "fake" | "phaxio" | "lob"); `simulated` is now derived from it
-        # instead of being a second, independently-settable value that could
-        # drift from the first.
-        "simulated": result.vendor == "fake",
     }
 
 

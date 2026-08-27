@@ -39,7 +39,16 @@ class FakeFaxVendor:
             vendor="fake",
             vendor_id=vendor_id,
             status="sent",
-            proof={"phaxio_id": vendor_id, "pages": 1, "destination": number},
+            # Rule 2 of the `simulated` contract in base.py: a stub is always
+            # simulated. Stated here explicitly rather than inferred anywhere
+            # downstream from `vendor == "fake"`.
+            simulated=True,
+            proof={
+                "phaxio_id": vendor_id,
+                "pages": 1,
+                "destination": number,
+                "mode": "stub",
+            },
         )
 
     def parse_status_callback(self, payload: dict) -> tuple[str, str]:
@@ -68,7 +77,13 @@ class FakeMailVendor:
             vendor="fake",
             vendor_id=vendor_id,
             status="sent",
-            proof={"lob_id": vendor_id, "tracking": tracking, "destination": address},
+            simulated=True,  # see FakeFaxVendor.send
+            proof={
+                "lob_id": vendor_id,
+                "tracking": tracking,
+                "destination": address,
+                "mode": "stub",
+            },
         )
 
     def parse_status_callback(self, payload: dict) -> tuple[str, str]:

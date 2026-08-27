@@ -82,22 +82,72 @@ pipeline will not pick it up.
    fax/mail allowlists, Calendar id, Drive folder/advocate email) and exactly
    what stays off without each one.
 
-3. **(Human, optional but recommended) Verify.** Send a real email with a
-   PDF attachment to the demo Gmail account, then:
+3. **(One command, not optional) Verify, stage by stage.**
+   ```
+   PROJECT_ID=<your project> ./services/intake/scripts/verify_live.sh
+   ```
+   This walks every stage of the live path and says which one failed, with
+   Google's actual error body rather than a bare exception: the service and
+   its env vars -> the refresh token and its granted scopes -> Gmail's
+   publisher grant on the topic -> `users.watch` returning a historyId ->
+   the push subscription's endpoint -> a synthetic notification actually
+   reaching `/pubsub/gmail`. It is idempotent, exits non-zero on the first
+   genuine failure, and mutates nothing except re-arming the Gmail watch
+   (see the script's own header for the exact list).
+
+   Then send a real email with a PDF attachment to the demo Gmail account --
+   `fixtures/generated/cases/case_01_uninsured_gfe_ca/documents/bill.pdf` is
+   synthetic and is the same file the test suite pushes through its Gmail
+   transport fake -- and re-run to check the last two stages too:
+   ```
+   PROJECT_ID=<your project> ./services/intake/scripts/verify_live.sh --after-email
+   ```
+   Manually, the same two artefacts:
    ```
    gcloud run services logs read ef-intake --region=$REGION --limit=50
    gcloud storage ls gs://ef-documents-$PROJECT_ID/intake/
    ```
-   You should see the message processed and the attachment land in GCS
-   within a minute or two of Gmail's push notification arriving.
+
+### How far the tests go, and where they stop
+
+`tests/test_gmail_transport.py` runs the whole intake pipeline -- push
+notification -> `history.list` -> `messages.get` -> a real multipart MIME tree
+-> `messages.attachments.get` -> GCS -> `case.document.added` -- through the
+REAL `googleapiclient` library, faked only at the bottom-most HTTP transport,
+against fixtures whose shapes are read out of the Gmail v1 discovery document
+inside the pinned wheel. It covers nested `multipart/alternative`, a non-PDF
+sibling, two attachments in one message, pagination, the expired-cursor 404 and
+its recovery, and redelivery.
+
+It cannot prove that Gmail's real responses match those fixtures, that the
+OAuth token works, or that `gmail-api-push@system.gserviceaccount.com` really
+holds `pubsub.publisher` on the topic. Read that module's docstring before
+quoting it: **"Gmail intake is verified" is not a claim these tests support.**
+`verify_live.sh` is what answers those three questions, and only with a real
+token.
+
+### Object layout in GCS
+
+```
+gs://ef-documents-<project>/intake/{gmail_message_id}/{mime_part_id}/{filename}
+```
+The `{mime_part_id}` segment is load-bearing, not decoration: one email can
+carry two PDFs with the same name, and a `{message_id}/{filename}` path (plus a
+dedupe key of the same shape) silently dropped the second one -- no event, no
+object, no log, and `{"status": "ok"}` returned to Pub/Sub. See
+`intake/gmail_client.py`'s `extract_pdf_attachments` docstring and the
+regression test `test_two_attachments_sharing_a_filename_are_both_delivered`.
 
 ### What's real vs. what's the fallback today
 
 - **Real, live-tested:** the PDF form-fill engine (5 forms, 3 of them real
   government/hospital PDFs), the fax/mail vendor interface + in-code
-  destination allowlist, the Gmail webhook -> GCS -> Pub/Sub pipeline (unit
-  tested against faked Gmail/GCS/Pub/Sub; the Docker image itself boots and
-  answers `/health`).
+  destination allowlist.
+- **Exercised against the real Google client but not against Google:** the
+  Gmail webhook -> GCS -> Pub/Sub pipeline. `tests/test_gmail_transport.py`
+  drives it through `googleapiclient` itself with only the HTTP transport
+  faked (see "How far the tests go" above); the Docker image boots and answers
+  `/health`. No call has ever reached gmail.googleapis.com.
 - **Real once a human completes step 1 above:** the OAuth-gated calls
   themselves (`users.watch`, `messages.get`, Calendar/Drive writes) -- the
   code path is identical whether credentials are configured or not; only the

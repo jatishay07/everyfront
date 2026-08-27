@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import config
+from . import evidence as evidence_mod
 
 
 def _try_firestore_client():
@@ -65,6 +66,23 @@ def _merge_front(fronts: list[dict], front: dict) -> list[dict]:
     return fronts
 
 
+def _merge_front_from_analysis(
+    fronts: list[dict], front: dict, owned: tuple[str, ...]
+) -> list[dict]:
+    """`_merge_front`, except a status the filing lifecycle owns survives.
+
+    The rule `upsert_front_from_analysis` documents, factored out so the
+    single-front and whole-pass writers cannot drift apart.
+    """
+    for existing in fronts:
+        if existing.get("front") == front.get("front"):
+            merged = dict(front)
+            if existing.get("status") in owned:
+                merged["status"] = existing["status"]
+            return _merge_front(fronts, merged)
+    return _merge_front(fronts, front)
+
+
 class CaseStore:
     """Everything the agent hierarchy needs to read or write case state.
 
@@ -82,15 +100,17 @@ class CaseStore:
         self._events: dict[str, list[dict]] = {}
         self._hospitals: dict[str, dict] = {}
         self._filings: dict[str, dict] = {}
-        self._processed: set[str] = set()
+        # key -> {"status": "in_progress"|"done", ...}; see the message
+        # idempotency section at the bottom of this class.
+        self._processed: dict[str, dict] = {}
 
     @property
     def backend(self) -> str:
         return "firestore" if self._client is not None else "memory"
 
     # ---------------------------------------------------------------- cases
-    def create_case(self, case_id: str, data: dict) -> dict:
-        payload = {
+    def _new_case_payload(self, data: dict) -> dict:
+        return {
             "status": "intake",
             "fronts": [],
             "savings_found_cents": 0,
@@ -104,6 +124,9 @@ class CaseStore:
             "updated_at": _now_iso(),
             **data,
         }
+
+    def create_case(self, case_id: str, data: dict) -> dict:
+        payload = self._new_case_payload(data)
         if self._client is not None:
             self._client.collection("cases").document(case_id).set(payload)
         else:
@@ -112,6 +135,40 @@ class CaseStore:
                 self._documents.setdefault(case_id, {})
                 self._events.setdefault(case_id, [])
         return self.get_case(case_id)
+
+    def create_case_if_absent(self, case_id: str, data: dict) -> tuple[dict, bool]:
+        """Create `cases/{case_id}` ONLY if it does not exist yet. Returns
+        `(case, created)`.
+
+        `create_case` uses `.set()`, which overwrites: calling it for a case
+        that already exists silently discards its `fronts[]`, its status and
+        every field the cascade has written. That is fine for the two callers
+        that mint a fresh id (`POST /cases`, `/demo/inject_bill`) and unsafe
+        for the one that does NOT: agent-core's document-added push handler
+        derives the case id from the Gmail thread (`case-{thread_id}`), so two
+        attachments on one email -- or a Pub/Sub redelivery -- race on exactly
+        the same id. Firestore's `create()` fails with AlreadyExists rather
+        than clobbering, which makes the loser of that race a no-op instead of
+        a case reset to `intake` with no fronts.
+        """
+        if self._client is not None:
+            from google.api_core import exceptions as gexc
+
+            try:
+                self._client.collection("cases").document(case_id).create(
+                    self._new_case_payload(data)
+                )
+            except gexc.Conflict:  # AlreadyExists subclasses Conflict -- catch both
+                return self.get_case(case_id), False
+            return self.get_case(case_id), True
+
+        with self._lock:
+            created = case_id not in self._cases
+            if created:
+                self._cases[case_id] = copy.deepcopy(self._new_case_payload(data))
+                self._documents.setdefault(case_id, {})
+                self._events.setdefault(case_id, [])
+        return self.get_case(case_id), created
 
     def get_case(self, case_id: str) -> dict | None:
         if self._client is not None:
@@ -202,40 +259,182 @@ class CaseStore:
     #: see `upsert_front_from_analysis`.
     _FILING_OWNED_STATUSES = ("filing", "filed", "won", "lost")
 
-    def upsert_front_from_analysis(self, case_id: str, front: dict) -> dict | None:
+    def upsert_front_from_analysis(
+        self, case_id: str, front: dict, *, evidence: list[str] | None = None
+    ) -> dict | None:
         """Upsert a front that re-analysis just recomputed, WITHOUT reopening
         one the filing lifecycle already owns.
 
         Analysis is not a one-shot: every `case.document.added` re-runs the
-        whole hierarchy, and the Filer itself stores each generated PDF as a
-        document -- so filing a front publishes an event that re-analyses the
-        case. `select_fronts` is pure and has no idea anything has been filed,
-        so it returns every applicable front at status "open", and a plain
-        `upsert_front` then wrote that "open" straight over a sibling front's
-        "filed".
+        whole hierarchy. `select_fronts` is pure and has no idea anything has
+        been filed, so it returns every applicable front at status "open", and
+        a plain `upsert_front` wrote that "open" straight over a sibling
+        front's "filed".
 
         Observed live on ef-2026-0007, 2026-08-26: audit filed 08:40:46 and
         charity_care 08:40:51, then re-analyses at 08:40:50 and 08:40:52-54
         reset both to "open" -- while `filings/` held three real "sent"
         records. ppdr kept its "filed" only because its filing happened to
-        land after the last re-analysis. This is the second, independent
-        cause of the same symptom PROOF reported, and no transaction can fix
-        it: both writers are behaving exactly as written.
+        land after the last re-analysis. This is a second, independent cause
+        of the same symptom PROOF reported, and no transaction can fix it:
+        both writers are behaving exactly as written.
+
+        CORRECTION 2026-08-26 (FORGE, same day): this docstring originally
+        claimed those re-analyses were triggered by the Filer -- "the Filer
+        itself stores each generated PDF as a document, so filing a front
+        publishes an event that re-analyses the case." That is FALSE and it
+        was my inference from the timestamps above, not something I checked.
+        `filer.run` calls `store.add_document`, which publishes nothing; the
+        only publishers of `case.document.added` in this repo are
+        `services/api`'s `/demo/inject_bill` and `services/intake`. The real
+        driver is a Pub/Sub redelivery storm: `ef-document-added` has a 60s
+        ack deadline against a cascade that takes 60-130s, so the same
+        document is redelivered mid-cascade and up to five concurrent
+        cascades run per document -- which is also why the interleaving
+        *looked* filing-triggered.
+
+        The behaviour this method guards against is real and the fix stands.
+        The mechanism I attributed it to was wrong, and a wrong mechanism in
+        a docstring is how the next person debugs the wrong thing.
 
         Everything else on the entry -- applicable, reason, citation,
         deadline -- IS analysis's to update, and still is.
+
+        ADDED 2026-08-27 (SWARM, `analysis_evidence`): pass `evidence` to also
+        refuse a write from a pass that saw strictly LESS than the pass whose
+        answer is already stored -- a different failure from the one above and
+        equally invisible. See `write_analysis`, which this now delegates to;
+        omitting `evidence` keeps this method's original, unguarded behaviour
+        exactly.
         """
+        return self.write_analysis(case_id, evidence=evidence, fronts=[front])["case"]
 
-        def _apply(fronts: list[dict]) -> list[dict]:
-            for existing in fronts:
-                if existing.get("front") == front.get("front"):
-                    merged = dict(front)
-                    if existing.get("status") in self._FILING_OWNED_STATUSES:
-                        merged["status"] = existing["status"]
-                    return _merge_front(fronts, merged)
-            return _merge_front(fronts, front)
+    #: Where a case records the evidence behind the analysis values it
+    #: currently holds -- `fronts[]`, `savings_found_cents`,
+    #: `audit_findings_cents`, `denial_flag`, and the merged `patient`/`bill`.
+    #: NOT a contract §3.1 field: it is this service's own bookkeeping, the way
+    #: `_processed_messages/` is, and it is additive so CANVAS's
+    #: `web/lib/types.ts` reads straight past it.
+    ANALYSIS_EVIDENCE_FIELD = "analysis_evidence"
 
-        return self._write_fronts(case_id, _apply)
+    def write_analysis(
+        self,
+        case_id: str,
+        *,
+        evidence: list[str] | None = None,
+        patch: dict | None = None,
+        fronts: list[dict] | None = None,
+    ) -> dict:
+        """Apply ONE analysis pass's writes, atomically, and only if that pass
+        was not already superseded by a better-informed one.
+
+        THE RACE THIS CLOSES (live, `case-1a043f4f4ae26dfa`, 2026-08-26; the
+        full trace is in `agent_core/evidence.py`). An email with three PDFs
+        publishes three `case.document.added` events, and Pub/Sub redelivers
+        each of them mid-cascade, so several full Reader -> merge -> Lookup ->
+        {Clock, Auditor} -> Strategist passes run CONCURRENTLY on one case.
+        Each merges whatever documents existed when IT started and then writes
+        the whole `fronts[]` reason/applicable set. Last writer wins -- and
+        "last" is last to FINISH, not best informed, so a pass that had never
+        seen the pay stub overwrote the conclusion of one that had, leaving a
+        case whose charity_care reason said the income was unknown while
+        `patient.annual_income_cents` on the same document said 3,200,000.
+
+        Neither existing protection touches it. `_write_fronts`'s transaction
+        makes the write atomic, which is about interleaving, not staleness --
+        both passes here are perfectly serialized and the wrong one still
+        wins. `upsert_front_from_analysis`'s status rule protects only what
+        the FILING lifecycle owns; reason and applicable are analysis's own,
+        and this is analysis overwriting itself.
+
+        HOW. `evidence` (see `agent_core.evidence`) describes what the calling
+        pass actually consumed. Inside the same transaction that would apply
+        the write, it is compared with the evidence recorded alongside the
+        values already stored: a strict subset is REFUSED -- nothing is
+        written, and the caller is told so it can decline to log a conclusion
+        that is not the case's conclusion. Anything else (a superset, an equal
+        set, or an incomparable one) writes and becomes the new recorded
+        evidence.
+
+        Equal evidence writing is deliberate and is what keeps §2.3
+        idempotency intact: a redelivery that saw exactly the same documents
+        recomputes exactly the same values, so the write is a no-op in
+        content, and `pipeline._log`'s deterministic event ids mean it adds no
+        rows either.
+
+        WHY ONE METHOD FOR ALL OF IT. `fronts[]` was the visible symptom, but
+        the pass writes `savings_found_cents`, `audit_findings_cents`,
+        `denial_flag` and the merged `patient`/`bill` from the same stale
+        snapshot -- one guard over one transaction is the only way those stay
+        consistent with each other AND with the fronts. Splitting them would
+        let a superseded pass land half its answer.
+
+        Args:
+            evidence: what this pass saw. `None` disables the guard entirely
+                (the pre-2026-08-27 behaviour), for callers with nothing to
+                compare.
+            patch: case fields to merge, exactly like `update_case`.
+            fronts: `fronts[]` entries to upsert under the
+                `upsert_front_from_analysis` status rule.
+
+        Returns `{"case", "written", "superseded", "recorded_evidence"}`.
+        `case` is the case as it stands AFTERWARDS -- the stored, better-
+        informed one when the write was refused, so a superseded caller
+        finishes against the truth rather than its own stale copy -- or None
+        if the case is gone (never resurrected; see `update_case`).
+        """
+        outcome: dict = {"written": False, "superseded": False, "recorded_evidence": []}
+
+        def _fields(data: dict) -> dict | None:
+            """The fields to write, or None to refuse this pass."""
+            recorded = data.get(self.ANALYSIS_EVIDENCE_FIELD)
+            outcome["recorded_evidence"] = list(recorded or [])
+            if evidence_mod.is_strictly_weaker(evidence, recorded):
+                outcome["superseded"] = True
+                return None
+            fields = dict(patch or {})
+            if fronts is not None:
+                current = copy.deepcopy(data.get("fronts") or [])
+                for front in fronts:
+                    current = _merge_front_from_analysis(
+                        current, front, self._FILING_OWNED_STATUSES
+                    )
+                fields["fronts"] = current
+            if evidence is not None:
+                fields[self.ANALYSIS_EVIDENCE_FIELD] = list(evidence)
+            fields["updated_at"] = _now_iso()
+            return fields
+
+        if self._client is not None:
+            from google.cloud import firestore
+
+            ref = self._client.collection("cases").document(case_id)
+
+            @firestore.transactional
+            def _txn(transaction) -> None:
+                # Reset first: a contended transaction is RETRIED, and the
+                # verdict of an attempt whose commit lost must not leak into
+                # the outcome of the attempt that actually landed.
+                outcome.update({"written": False, "superseded": False})
+                snap = ref.get(transaction=transaction)
+                if not snap.exists:  # never resurrect a purged case -- see update_case
+                    return
+                fields = _fields(snap.to_dict() or {})
+                if fields is None:
+                    return
+                transaction.set(ref, fields, merge=True)
+                outcome["written"] = True
+
+            _txn(self._client.transaction())
+        else:
+            with self._lock:
+                case = self._cases.get(case_id)
+                if case is not None:
+                    fields = _fields(case)
+                    if fields is not None:
+                        case.update(copy.deepcopy(fields))
+                        outcome["written"] = True
+        return {**outcome, "case": self.get_case(case_id)}
 
     def set_front_status(self, case_id: str, front: str, status: str) -> dict | None:
         """Atomically set one front's `status`, touching nothing else.
@@ -293,6 +492,41 @@ class CaseStore:
             with self._lock:
                 self._documents.setdefault(case_id, {})[doc_id] = copy.deepcopy(payload)
         return doc_id
+
+    def add_document_if_absent(self, case_id: str, doc_id: str, doc: dict) -> tuple[dict, bool]:
+        """Create `cases/{case_id}/documents/{doc_id}` ONLY if it does not
+        exist yet. Returns `(document, created)`.
+
+        Same hazard as `create_case_if_absent`, one level down: `add_document`
+        `.set()`s the whole document, so re-adding one that Reader has already
+        classified wipes its `type` and `extracted` back to the intake shape.
+        The Gmail intake path derives `doc_id` deterministically from
+        `(message_id, filename)` (services/intake/intake/pipeline.py), so a
+        Pub/Sub redelivery of an event whose handler previously failed reaches
+        this method with an id that already holds a fully-read document.
+        """
+        payload = {"verified": None, "verification_notes": "", "uploaded_at": _now_iso(), **doc}
+        if self._client is not None:
+            from google.api_core import exceptions as gexc
+
+            ref = (
+                self._client.collection("cases")
+                .document(case_id)
+                .collection("documents")
+                .document(doc_id)
+            )
+            try:
+                ref.create(payload)
+            except gexc.Conflict:  # AlreadyExists subclasses Conflict -- catch both
+                return self.get_document(case_id, doc_id), False
+            return self.get_document(case_id, doc_id), True
+
+        with self._lock:
+            bucket = self._documents.setdefault(case_id, {})
+            created = doc_id not in bucket
+            if created:
+                bucket[doc_id] = copy.deepcopy(payload)
+        return self.get_document(case_id, doc_id), created
 
     def get_document(self, case_id: str, doc_id: str) -> dict | None:
         if self._client is not None:
@@ -498,27 +732,117 @@ class CaseStore:
             return [v for v in vals if case_id is None or v.get("case_id") == case_id]
 
     # ------------------------------------------------- message idempotency
-    def has_processed_message(self, message_id: str) -> bool:
-        """§2.3: every Pub/Sub handler must tolerate redelivery.
+    #
+    # `_processed_messages/{key}` holds one of two states:
+    #
+    #   {"status": "in_progress", "claimed_at": ...}   someone is working on it
+    #   {"status": "done", "processed_at": ...}        the work finished
+    #
+    # A record written before this lease existed carries only `processed_at`
+    # and no `status`; those were only ever written on completion, so a missing
+    # status reads as "done" and the live registry needs no migration.
 
-        Returns True (and does NOT record it) if already seen, so the caller
-        can short-circuit before doing any work; the caller must then call
-        `mark_message_processed` only once handling actually completes, so a
-        crash mid-handler is retried rather than silently dropped.
+    #: How long a claim is honoured before another delivery may take it over.
+    #: A Cloud Run instance that dies mid-cascade cannot release its own claim,
+    #: and a document nothing may ever touch again is a worse failure than a
+    #: rare duplicate run. Comfortably longer than `infra/deploy.sh`'s
+    #: `--timeout=300`, so a claim can only expire after the holder is
+    #: certainly gone.
+    CLAIM_LEASE_SECONDS = 900
+
+    def has_processed_message(self, message_id: str) -> bool:
+        """True only if this key's work COMPLETED. A claim still in flight is
+        not "processed" -- see `claim_message`."""
+        if self._client is not None:
+            snap = self._client.collection("_processed_messages").document(message_id).get()
+            return snap.exists and (snap.to_dict() or {}).get("status") != "in_progress"
+        with self._lock:
+            record = self._processed.get(message_id)
+            return record is not None and record.get("status") != "in_progress"
+
+    def claim_message(self, message_id: str) -> bool:
+        """Atomically take this key for the caller. True if the caller now owns
+        the work and must finish it with `mark_message_processed` (or hand it
+        back with `release_message_claim`); False if someone else got there
+        first, or it is already done.
+
+        WHY A CLAIM AND NOT A MARK-WHEN-FINISHED. `has_processed_message` +
+        `mark_message_processed` leaves the entire duration of the work
+        unguarded, and the work here is a full LLM cascade that takes 60-130
+        seconds. Two things exploit that window, and between them they are most
+        of the live duplication:
+
+        1. `ef-document-added` has a 60-second ack deadline and
+           `--max-delivery-attempts=5` (infra/setup.sh). A cascade that outruns
+           the deadline is REDELIVERED while it is still running, the check
+           passes because nothing has been marked yet, and the redelivery
+           starts a second concurrent cascade -- which is also slow, so it
+           happens again. Up to five concurrent runs of the same document.
+        2. `/demo/inject_bill` reaches agent-core twice for every document (a
+           published `case.document.added` and the synchronous
+           `/internal/process_documents` batch). Only the push handler ever
+           wrote the `doc:` key, so the two routes never saw each other.
+
+        Both are now excluded by taking the key BEFORE the work rather than
+        after it. Firestore's `create()` fails with AlreadyExists rather than
+        overwriting, which is what makes this a genuine mutual exclusion and
+        not a check-then-act.
+        """
+        now = datetime.now(UTC)
+        payload = {"status": "in_progress", "claimed_at": now.isoformat()}
+        if self._client is not None:
+            from google.api_core import exceptions as gexc
+
+            ref = self._client.collection("_processed_messages").document(message_id)
+            try:
+                ref.create(payload)
+            except gexc.Conflict:  # AlreadyExists subclasses Conflict -- catch both
+                if not self._claim_is_stale(ref.get(), now):
+                    return False
+                ref.set(payload)
+            return True
+
+        with self._lock:
+            existing = self._processed.get(message_id)
+            if existing is not None and not self._claim_is_stale(existing, now):
+                return False
+            self._processed[message_id] = payload
+        return True
+
+    def _claim_is_stale(self, record, now: datetime) -> bool:
+        """True if `record` is an in-flight claim whose holder is certainly
+        gone (see `CLAIM_LEASE_SECONDS`). A completed record is never stale."""
+        data = record.to_dict() or {} if hasattr(record, "to_dict") else (record or {})
+        if not data or data.get("status") != "in_progress":
+            return False
+        try:
+            claimed_at = datetime.fromisoformat(data["claimed_at"])
+        except (KeyError, TypeError, ValueError):
+            return True  # a claim we cannot date is a claim we cannot trust
+        return (now - claimed_at).total_seconds() > self.CLAIM_LEASE_SECONDS
+
+    def release_message_claim(self, message_id: str) -> None:
+        """Hand back a claim whose work FAILED, so a redelivery retries it.
+
+        Without this, "claim before the work" would recreate the defect
+        `swarm/gmail-case-autocreate-2` just fixed from the other direction: a
+        document whose first attempt failed would be marked forever and never
+        read. A claim is released only by the holder, and only on failure --
+        success calls `mark_message_processed` instead.
         """
         if self._client is not None:
-            return self._client.collection("_processed_messages").document(message_id).get().exists
-        with self._lock:
-            return message_id in self._processed
-
-    def mark_message_processed(self, message_id: str) -> None:
-        if self._client is not None:
-            self._client.collection("_processed_messages").document(message_id).set(
-                {"processed_at": _now_iso()}
-            )
+            self._client.collection("_processed_messages").document(message_id).delete()
         else:
             with self._lock:
-                self._processed.add(message_id)
+                self._processed.pop(message_id, None)
+
+    def mark_message_processed(self, message_id: str) -> None:
+        payload = {"status": "done", "processed_at": _now_iso()}
+        if self._client is not None:
+            self._client.collection("_processed_messages").document(message_id).set(payload)
+        else:
+            with self._lock:
+                self._processed[message_id] = payload
 
 
 # Module-level singleton -- one store per process, matching how a Cloud Run

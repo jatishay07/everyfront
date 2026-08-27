@@ -103,3 +103,58 @@ def test_deliver_refuses_a_real_looking_destination():
     except UnsafeDestinationError:
         raised = True
     assert raised
+
+
+# ------------------------------------------------------------------ simulated
+#
+# The seam that produced HANDOFF.md defect #6. RELAY's `send_filing` computes
+# the fact; this bridge is the only thing that reads it; a falsy default in
+# between turned "not reported" into "definitely live" for every filing this
+# system has ever made.
+
+
+def test_send_filing_really_does_report_the_simulated_flag():
+    """The contract this bridge depends on, asserted against RELAY's ACTUAL
+    module rather than a stand-in -- the mismatch that made `delivery.fax` vs
+    `delivery.vendors.fax` invisible for weeks was exactly a seam nobody
+    tested end to end. With no Phaxio credentials this falls through to
+    FakeFaxVendor, which is the state of the world today."""
+    result = delivery_bridge.deliver(
+        filing_id="f-sim",
+        case_id="c1",
+        front="ppdr",
+        pdf=b"%PDF-1.4 fake",
+        destination="+18005550142",
+        channel="fax",
+    )
+    assert result["vendor"] == "fake"
+    assert result["simulated"] is True
+    assert delivery_bridge.simulated_flag(result) is True
+
+
+def test_simulated_flag_does_not_read_an_absent_key_as_a_live_send():
+    """`bool(vendor_result.get("simulated"))` is the whole of defect #6."""
+    assert delivery_bridge.simulated_flag({"vendor_id": "fake-ltr_x", "status": "sent"}) is True
+    assert delivery_bridge.simulated_flag({"simulated": None}) is True
+
+
+def test_simulated_flag_reports_an_explicitly_live_send_as_live():
+    assert delivery_bridge.simulated_flag({"vendor": "lob", "simulated": False}) is False
+
+
+def test_simulated_flag_never_sniffs_the_vendor_id_prefix():
+    """A vendor-id format is a string RELAY is free to change, not a
+    statement about whether anything left the building. The flag is the flag."""
+    assert delivery_bridge.simulated_flag({"vendor_id": "fake-ltr_x", "simulated": False}) is False
+    assert delivery_bridge.simulated_flag({"vendor_id": "ltr_real", "simulated": True}) is True
+
+
+def test_google_sync_is_reported_unconfigured_without_a_refresh_token(monkeypatch):
+    """The state of this repo today, and the one the no-op paths depend on."""
+    for var in (
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GOOGLE_OAUTH_REFRESH_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    assert delivery_bridge.google_sync_configured() is False

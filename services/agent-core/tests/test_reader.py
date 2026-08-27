@@ -39,7 +39,7 @@ def test_scrubs_the_exact_ef_2026_0006_fabrications():
     for field in scrubbed:
         assert field not in cleaned
     # amount_cents is untouched here -- 0 is not this function's concern
-    # (pipeline._merge_bill_fields already filters non-positive ints).
+    # (agent_core.factmerge already filters non-positive ints).
     assert cleaned["amount_cents"] == 0
 
 

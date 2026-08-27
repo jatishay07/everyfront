@@ -29,81 +29,252 @@ this case will ever have" is not knowable in advance.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import uuid
 
-from . import config, pubsub_client, rules_bridge
+from . import config, delivery_bridge, evidence, factmerge, pubsub_client, rules_bridge
 from .agents import auditor, clock, filer, lookup, reader, strategist, verifier
 from .casedata import parse_bill_dates
 from .store import store
 
-BILL_BEARING_LABELS = {"bill", "itemized_bill", "gfe", "collection_notice"}
-_STR_FIELDS = (
-    "provider_name",
-    "hospital_ein",
-    "hospital_ccn",
-    "service_date",
-    "first_statement_date",
-    "collector_name",
-    "validation_notice_date",
-)
-_INT_FIELDS = ("amount_cents", "gfe_amount_cents")
-_BOOL_FIELDS = ("in_collections",)
+#: The two §3.1 document types this system PRODUCES rather than receives.
+#: `agent_core/document_storage.py`'s `doc_type_for_front` writes exactly
+#: these, and nothing else in the codebase ever does -- Reader classifies an
+#: INCOMING document into one of `bill`/`itemized_bill`/`denial_letter`/
+#: `collection_notice`/`gfe`/`income_proof`, never into either of these.
+AGENT_GENERATED_TYPES = {"generated_application", "generated_letter"}
 
 
-def _log(case_id: str, agent: str, action: str, detail: str, citations: list[str] | None = None):
-    return store.append_event(case_id, agent, action, detail, citations or [])
+def _fact_event_id(case_id: str, agent: str, action: str, fact: object) -> str:
+    """A deterministic `events/{event_id}` for one FACT (contract §3.1 gives
+    the event an explicit id precisely so a caller can choose it).
+
+    Hashed over the case, the agent, the action and a caller-supplied
+    description of the fact itself -- never over the LLM's narration, which is
+    the thing that varies between two runs that established exactly the same
+    thing. `json.dumps(sort_keys=True)` so a dict's key order cannot change
+    the id; `default=str` so a stray date object degrades to something stable
+    rather than raising inside the audit log.
+    """
+    raw = json.dumps(
+        [case_id, agent, action, fact], sort_keys=True, default=str, separators=(",", ":")
+    )
+    return "fact-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:40]
+
+
+def _log(
+    case_id: str,
+    agent: str,
+    action: str,
+    detail: str,
+    citations: list[str] | None = None,
+    *,
+    fact: object = None,
+):
+    """Append one row to the audit log / activity feed.
+
+    Pass `fact` for anything ANALYSIS establishes, and the event gets a
+    deterministic id derived from it, so re-establishing the same fact is a
+    no-op instead of a new row (§2.3: idempotent handlers). Leave it off for
+    the filing lifecycle, where each event records a distinct thing that
+    happened in the world.
+
+    WHAT MAKES TWO EVENTS THE SAME EVENT. Not `(agent, action, detail)`:
+    `detail` is frequently the LLM's freeform narration (`lookup`'s
+    `resolve_hospital` logs `lookup_turn["answer"]`, Reader logs its own), and
+    two runs that resolve the same hospital narrate it differently every
+    time -- content-hashing the sentence would have deduplicated nothing,
+    which is exactly why `ef-2026-0001` carries six DIFFERENTLY-WORDED
+    `resolve_hospital` rows saying one thing. An event's identity is the fact
+    it records; the narration is presentation. So `fact` is the deterministic,
+    LLM-free description of what was established -- the resolved EIN, the
+    serialized deadline, the audit finding including its own line references.
+
+    THE TRAP ON THE OTHER SIDE: two genuinely distinct events must not
+    collapse. `rules.audit._cash_price_findings` runs PER LINE, so a bill with
+    the same overcharged code on two lines yields two findings whose kind,
+    description and citation are byte-identical and which are nonetheless two
+    separate overcharges. Their `line_refs` differ, so each finding's whole
+    dict -- not its prose -- is what identifies it, and both rows survive.
+    Reader's per-document events are keyed on `doc_id` for the same reason:
+    "classified as a bill" about document A and about document B is two facts.
+
+    AND A FACT THAT LEGITIMATELY CHANGES STILL SHOWS. A deadline recomputed
+    after a corrected statement date serializes differently, so it hashes
+    differently and lands as a new row next to the old one -- which is what an
+    audit log is for. Nothing is ever rewritten or removed; `append_event`
+    simply declines to write a row that is already there.
+    """
+    return store.append_event(
+        case_id,
+        agent,
+        action,
+        detail,
+        citations or [],
+        event_id=None if fact is None else _fact_event_id(case_id, agent, action, fact),
+    )
+
+
+def is_agent_generated(doc: dict | None) -> bool:
+    """True if this document is one THIS SYSTEM produced (a filled application
+    or a letter the Filer just sent), rather than evidence about the bill.
+
+    Everything else -- including a document whose `type` is still `""` or None
+    because Reader has not classified it yet -- is treated as incoming
+    evidence and re-runs the full analysis, which is the product working as
+    designed: an income proof the patient uploads a day later, or a denial
+    letter that arrives in week three, MUST re-open the question of which
+    fronts apply. The test is what the document IS, not when it arrived.
+    """
+    return bool(doc) and (doc.get("type") or "") in AGENT_GENERATED_TYPES
 
 
 def _is_plain_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _merge_bill_fields(case_id: str, case: dict, reader_fact: dict) -> dict:
-    """Fold one document's extraction into the case's `bill`. Returns the
-    (possibly unchanged) case -- callers that process several documents
-    should re-fetch or thread this return value rather than the stale `case`
-    they started with.
+def _render_unknown(unknown: list[dict]) -> str:
+    """The "what is still missing" half of the merge event.
 
-    TWO RULES, both learned the hard way on the first live run:
-
-    1. Only BILL-SHAPED documents contribute bill fields. An income proof or
-       a cat photo has nothing to say about the amount owed, and letting it
-       speak means the last document processed decides the case.
-    2. The extractor returns 0 and "" for fields it did not find, NOT None.
-       Filtering on `is not None` therefore let those sentinels through, and
-       they overwrote real values: a $2,625 bill with a $1,925 estimate became
-       amount=0, gfe=0, first_statement_date="". Every downstream number went
-       to zero -- PPDR eligibility, the deadlines, the savings banner -- while
-       each individual document's extraction remained perfectly correct. The
-       per-document facts and the case disagreed, which is the worst shape a
-       bug can take here: nothing errored, the numbers were just wrong.
+    Spelled out per fact, with the full reason for anything NO document type
+    can ever establish (`factmerge.UNSOURCEABLE_PATIENT_FACTS`) and a bare
+    name for the rest. A case that cannot be screened must say which single
+    fact is blocking it, not hand a human a list of three things to go and
+    check when exactly one of them is actually absent.
     """
-    extraction = reader_fact["extraction"] or {}
-    if not (
-        isinstance(extraction, dict)
-        and "_extraction_error" not in extraction
-        and reader_fact["label"] in BILL_BEARING_LABELS
-    ):
-        return case
+    spelled = [
+        f"{u['field']} -- {u['reason']}"
+        for u in unknown
+        if u["field"].split(".", 1)[-1] in factmerge.UNSOURCEABLE_PATIENT_FACTS
+    ]
+    bare = [
+        u["field"]
+        for u in unknown
+        if u["field"].split(".", 1)[-1] not in factmerge.UNSOURCEABLE_PATIENT_FACTS
+    ]
+    parts = list(spelled)
+    if bare:
+        parts.append("also not stated by any document on file: " + ", ".join(bare))
+    return " | ".join(parts)
 
-    bill_fields: dict = {}
-    for k in _STR_FIELDS:
-        v = extraction.get(k)
-        if isinstance(v, str) and v.strip():
-            bill_fields[k] = v.strip()
-    for k in _INT_FIELDS:
-        v = extraction.get(k)
-        if _is_plain_int(v) and v > 0:
-            bill_fields[k] = v
-    for k in _BOOL_FIELDS:
-        v = extraction.get(k)
-        if isinstance(v, bool):
-            bill_fields[k] = v
-    if reader_fact["label"] == "itemized_bill":
-        bill_fields["has_itemized_bill"] = True
-    if not bill_fields:
-        return case
-    return store.update_case(case_id, {"bill": {**(case.get("bill") or {}), **bill_fields}})
+
+def _merge_document_facts(case_id: str, case: dict) -> tuple[dict, list[str]]:
+    """THE MERGE STEP: every document's extraction -> canonical
+    `patient`/`bill`. Returns `(case, evidence)` -- the case as it stands
+    afterwards, and what this pass saw (`agent_core.evidence`).
+
+    A real step in the pipeline, run once per analysis pass between Reader and
+    the Lookup->Clock/Auditor->Strategist cascade, over EVERY document on file
+    rather than folding in whichever one just arrived. The precedence rules,
+    and the reasoning behind each, live in `agent_core/factmerge.py`; this
+    function is the part that touches Firestore and the audit trail.
+
+    WHY IT HAS TO EXIST AT ALL. `select_fronts`, `compute_deadlines` and
+    `screen_eligibility` all read `case["patient"]` and `case["bill"]`.
+    Reader writes `documents[].extracted`. The old `_merge_bill_fields`
+    carried seven bill scalars across that gap and nothing else -- no
+    `line_items`, nothing about the patient -- so a real emailed bill
+    (`case-1a0412ccfef90917`) whose three PDFs all classified and extracted
+    perfectly still reached `select_fronts` as an empty patient and a
+    line-item-less bill, and every front came back inapplicable. The Auditor,
+    which reads the documents directly, had already booked $210.00 of
+    duplicate 80053 on the same case: one case, two contradictory answers.
+
+    BOTH OUTCOMES ARE LOGGED, and that is the point. What the documents
+    established, with the document type each fact came from; what a document
+    claims that the case already knows differently (recorded, never silently
+    applied -- see factmerge rule 3); and what is still unknown, named one
+    fact at a time. `fact=` on each event keeps re-analysis from re-logging a
+    merge that established the same things (§2.3).
+
+    THE CASE IS RE-READ HERE, NOT INHERITED FROM THE CALLER. `on_document_added`
+    reads the case before Reader runs, and Reader is a 20-40s pair of model
+    calls, so by the time the merge happens that snapshot can be a minute old
+    and missing everything a CONCURRENT pass has established in the meantime --
+    and if this merge's own patch comes back empty (the steady state under
+    redelivery) nothing else would ever refresh it, so the whole cascade would
+    then run on that stale copy. One read, taken with the document list, so the
+    merge's inputs and the evidence stamp describe the same instant.
+
+    THE EVIDENCE STAMP is taken from exactly the documents this merge folded
+    in, and travels with the pass all the way to its writes
+    (`store.write_analysis`). It is deliberately fixed HERE rather than later:
+    `_run_cascade`'s Auditor and Strategist re-read the document store at their
+    own moments and may therefore see MORE than this, but
+    `case["patient"]`/`case["bill"]` -- the inputs `select_fronts` and
+    `screen_eligibility` actually read, and the ones the live defect turned
+    on -- are fixed by this merge. Stamping later would claim evidence the
+    pass's own conclusions were not built from, which is the one way an
+    evidence guard can make things worse instead of better.
+    """
+    documents = store.list_documents(case_id)
+    case = store.get_case(case_id) or case
+    pass_evidence = evidence.from_documents(documents)
+    patch, report = factmerge.merge_document_facts(case, documents)
+    if patch:
+        # Guarded like every other analysis write: a pass that saw only the
+        # bill must not re-derive `bill.amount_cents` from the bill after a
+        # pass that saw the ITEMIZED bill has already taken it from the
+        # higher-precedence document. factmerge rule 2 ("documents win
+        # outright" on `bill` fields) is order-independent WITHIN one pass and
+        # order-dependent ACROSS concurrent ones, which is the same defect the
+        # fronts had.
+        written = store.write_analysis(case_id, evidence=pass_evidence, patch=patch)
+        # `or case`: as everywhere else in this pipeline, a case purged
+        # mid-run (demo reset, manual delete) writes nothing and returns None
+        # rather than being resurrected -- finish against the local copy.
+        case = written["case"] or case
+        if written["superseded"]:
+            _log(
+                case_id,
+                "reader",
+                "merge_superseded",
+                "this pass merged a strict subset of the documents another pass had already "
+                "merged, so its facts were NOT written and the case keeps the better-informed "
+                "values. Nothing is lost: every document this pass read is inside that other "
+                "pass's evidence too.",
+                fact=["merge-superseded", pass_evidence],
+            )
+            return case, pass_evidence
+
+    if report["established"]:
+        _log(
+            case_id,
+            "reader",
+            "merge_document_facts",
+            "merged "
+            + ", ".join(
+                f"{e['field']}={e['value']!r} (from the {e['source_type']} document)"
+                for e in report["established"]
+            )
+            + " into the case. Nothing was inferred: every value above is stated by a "
+            "document on file.",
+            fact=report["established"],
+        )
+    if report["deferred"]:
+        _log(
+            case_id,
+            "verifier",
+            "document_disagrees_with_case",
+            "; ".join(
+                f"the {d['source_type']} document states {d['field']}={d['document_value']!r} "
+                f"but the case already records {d['case_value']!r}; the case value was KEPT "
+                "(a document mentions a person, it is not a record of one -- a value entered "
+                "by a human is not overwritten by an extraction)"
+                for d in report["deferred"]
+            ),
+            fact=report["deferred"],
+        )
+    if report["unknown"]:
+        _log(
+            case_id,
+            "reader",
+            "facts_not_established",
+            _render_unknown(report["unknown"]),
+            fact=[u["field"] for u in report["unknown"]],
+        )
+    return case, pass_evidence
 
 
 async def _run_reader(case_id: str, doc_id: str) -> dict:
@@ -120,6 +291,12 @@ async def _run_reader(case_id: str, doc_id: str) -> dict:
         "reader",
         "classify_and_extract",
         reader_turn["answer"] or f"classified as {rf['label']}",
+        # One document, one classification. Keyed on the document AND the
+        # label, so a re-read that reaches a different conclusion (a bill on
+        # the second pass, having been unreadable on the first) is a new,
+        # visible fact rather than a silent overwrite -- but a re-read that
+        # agrees with itself is not a second row.
+        fact=[doc_id, rf["label"]],
     )
     # Defect fix (persona 5 WO8, "never invent, always say so"): reader.py's
     # `_scrub_ungrounded` discards any extracted value that matched a known
@@ -135,6 +312,7 @@ async def _run_reader(case_id: str, doc_id: str) -> dict:
             f"discarded {len(rf['scrubbed_fields'])} implausible placeholder value(s) instead of "
             f"reporting them as facts: {', '.join(rf['scrubbed_fields'])}. This document could not "
             "be fully read; those fields are treated as unknown, not zero/epoch/placeholder.",
+            fact=[doc_id, sorted(rf["scrubbed_fields"])],
         )
     return reader_turn
 
@@ -166,8 +344,13 @@ def _charity_care_erasure_cents(case: dict) -> tuple[int, str]:
     household = patient.get("household_size")
     state = str(patient.get("state") or "").strip()
     amount_cents = bill.get("amount_cents")
-    if not _is_plain_int(income) or not _is_plain_int(household) or not state:
-        return 0, "insufficient patient data to screen eligibility"
+    # NOT a local three-way guard with its own sentence. `packages/rules`
+    # decides "can this be screened, and if not, what is missing?" -- this
+    # module asks it. A second copy of that judgement is what let a fixed bug
+    # keep answering from a stale reimplementation once already (526a8b9).
+    gap = rules_bridge.describe_patient_data_gap(patient)
+    if gap is not None:
+        return 0, gap
     if not _is_plain_int(amount_cents) or amount_cents <= 0:
         return 0, "no billed amount on file to erase"
 
@@ -179,15 +362,188 @@ def _charity_care_erasure_cents(case: dict) -> tuple[int, str]:
     return amount_cents, elig.explain()
 
 
-async def _run_cascade(case_id: str, case: dict) -> dict:
+def _patient_label(case: dict) -> str:
+    """What a calendar event is titled with. Synthetic fixture names only
+    (§0 rule 6); no case id, for the same reason `filer.py` keeps case ids out
+    of prompts -- a Calendar event is another place a rename cannot scrub."""
+    return str((case.get("patient") or {}).get("name") or "unnamed patient").strip()
+
+
+async def _sync_deadlines_to_calendar(
+    case_id: str, case: dict, deadlines: list[dict]
+) -> list[dict]:
+    """§4 persona 4 WO5, wired: every computed `Deadline` -> the demo Google
+    Calendar, red inside 7 days, the regulation citation in the description.
+
+    WHY HERE AND NOT IN THE FILER. A deadline exists the moment Clock computes
+    it, which is *before* anyone approves anything -- the whole point of the
+    240-day FAP window landing on a calendar is that a human sees it while
+    there is still time to act. Hanging it off the filing would put the
+    deadline on the calendar only for fronts that got filed, which is exactly
+    the ones that no longer need the reminder.
+
+    WHY IT CANNOT SLOW THE APPROVAL PATH. `_run_cascade` runs off
+    `case.document.added` (Pub/Sub push), never inside
+    `POST /cases/{id}/approve_filing` -- that endpoint's synchronous work was
+    cut to Verifier + a publish for exactly this reason (a measured 6-minute
+    timeout; see `approve_and_request_filing`). It is also the last thing the
+    cascade does, after every Firestore write, and it runs in a worker thread:
+    `sync_deadlines` is blocking `googleapiclient` I/O, and calling it inline
+    would stall the event loop for every other case being processed on the
+    same Cloud Run instance.
+
+    AND IT CANNOT FAIL THE ANALYSIS. `MissingCredentialsError` is already
+    handled inside `sync_deadlines` (returns `[]`), which is the state today
+    and until a human mints the token in `infra/OAUTH.md`. Anything else --
+    an expired refresh token, a 500 from Google, `google-api-python-client`
+    missing from the image -- is caught here and logged as a failed sync.
+    `google_auth.MissingCredentialsError`'s own docstring states the contract:
+    "a missing calendar sync must never take down a filing that already
+    succeeded." The same is true of an analysis that already succeeded.
+    """
+    configured = delivery_bridge.google_sync_configured()
+    dated = [d for d in deadlines if d.get("due")]
+    if not configured:
+        # `fact=` (see `_log`) makes this deterministic: logged ONCE per case,
+        # not once per cascade, so an unconfigured integration states itself
+        # plainly without flooding the activity feed.
+        if dated:
+            _log(
+                case_id,
+                "clock",
+                "calendar_sync_skipped",
+                f"{len(dated)} deadline(s) computed but NOT written to Google Calendar: the "
+                "demo account's OAuth refresh token is not configured in this environment "
+                "(see infra/OAUTH.md). The deadlines themselves are unaffected.",
+                fact="no-google-credentials",
+            )
+        return []
+
+    try:
+        synced = await asyncio.to_thread(
+            delivery_bridge.sync_deadlines, case_id, _patient_label(case), deadlines
+        )
+    except Exception as exc:  # noqa: BLE001 -- a calendar copy is never worth failing analysis for
+        _log(
+            case_id,
+            "clock",
+            "calendar_sync_failed",
+            f"Google Calendar sync failed ({type(exc).__name__}: {exc}); the computed "
+            "deadlines are unaffected and remain on the case.",
+            fact=f"calendar-error:{type(exc).__name__}",
+        )
+        return []
+
+    if synced:
+        _log(
+            case_id,
+            "clock",
+            "calendar_sync",
+            f"{len(synced)} deadline(s) written to Google Calendar: "
+            + "; ".join(f"{s['front']} due {s['due']}" for s in synced)
+            + ". Events carry the regulation citation and turn red inside 7 days.",
+            [d["citation"] for d in dated if d.get("citation")],
+            # The synced events themselves, so re-running an unchanged
+            # analysis re-upserts the same events (calendar_sync's own stable
+            # ids) without adding a second identical row to the feed.
+            fact=synced,
+        )
+    return synced
+
+
+async def _mirror_filing_to_drive(case_id: str, fact: dict, pdf: bytes | None) -> dict | None:
+    """§4 persona 4 WO6, wired: the filing this system just generated ->
+    a per-case Drive folder an advocate can be given access to.
+
+    Called from `run_filer` AFTER `filings/{filing_id}` is written, after the
+    front is marked `filed`, and after `filing.completed` is published -- so
+    by the time Drive is touched the filing is already durable and complete,
+    and a slow or dead Drive API can only ever delay this coroutine, never the
+    filing. Blocking `googleapiclient` I/O goes to a worker thread for the
+    same reason as the calendar sync.
+
+    Returns `None` when credentials are absent (today's state) or when the
+    mirror fails, having logged which -- never raises.
+    """
+    if pdf is None:
+        return None
+    filename = delivery_bridge.drive_filename(fact["front"], fact["form_id"])
+    if not delivery_bridge.google_sync_configured():
+        _log(
+            case_id,
+            "filer",
+            "drive_mirror_skipped",
+            f"{filename} was NOT mirrored to Google Drive: the demo account's OAuth refresh "
+            "token is not configured in this environment (see infra/OAUTH.md). The filing "
+            f"itself is unaffected and its PDF is on the case as document {fact.get('doc_id')}.",
+            fact="no-google-credentials",
+        )
+        return None
+
+    try:
+        result = await asyncio.to_thread(
+            delivery_bridge.mirror_case_filings,
+            case_id,
+            [{"filename": filename, "pdf_bytes": pdf, "front": fact["front"]}],
+        )
+    except Exception as exc:  # noqa: BLE001 -- a Drive copy never fails a completed filing
+        _log(
+            case_id,
+            "filer",
+            "drive_mirror_failed",
+            f"Google Drive mirror of {filename} failed ({type(exc).__name__}: {exc}); the "
+            "filing itself already completed and is unaffected.",
+            fact=f"drive-error:{type(exc).__name__}",
+        )
+        return None
+
+    if result:
+        _log(
+            case_id,
+            "filer",
+            "drive_mirror",
+            f"{filename} mirrored to the case's Google Drive folder "
+            f"(folder {result['case_folder_id']}), shareable with an advocate.",
+            fact=result,
+        )
+    return result
+
+
+async def _run_cascade(case_id: str, case: dict, pass_evidence: list[str] | None = None) -> dict:
     """Lookup -> {Clock, Auditor} (parallel) -> Strategist, exactly once, then
     the case-level patch (status, savings, denial_flag). Returns the four
     agent turns, same shape `on_document_added` always has.
+
+    `pass_evidence` is what this pass's merge actually saw
+    (`_merge_document_facts` returns it); every write below goes through
+    `store.write_analysis`, which refuses it if a better-informed pass has
+    already answered. Omitted, it is taken from the document store as it
+    stands now -- honest for a caller that ran no merge of its own (the direct
+    callers in `services/agent-core/tests`), since such a pass's only
+    document-derived inputs are the ones Auditor and Strategist read
+    themselves, from the store, at roughly this moment.
+
+    ONE WRITE AT THE END, NOT A WRITE PER FRONT. `fronts[]`,
+    `savings_found_cents`, `audit_findings_cents`, `denial_flag` and `status`
+    are all computed from this pass's single snapshot, so they are applied in
+    one guarded transaction: a superseded pass must not land half its answer
+    next to a better pass's other half, which is a contradiction inside one
+    case of exactly the kind `factmerge` was written to end.
     """
+    if pass_evidence is None:
+        pass_evidence = evidence.from_documents(store.list_documents(case_id))
     lookup_turn = await lookup.run(case_id, case)
     lf = lookup_turn["fact"]
     _log(
-        case_id, "lookup", "resolve_hospital", lookup_turn["answer"] or lf["note"], lf["citations"]
+        case_id,
+        "lookup",
+        "resolve_hospital",
+        lookup_turn["answer"] or lf["note"],
+        lf["citations"],
+        # `note` is built in code (agents/lookup.py's `_resolve_fact`), unlike
+        # the `answer` above it, which is the model talking. Resolving the
+        # same hospital the same way twice is one fact.
+        fact=[lf.get("resolved"), lf.get("ein"), lf.get("note"), lf.get("citations")],
     )
     if lf.get("resolved"):
         hospital = lf["hospital"]
@@ -208,11 +564,42 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
         bill_now = case.get("bill") or {}
         if resolved_ein and not (bill_now.get("hospital_ein") or "").strip():
             patch["bill"] = {**bill_now, "hospital_ein": resolved_ein}
+        # Same shape of backfill for `patient.state`, and it matters more:
+        # state selects the entire deadline regime (California has NO
+        # charity-care deadline, Illinois has a 90-day one -- §3.5's
+        # `compute_deadlines(bill, state)`), so a case with no state gets the
+        # federal floors and nothing else. `factmerge` reads it off the
+        # facility letterhead, which is the document a patient actually holds;
+        # the resolved `hospitals/{ein}` record carries the same fact from
+        # LEDGER's IRS Schedule H / CMS pipeline and is available only here,
+        # after Lookup. Fill-a-gap only, like every other patient fact -- it
+        # can confirm what the letterhead said but never rewrite it, and never
+        # a state a human entered.
+        patient_now = case.get("patient") or {}
+        hospital_state = factmerge.state_from_hospital(hospital)
+        if hospital_state and not str(patient_now.get("state") or "").strip():
+            patch["patient"] = {**patient_now, "state": hospital_state}
+            _log(
+                case_id,
+                "lookup",
+                "state_from_hospital_record",
+                f"no document on file stated a state; taking {hospital_state} from the "
+                f"resolved hospital record for {hospital.get('name', resolved_ein)}, which "
+                "is where the facility is -- the state-law overrides in the deadline engine "
+                "are hospital-conduct statutes, so the facility's state is the governing one.",
+                fact=["state-from-hospital", hospital_state],
+            )
         # `or case`: if this case was purged mid-run (a demo reset, a manual
-        # delete), update_case now writes nothing and returns None rather than
+        # delete), the write now does nothing and returns None rather than
         # resurrecting it. Finish the cascade against the local copy -- every
         # later write is a no-op too, so nothing is left behind.
-        case = store.update_case(case_id, patch) or case
+        #
+        # Guarded on the same evidence as everything else this pass writes: a
+        # hospital resolved from a bill nobody has re-read is no better than
+        # the one a better-informed pass already resolved, and on refusal the
+        # returned case is that pass's -- so the Auditor below still gets a
+        # `case["hospital"]` for its denial-lawfulness sub-check.
+        case = store.write_analysis(case_id, evidence=pass_evidence, patch=patch)["case"] or case
 
     # Clock needs only bill/patient; Auditor needs `case["hospital"]` (just
     # set above) solely for its denial-lawfulness sub-check. Neither depends
@@ -223,7 +610,11 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     )
     cf = clock_turn["fact"]
     for d in cf["deadlines"]:
-        _log(case_id, "clock", "compute_deadline", d["explain"], [d["citation"]])
+        # The whole serialized deadline, so a due date recomputed from a
+        # corrected statement date shows up as a new row (STATUTE's
+        # `.explain()` spells out the arithmetic, so it changes with it),
+        # while the same deadline recomputed unchanged does not.
+        _log(case_id, "clock", "compute_deadline", d["explain"], [d["citation"]], fact=d)
 
     af = auditor_turn["fact"]
     for finding in af["findings"]:
@@ -233,6 +624,11 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             f"audit_finding:{finding['kind']}",
             finding["detail"],
             [finding["citation"]] if finding["citation"] else [],
+            # The finding INCLUDING its `line_refs`. Two cash-price findings
+            # on two different lines of the same bill carry identical prose
+            # and are two real overcharges -- both must stay in the feed. See
+            # `_log`'s docstring.
+            fact=finding,
         )
     # DEFECT (persona 5 WO7, "ef-2026-0006 reports $0 savings"): with zero
     # findings, the loop above logs nothing at all -- a genuinely clean bill
@@ -252,6 +648,7 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
                 "audit_finding:none",
                 f"{examined} line item(s) examined -- no duplicate, NCCI, or cash-price "
                 "findings. $0.00 audit findings reflects a clean bill.",
+                fact=examined,
             )
         else:
             _log(
@@ -260,6 +657,7 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
                 "audit_skipped",
                 "no line items were extracted from any document on file -- $0.00 audit "
                 "findings reflects missing/unparseable data, not a clean bill.",
+                fact="no-line-items",
             )
     if af["denial_check"]["ran"]:
         _log(
@@ -268,9 +666,18 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             "denial_lawfulness_check",
             af["denial_check"]["detail"],
             [af["denial_check"].get("citation", "")],
+            # `detail` here is `DenialCheck.explain()` from packages/rules --
+            # computed, not narrated, so it is itself the fact.
+            fact=[af["denial_check"]["detail"], af["denial_check"].get("citation", "")],
         )
     elif af["denial_check"].get("reason"):
-        _log(case_id, "auditor", "denial_lawfulness_check_skipped", af["denial_check"]["reason"])
+        _log(
+            case_id,
+            "auditor",
+            "denial_lawfulness_check_skipped",
+            af["denial_check"]["reason"],
+            fact=af["denial_check"]["reason"],
+        )
 
     # select_fronts (via Strategist) needs two things Firestore's JSON-safe
     # case dict doesn't carry as-is: (1) `case["documents"]` to detect an
@@ -288,18 +695,6 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
 
     strategist_turn = await strategist.run(case_id, case)
     sf = strategist_turn["fact"]
-    for front in sf["fronts"]:
-        # NOT `upsert_front`: re-analysis must not reopen a front the filing
-        # lifecycle already owns -- see that method's docstring for the live
-        # ef-2026-0007 trace.
-        store.upsert_front_from_analysis(case_id, front)
-        _log(
-            case_id,
-            "strategist",
-            f"select_front:{front['front']}",
-            front["reason"],
-            [front["citation"]] if front.get("citation") else [],
-        )
 
     # Defect #1: savings_found_cents is built from real, auditable components,
     # never invented. Audit findings (duplicates, NCCI PTP/MUE when a table is
@@ -322,21 +717,14 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
     # show).
     examined = af.get("line_items_examined", 0)
     audit_note = "" if examined else " (no line items were extracted -- nothing to audit)"
-    _log(
-        case_id,
-        "auditor",
-        "savings_summary",
-        (
-            f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}"
-            f"{audit_note}. "
-            f"Charity-care free-tier erasure: ${charity_erasure_cents / 100:,.2f} "
-            f"({charity_explain}). Reported savings for this pass: "
-            f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "
-            "applies, already subsumes any billing-error dollars on the same bill)."
-        ),
-        [],
+    savings_detail = (
+        f"Audit findings (duplicates/PTP/MUE/cash-price): ${audit_cents / 100:,.2f}"
+        f"{audit_note}. "
+        f"Charity-care free-tier erasure: ${charity_erasure_cents / 100:,.2f} "
+        f"({charity_explain}). Reported savings for this pass: "
+        f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "
+        "applies, already subsumes any billing-error dollars on the same bill)."
     )
-
     # DEFECT (persona 5 WO6, idempotency): this used to be
     # `(case.get(...) or 0) + combined_cents` -- an ACCUMULATION, not a
     # recomputation. §2.3 requires every handler tolerate Pub/Sub redelivery,
@@ -382,8 +770,62 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             "reason": denial_check["detail"],
             "citation": denial_check["citation"],
         }
-    store.update_case(case_id, case_patch)
+
+    # THE ONE WRITE. Everything this pass concluded -- the fronts, the two
+    # money figures, the denial flag, the status -- lands in a single
+    # evidence-guarded transaction, or none of it does. `fronts=` still goes
+    # through the filing-lifecycle status rule (`upsert_front_from_analysis`'s
+    # protection, unchanged: `write_analysis` applies it per entry).
+    written = store.write_analysis(
+        case_id, evidence=pass_evidence, patch=case_patch, fronts=sf["fronts"]
+    )
+    if written["superseded"]:
+        # NOTHING from this pass is logged as a conclusion. The stale reason
+        # reaching the activity feed is half the live symptom: on
+        # case-1a043f4f4ae26dfa the feed carried "annual household income was
+        # not stated in any document on file" AFTER the pass that had read the
+        # $32,000 pay stub, next to a `patient.annual_income_cents` of
+        # 3,200,000. One row saying what actually happened is the honest
+        # record; four rows of a superseded answer is not.
+        _log(
+            case_id,
+            "strategist",
+            "analysis_superseded",
+            f"this pass reached the Strategist having seen {len(pass_evidence)} classified "
+            f"document(s), a strict subset of the {len(written['recorded_evidence'])} another "
+            "pass had already analysed, so its fronts, savings and denial flag were NOT "
+            "written. Concurrent passes are normal here -- one Pub/Sub redelivery or one more "
+            "attachment starts another -- and the case keeps the best-informed one.",
+            fact=["analysis-superseded", pass_evidence, written["recorded_evidence"]],
+        )
+    else:
+        for front in sf["fronts"]:
+            _log(
+                case_id,
+                "strategist",
+                f"select_front:{front['front']}",
+                front["reason"],
+                [front["citation"]] if front.get("citation") else [],
+                # Everything analysis owns about the front, minus `status`,
+                # which it does NOT own once a filing is under way (see
+                # `store.upsert_front_from_analysis`). Including it would make
+                # the same decision re-log itself the first time a front is
+                # filed.
+                fact={k: v for k, v in front.items() if k != "status"},
+            )
+        # Built entirely from computed numbers and STATUTE's own explanation --
+        # no narration in it -- so the sentence IS the fact. If any figure
+        # moves, the text moves and the feed gets a new, correct row.
+        _log(case_id, "auditor", "savings_summary", savings_detail, [], fact=savings_detail)
+
     pubsub_client.publish(config.TOPIC_CASE_ANALYSIS_COMPLETE, {"case_id": case_id})
+
+    # Calendar LAST: after every Firestore write AND after the analysis is
+    # announced. The case is the product; the calendar is a copy of it, so
+    # nothing -- not a subscriber, not `/demo/inject_bill`'s caller -- waits
+    # on Google to learn that the analysis finished. See
+    # `_sync_deadlines_to_calendar`; it cannot raise.
+    await _sync_deadlines_to_calendar(case_id, case, cf["deadlines"])
 
     return {
         "lookup": lookup_turn,
@@ -391,6 +833,97 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
         "auditor": auditor_turn,
         "strategist": strategist_turn,
     }
+
+
+#: Fields a `case.document.added` payload carries when the publisher also has
+#: the document itself -- i.e. the Gmail intake path
+#: (services/intake/intake/pipeline.py publishes `gcs_uri`, `filename` and
+#: `raw_text` alongside the ids). An event carrying NONE of them names records
+#: it cannot reconstruct; see `ensure_case_and_document_from_event`.
+EVENT_DOCUMENT_FIELDS = ("raw_text", "gcs_uri", "filename")
+
+
+def event_carries_document(payload: dict) -> bool:
+    """True if this `case.document.added` payload contains the document, not
+    just a pointer to one somebody else was supposed to have stored."""
+    return any(field in payload for field in EVENT_DOCUMENT_FIELDS)
+
+
+def ensure_case_and_document_from_event(payload: dict) -> dict:
+    """Create `cases/{case_id}` and `documents/{doc_id}` from a
+    `case.document.added` payload that names records nothing has created yet.
+
+    THE DEFECT THIS CLOSES: a bill that arrives by email produced nothing at
+    all, and said "ok" at every step. `services/intake` has no Firestore
+    grant -- the `ef-intake` service account has no `datastore.user` role, so
+    it genuinely cannot write `cases/` itself -- and it derives the case id
+    from the Gmail thread (`case-{thread_id}`). Nothing then created that
+    case: `on_document_added` returned `{"error": "no such case ..."}`, the
+    push handler discarded the error, returned HTTP 200 and marked the
+    document processed, so Pub/Sub never retried it. intake's own docstring
+    said agent-core "auto-creates both records on first sight". It never did.
+    This is that code.
+
+    WHAT IT MAY AND MAY NOT WRITE. Everything here comes out of the event; not
+    one field is inferred:
+
+    * `patient` and `bill` are `{}`. They are non-nullable in
+      web/lib/types.ts's `CaseSummary` (and `store.create_case` defaults every
+      OTHER CaseSummary field but these two), so the keys must exist or the
+      dashboard reads `undefined` -- a silent blank, not a loud error. Their
+      CONTENTS are unknown until Reader has read the PDF, and an emailed bill
+      tells us nothing about the patient. Empty is the honest shape: HANDOFF
+      defect #5 is this project's worst bug, an unreadable bill that produced
+      an invented EIN and epoch dates which the Clock then turned into real
+      regulatory deadlines. Absent stays absent.
+    * `type` is `""`, not a guess. Reader takes the stored type as a
+      classification HINT (`agents/reader.py`: `label = doc_type_hint or
+      classification["label"]`), so writing "bill" here would override Gemma's
+      first-pass classification with an assumption -- silently mislabelling a
+      denial letter, and disabling the §1.3-bonus model's whole job. `""` is
+      falsy, so Gemma decides. It is also a string, which matters: CANVAS's
+      DocumentGallery renders `titleCase(d.type)`, and `titleCase(undefined)`
+      throws and takes the case-detail page down with it (the same class of
+      crash CaseList.tsx documents from a live stub row). Reader overwrites it
+      with the real label seconds later.
+
+    Returns `{"case_created": bool, "document_created": bool}`.
+    """
+    case_id, doc_id = payload["case_id"], payload["doc_id"]
+    _, case_created = store.create_case_if_absent(case_id, {"patient": {}, "bill": {}})
+    _, doc_created = store.add_document_if_absent(
+        case_id,
+        doc_id,
+        {
+            "type": "",
+            "gcs_uri": payload.get("gcs_uri"),
+            "filename": payload.get("filename"),
+            "raw_text": payload.get("raw_text") or "",
+        },
+    )
+    if case_created or doc_created:
+        # Logged as "reader" because §3.1's `events[].agent` enum is closed and
+        # CANVAS's AgentAvatar indexes a Record<AgentName, ...> by it -- an
+        # invented "intake" agent renders an unstyled, unlabelled blank avatar
+        # in the feed. Reader is the agent this document is on its way to.
+        source = payload.get("gmail_message_id")
+        origin = f"gmail message {source}" if source else "an intake event"
+        name = payload.get("filename") or doc_id
+        chars = len(payload.get("raw_text") or "")
+        opened = (
+            f"Opened case {case_id} from {origin}, on document {name}"
+            if case_created
+            else f"Attached document {name} from {origin} to existing case {case_id}"
+        )
+        _log(
+            case_id,
+            "reader",
+            "case_opened_from_intake" if case_created else "document_attached_from_intake",
+            f"{opened} ({chars} characters of extracted text). No patient or bill facts are "
+            "known yet -- both are left empty rather than assumed, and stay that way until "
+            "Reader has actually read the document.",
+        )
+    return {"case_created": case_created, "document_created": doc_created}
 
 
 async def on_document_added(case_id: str, doc_id: str) -> dict:
@@ -403,18 +936,40 @@ async def on_document_added(case_id: str, doc_id: str) -> dict:
     every document re-triggers the full cascade. For a caller that already
     knows every document up front, see `process_case_documents` below --
     it does the same work without paying for N cascades.
+
+    EXCEPT for a document this system generated itself (see
+    `is_agent_generated`). The Filer stores every filled application and
+    letter it sends as a case document (`document_storage`, §3.1's
+    `generated_application`/`generated_letter`), so filing three fronts adds
+    three documents to the case. Feeding those back into the analysis is a
+    feedback loop, and it is the reason `ef-2026-0007`'s flagship audit
+    finding was logged 14 times: producing a letter is not new evidence about
+    the bill, so re-reading it (a Gemma call plus a Gemini extraction, on a
+    $150 budget) and re-auditing the whole bill is pure waste -- and, worse,
+    `select_fronts` is pure and hands every applicable front straight back at
+    "open", which is what `store.upsert_front_from_analysis` exists to
+    survive. Better not to run the analysis at all than to keep patching what
+    it clobbers on the way out.
     """
     case = store.get_case(case_id)
     if case is None:
         return {"error": f"no such case {case_id}"}
-    if store.get_document(case_id, doc_id) is None:
+    doc = store.get_document(case_id, doc_id)
+    if doc is None:
         return {"error": f"no such document {doc_id} on case {case_id}"}
+    if is_agent_generated(doc):
+        return {
+            "skipped": (
+                f"{doc_id} is a {doc.get('type')} this system generated; a filing we produced "
+                "is not new evidence about the bill and does not re-trigger analysis"
+            ),
+            "doc_id": doc_id,
+        }
 
     reader_turn = await _run_reader(case_id, doc_id)
-    case = _merge_bill_fields(case_id, case, reader_turn["fact"])
-    case = store.get_case(case_id)
+    case, pass_evidence = _merge_document_facts(case_id, case)
 
-    result = await _run_cascade(case_id, case)
+    result = await _run_cascade(case_id, case, pass_evidence)
     return {"reader": reader_turn, **result}
 
 
@@ -427,21 +982,34 @@ async def process_case_documents(case_id: str, doc_ids: list[str]) -> dict:
     exactly ONCE, instead of once per document like `on_document_added` (each
     of those documents has no ordering dependency on the others -- a GFE and
     an income-proof upload do not need to wait on each other to be read).
+
+    Documents this system generated itself are dropped from the batch for the
+    same reason `on_document_added` skips them entirely (see there); if that
+    leaves nothing to read, the cascade does not run either.
     """
     case = store.get_case(case_id)
     if case is None:
         return {"error": f"no such case {case_id}"}
 
+    generated = [d for d in doc_ids if is_agent_generated(store.get_document(case_id, d))]
+    doc_ids = [d for d in doc_ids if d not in set(generated)]
+    if not doc_ids:
+        return {
+            "skipped": "every document in this batch was generated by this system, not received",
+            "doc_ids": generated,
+        }
+
     reader_turns = await asyncio.gather(*(_run_reader(case_id, doc_id) for doc_id in doc_ids))
 
-    case = store.get_case(case_id)
-    for reader_turn in reader_turns:
-        if "fact" not in reader_turn:
-            continue  # a missing-document error for this one doc_id; skip it, don't crash the batch
-        case = _merge_bill_fields(case_id, case, reader_turn["fact"])
-    case = store.get_case(case_id)
+    # ONE merge for the whole batch, not one per document: `_merge_document_facts`
+    # reads every document on file and resolves precedence across all of them
+    # (see factmerge rule 2), so folding them in one at a time would only make
+    # "which document wins" depend on the order `gather` happened to return.
+    # A reader turn that errored wrote no extraction, so it contributes
+    # nothing here without needing to be filtered out.
+    case, pass_evidence = _merge_document_facts(case_id, case)
 
-    result = await _run_cascade(case_id, case)
+    result = await _run_cascade(case_id, case, pass_evidence)
     return {"readers": dict(zip(doc_ids, reader_turns, strict=True)), **result}
 
 
@@ -568,6 +1136,44 @@ async def finalize_filing(case_id: str, front: str, filing_id: str) -> dict:
         raise
 
 
+#: Prefixed onto every `filer.file` event. Code-built, model-free, and FIRST
+#: in the string so it survives truncation in the activity feed as well as
+#: narration.
+_SIMULATED_PREFIX = (
+    "[SIMULATED] no live fax/mail vendor credentials are configured, so this filing was "
+    "recorded by RELAY's fake vendor -- the form was really rendered and really passed the "
+    "destination allowlist, but nothing left the building."
+)
+_LIVE_PREFIX = "[LIVE] transmitted by a real vendor."
+
+
+def _filing_detail(front: str, ff: dict, answer: str | None) -> str:
+    """The `events/` line for one filing. Whether the send was simulated is
+    stated by CODE, before the model gets a word in.
+
+    THE BUG THIS EXISTS FOR. This used to be `filer_turn["answer"] or
+    (<fallback containing 'SIMULATED'>)`. The fallback was only ever reached
+    when the LLM failed to narrate at all -- so in every healthy run the word
+    "SIMULATED" was never written, because the model's one-sentence summary
+    (which is told the channel, vendor id and status, and nothing about
+    simulation) replaced the whole line. Live, right now, every filing in
+    `filings/` is a fake-vendor send and not one `filer.file` event says so.
+    That is HANDOFF.md defect #6 wearing a third hat: the fact was computed
+    correctly and then dropped on the way to the only place a judge reads.
+
+    `simulated` is a fact about the world, so it is not narration's to
+    phrase, shorten, or omit -- the same rule §2.1 applies to deadline math.
+    The model's sentence is appended as presentation, after it.
+    """
+    prefix = _SIMULATED_PREFIX if ff.get("simulated", True) else _LIVE_PREFIX
+    narration = (answer or "").strip() or (
+        f"filed {front!r} via {ff['channel']} (vendor_id={ff['vendor_id']}); real-world "
+        f"destination would be {ff.get('real_destination')!r}; generated PDF saved as "
+        f"document {ff.get('doc_id')} ({ff.get('gcs_uri') or 'no GCS bucket configured'})"
+    )
+    return f"{prefix} {narration}"
+
+
 async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
     case = store.get_case(case_id)
     if case is None:
@@ -575,18 +1181,7 @@ async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
 
     filer_turn = await filer.run(case_id, case, front, filing_id=filing_id)
     ff = filer_turn["fact"]
-    _log(
-        case_id,
-        "filer",
-        "file",
-        filer_turn["answer"]
-        or (
-            f"filed {front!r} via {ff['channel']} (vendor_id={ff['vendor_id']}, "
-            f"{'SIMULATED' if ff['simulated'] else 'live'}); real-world destination would be "
-            f"{ff.get('real_destination')!r}; generated PDF saved as document "
-            f"{ff.get('doc_id')} ({ff.get('gcs_uri') or 'no GCS bucket configured'})"
-        ),
-    )
+    _log(case_id, "filer", "file", _filing_detail(front, ff, filer_turn.get("answer")))
 
     # NOT `update_case(case_id, {"fronts": ...})` from the `case` read at the
     # top of this function: by the time Filer returns, that snapshot is however
@@ -597,4 +1192,8 @@ async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
     pubsub_client.publish(
         config.TOPIC_FILING_COMPLETED, {"filing_id": filing_id, "status": ff["status"]}
     )
+
+    # The filing is durable and announced by this point; Drive is a copy of an
+    # artifact that already exists. See `_mirror_filing_to_drive`.
+    await _mirror_filing_to_drive(case_id, ff, filer_turn.get("pdf"))
     return filer_turn

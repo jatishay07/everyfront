@@ -56,6 +56,15 @@ jobs:
       - name: Service tests (api)
         run: pytest services/api/tests -m "not e2e"
 
+      # services/intake was missed when the other two were wired in earlier
+      # today -- so this service's entire suite (70 tests, including the
+      # transport-level Gmail harness and the regression for an email with two
+      # same-named PDFs silently losing one) ran on nobody's machine but a
+      # maintainer's laptop. Same omission, same reason: root `testpaths` is
+      # ["tests", "packages"].
+      - name: Service tests (intake)
+        run: pytest services/intake/tests -m "not e2e"
+
   secrets:
     runs-on: ubuntu-latest
     steps:

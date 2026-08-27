@@ -286,3 +286,240 @@ def test_writes_never_resurrect_a_purged_case():
     assert s.upsert_front("c1", {"front": "ppdr", "applicable": True, "status": "open"}) is None
     assert s.upsert_front_from_analysis("c1", {"front": "audit", "applicable": True}) is None
     assert s.get_case("c1") is None
+
+
+def test_create_case_if_absent_creates_once_and_never_clobbers():
+    """Two Gmail attachments on one email derive the SAME `case-{thread_id}`
+    id, and a Pub/Sub redelivery reaches the same id again. `create_case`
+    `.set()`s, so a second call would reset the case to `intake` with no
+    fronts, discarding everything the first cascade wrote.
+    """
+    s = make_store()
+    case, created = s.create_case_if_absent("case-thread-1", {"patient": {}, "bill": {}})
+    assert created is True
+    assert case["status"] == "intake"
+
+    s.update_case("case-thread-1", {"status": "strategy_ready"})
+    s.upsert_front("case-thread-1", {"front": "audit", "applicable": True, "status": "filed"})
+
+    case, created = s.create_case_if_absent("case-thread-1", {"patient": {}, "bill": {}})
+    assert created is False
+    assert case["status"] == "strategy_ready"
+    assert [f["front"] for f in case["fronts"]] == ["audit"]
+    assert len(s.list_cases()) == 1
+
+
+def test_add_document_if_absent_preserves_what_reader_wrote():
+    """The same hazard one level down: a redelivered intake event must not
+    wipe the `type`/`extracted` Reader already wrote on that document."""
+    s = make_store()
+    s.create_case("c1", {})
+    doc, created = s.add_document_if_absent("c1", "d1", {"type": "", "raw_text": "a bill"})
+    assert created is True
+    assert doc["verified"] is None  # contract §3.1 default still applied
+
+    s.update_document("c1", "d1", {"type": "bill", "extracted": {"amount_cents": 262500}})
+
+    doc, created = s.add_document_if_absent("c1", "d1", {"type": "", "raw_text": "a bill"})
+    assert created is False
+    assert doc["type"] == "bill"
+    assert doc["extracted"] == {"amount_cents": 262500}
+    assert len(s.list_documents("c1")) == 1
+
+
+# ---------------------------------------------------------------------------
+# The stale-cascade race: an analysis pass must not overwrite a front written
+# by a better-informed pass (live, case-1a043f4f4ae26dfa, 2026-08-26).
+# ---------------------------------------------------------------------------
+
+
+def _evidence(*doc_ids: str) -> list[str]:
+    """An evidence descriptor holding these documents, shaped like the real one
+    (`agent_core.evidence.from_documents`) without needing extractions."""
+    return sorted(f"{doc_id}#fingerprint" for doc_id in doc_ids)
+
+
+def test_a_pass_that_saw_less_cannot_overwrite_one_that_saw_more():
+    """THE regression test for the defect measured live on
+    case-1a043f4f4ae26dfa.
+
+    An email with three PDFs publishes three `case.document.added` events, and
+    Pub/Sub redelivers each of them mid-cascade, so several full analysis
+    passes run concurrently on one case. Each writes the whole `fronts[]`
+    reason/applicable set from whatever documents existed when IT started, and
+    last writer wins -- where "last" is last to FINISH:
+
+        16:03:46  strategist  charity_care: "annual household income was not
+                              stated in any document on file..."
+        16:04:30  strategist  charity_care: "household size was not stated..."
+
+    and the reason STORED afterwards was the 16:03:46 one, written by a pass
+    that had never seen the $32,000 pay stub -- while
+    `patient.annual_income_cents` on the same Firestore document read
+    3,200,000. The case contradicted itself on screen.
+    """
+    s = make_store()
+    s.create_case("c1", {})
+
+    well_informed = _evidence("d-bill", "d-gfe", "d-paystub")
+    s.write_analysis(
+        "c1",
+        evidence=well_informed,
+        fronts=[
+            {
+                "front": "charity_care",
+                "applicable": False,
+                "status": "na",
+                "reason": "household size was not stated in any document on file",
+            }
+        ],
+    )
+
+    # The pass that only ever saw the bill finishes last and tries to write.
+    outcome = s.write_analysis(
+        "c1",
+        evidence=_evidence("d-bill"),
+        fronts=[
+            {
+                "front": "charity_care",
+                "applicable": False,
+                "status": "na",
+                "reason": "annual household income was not stated in any document on file",
+            }
+        ],
+    )
+
+    assert outcome["written"] is False
+    assert outcome["superseded"] is True
+    assert outcome["recorded_evidence"] == well_informed
+    front = s.get_case("c1")["fronts"][0]
+    assert front["reason"] == "household size was not stated in any document on file", (
+        "a pass that never saw the pay stub overwrote the conclusion of one that had"
+    )
+
+
+def test_the_superseded_pass_is_handed_the_better_informed_case_back():
+    """`write_analysis` returns the case as it STANDS, not the caller's stale
+    copy, so a superseded cascade finishes against the truth -- the Auditor's
+    denial check still gets a resolved `case["hospital"]`, and nothing
+    downstream has to branch on whether its own write landed."""
+    s = make_store()
+    s.create_case("c1", {})
+    s.write_analysis("c1", evidence=_evidence("d1", "d2"), patch={"savings_found_cents": 262_500})
+
+    outcome = s.write_analysis("c1", evidence=_evidence("d1"), patch={"savings_found_cents": 0})
+    assert outcome["written"] is False
+    assert outcome["case"]["savings_found_cents"] == 262_500
+
+
+def test_a_better_informed_pass_overwrites_whatever_came_before():
+    """The guard is one-directional. A pass that saw MORE always writes, in
+    whatever order the passes happened to finish."""
+    s = make_store()
+    s.create_case("c1", {})
+    s.write_analysis(
+        "c1",
+        evidence=_evidence("d-bill"),
+        fronts=[
+            {"front": "charity_care", "applicable": False, "status": "na", "reason": "no income"}
+        ],
+    )
+    outcome = s.write_analysis(
+        "c1",
+        evidence=_evidence("d-bill", "d-paystub"),
+        fronts=[
+            {"front": "charity_care", "applicable": True, "status": "open", "reason": "117% FPL"}
+        ],
+    )
+    assert outcome["written"] is True
+    assert s.get_case("c1")["fronts"][0]["reason"] == "117% FPL"
+
+
+def test_re_analysis_with_identical_evidence_still_writes():
+    """§2.3 idempotency, from the other side: equal evidence is NOT weaker. A
+    redelivery that saw the same documents recomputes the same values, so
+    letting it write changes nothing -- but refusing it would make the second
+    run of an unchanged analysis behave differently from the first."""
+    s = make_store()
+    s.create_case("c1", {})
+    same = _evidence("d1", "d2")
+    front = {"front": "audit", "applicable": True, "status": "open", "reason": "itemized bill"}
+    assert s.write_analysis("c1", evidence=same, fronts=[front])["written"] is True
+    second = s.write_analysis("c1", evidence=same, fronts=[front])
+    assert second["written"] is True
+    assert second["superseded"] is False
+    assert s.get_case("c1")["fronts"] == [front]
+
+
+def test_the_evidence_guard_never_reopens_a_filed_front():
+    """The two protections compose. `write_analysis` applies the
+    filing-lifecycle status rule per entry exactly as
+    `upsert_front_from_analysis` always did -- a better-informed pass may
+    rewrite the reason and still must not reopen a filing."""
+    s = make_store()
+    s.create_case("c1", {})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "open"})
+    s.set_front_status("c1", "audit", "filed")
+
+    s.write_analysis(
+        "c1",
+        evidence=_evidence("d1", "d2"),
+        fronts=[
+            {"front": "audit", "applicable": True, "status": "open", "reason": "6 findings"},
+            {"front": "ppdr", "applicable": True, "status": "open", "reason": "GFE delta $700"},
+        ],
+    )
+    by_front = {f["front"]: f for f in s.get_case("c1")["fronts"]}
+    assert by_front["audit"]["status"] == "filed"
+    assert by_front["audit"]["reason"] == "6 findings"
+    assert by_front["ppdr"]["status"] == "open"
+
+
+def test_a_superseded_pass_lands_none_of_its_answer_not_half():
+    """One transaction for the whole pass. `fronts[]`, the two money figures
+    and `denial_flag` all come from one snapshot, so a superseded pass must not
+    leave half its answer beside a better pass's other half -- a contradiction
+    inside one case, which is exactly what the live defect produced."""
+    s = make_store()
+    s.create_case("c1", {})
+    s.write_analysis(
+        "c1",
+        evidence=_evidence("d1", "d2"),
+        patch={"savings_found_cents": 262_500, "audit_findings_cents": 21_000},
+        fronts=[{"front": "audit", "applicable": True, "status": "open", "reason": "6 findings"}],
+    )
+    s.write_analysis(
+        "c1",
+        evidence=_evidence("d1"),
+        patch={"savings_found_cents": 0, "audit_findings_cents": 0},
+        fronts=[{"front": "audit", "applicable": False, "status": "na", "reason": "no line items"}],
+    )
+    case = s.get_case("c1")
+    assert case["savings_found_cents"] == 262_500
+    assert case["audit_findings_cents"] == 21_000
+    assert case["fronts"][0]["reason"] == "6 findings"
+
+
+def test_an_unguarded_analysis_write_behaves_exactly_as_it_did():
+    """`upsert_front_from_analysis` without `evidence` is the pre-2026-08-27
+    method, unchanged -- the guard is opt-in, so no existing caller changes
+    behaviour by accident."""
+    s = make_store()
+    s.create_case("c1", {})
+    s.write_analysis(
+        "c1", evidence=_evidence("d1", "d2"), fronts=[{"front": "audit", "status": "open"}]
+    )
+    s.upsert_front_from_analysis("c1", {"front": "audit", "status": "open", "reason": "unguarded"})
+    assert s.get_case("c1")["fronts"][0]["reason"] == "unguarded"
+
+
+def test_an_analysis_write_never_resurrects_a_purged_case():
+    s = make_store()
+    s.create_case("c1", {})
+    s._cases.pop("c1")
+    outcome = s.write_analysis(
+        "c1", evidence=_evidence("d1"), patch={"status": "strategy_ready"}, fronts=[]
+    )
+    assert outcome["case"] is None
+    assert outcome["written"] is False
+    assert s.get_case("c1") is None

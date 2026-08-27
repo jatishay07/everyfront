@@ -49,23 +49,110 @@ def start_watch(topic_name: str | None = None) -> dict:
     return result
 
 
+class HistoryExpired(Exception):
+    """`startHistoryId` is too old for Gmail to diff against.
+
+    Gmail keeps the history log for a limited window and answers **404** for
+    any `startHistoryId` that has aged out of it. Verbatim from the Gmail v1
+    discovery document shipped inside google-api-python-client 2.199.0
+    (`users.history.list`, parameter `startHistoryId`):
+
+        "Supplying an invalid or out of date `startHistoryId` typically
+        returns an `HTTP 404` error code. A `historyId` is typically valid
+        for at least a week, but in some rare circumstances may be valid for
+        only a few hours. If you receive an `HTTP 404` error response, your
+        application should perform a full sync."
+
+    The cursor in `state.py` is therefore perishable: a quiet weekend, a
+    paused demo, or "in some rare circumstances" a few HOURS invalidates it.
+
+    Raised instead of leaking `googleapiclient`'s `HttpError` so the recovery
+    policy lives in `pipeline.py` (which owns the cursor and knows what
+    "start over from here" means) rather than in this module, whose job is to
+    be a thin API wrapper.
+    """
+
+
+def _is_history_expired(exc: Exception) -> bool:
+    """True for the 404 Gmail returns on an aged-out `startHistoryId`.
+
+    Reads both attributes `googleapiclient.errors.HttpError` exposes rather
+    than picking one. Read out of the pinned 2.199.0 wheel's `errors.py`, not
+    assumed: `HttpError.__init__` sets `self.resp`, and `status_code` is a
+    `@property` returning `self.resp.status` -- so on the real exception the
+    two can never disagree. The fallback earns its keep against anything that
+    is only HttpError-SHAPED (a stub, a mock, a future rename).
+
+    Deliberately duck-typed rather than `except HttpError`: `googleapiclient`
+    is a real dependency of this service but is not installed in every
+    environment that collects these tests, and a module-level import of it
+    here would trade a runtime bug for a collection-time one.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "resp", None), "status", None)
+    try:
+        return int(status) == 404
+    except (TypeError, ValueError):
+        return False
+
+
 def list_new_message_ids(start_history_id: str) -> list[str]:
-    """Every message added since `start_history_id`, across paginated results."""
+    """Every INBOX message added since `start_history_id`, across paginated
+    results.
+
+    `labelId="INBOX"` is load-bearing. `start_watch` above passes
+    `labelIds: ["INBOX"]`, but that only constrains which changes TRIGGER a
+    push notification -- it is not remembered by, and does not propagate to,
+    `history.list`. Unfiltered, `history.list` reports `messageAdded` across
+    EVERY label, so a draft, a sent message, or a spam message that happens
+    to carry a PDF is fetched, stored to GCS and published as
+    `case.document.added` exactly as if a patient had emailed a bill in. On a
+    live demo account that is any PDF the operator touches, on camera.
+
+    `labelId` (singular, a plain string) is the real parameter name -- read
+    off the Gmail v1 discovery document in google-api-python-client 2.199.0,
+    where it is documented as "Only return messages with a label matching the
+    ID." Passing the `labelIds` list that `users.watch` takes instead would
+    raise `TypeError: Got an unexpected keyword argument labelIds` at the
+    first push -- `discovery.py` validates kwargs against the method's
+    argmap. Loud, at least, but only at runtime, and this code path has never
+    run against a live Gmail (no OAuth token has ever been minted).
+
+    HANDOFF (not built here): a From-header allowlist would narrow this
+    further, since INBOX still admits anything anyone sends the demo account.
+    It is not a one-liner -- it needs header extraction, RFC-5322 address
+    normalisation, and an explicit "unset means allow all" default so an
+    empty env var cannot silently swallow the demo bill. Written up in the PR
+    description rather than smuggled into this change.
+
+    Raises `HistoryExpired` if Gmail 404s because the cursor has aged out of
+    the history window; see that class and `pipeline.process_gmail_push`.
+    """
     service = _service()
     message_ids: list[str] = []
     page_token = None
     while True:
-        resp = (
-            service.users()
-            .history()
-            .list(
-                userId="me",
-                startHistoryId=start_history_id,
-                historyTypes=["messageAdded"],
-                pageToken=page_token,
+        try:
+            resp = (
+                service.users()
+                .history()
+                .list(
+                    userId="me",
+                    startHistoryId=start_history_id,
+                    historyTypes=["messageAdded"],
+                    labelId="INBOX",
+                    pageToken=page_token,
+                )
+                .execute()
             )
-            .execute()
-        )
+        except Exception as exc:
+            if _is_history_expired(exc):
+                raise HistoryExpired(
+                    f"Gmail returned 404 for startHistoryId={start_history_id!r} -- "
+                    "the cursor has aged out of the history window"
+                ) from exc
+            raise
         for record in resp.get("history", []):
             for added in record.get("messagesAdded", []):
                 message_ids.append(added["message"]["id"])
@@ -82,20 +169,51 @@ def fetch_message(message_id: str) -> dict:
 
 def extract_pdf_attachments(message: dict) -> list[dict]:
     """Walk a message's MIME tree; return PDF parts as
-    `[{"filename", "attachment_id", "mime_type"}, ...]`.
+    `[{"filename", "attachment_id", "mime_type", "part_id"}, ...]`.
 
     WO1 scopes this to PDF bills specifically ("stores raw attachments (PDF
     bills) to GCS") -- a non-PDF attachment (e.g. an inline signature image)
     is intentionally skipped rather than stored, to keep the intake surface
     matching what the rest of the pipeline expects to classify.
+
+    `part_id` IS LOAD-BEARING, not decoration. Nothing else about an
+    attachment is unique within a message:
+
+    * `filename` is not. One email can carry two PDFs both called `bill.pdf`
+      or `scan.pdf` -- two pages exported by the same scanner app, a bill and
+      a re-send, a forward that re-attaches. Before this field existed, the
+      pipeline keyed both its dedupe claim and its GCS object path on
+      `(message_id, filename)`, so the SECOND such attachment was claimed as
+      an already-seen duplicate and dropped: no event, no GCS object, no
+      error, no log line. A legal document vanished and the handler returned
+      `{"status": "ok"}`. That is HANDOFF.md's bug pattern exactly -- reported
+      success while doing nothing -- and it was found by the transport-level
+      harness in `tests/test_gmail_transport.py`, not by the 53 tests that
+      passed over it.
+    * `attachmentId` is unique but NOT stable: Gmail's own reference describes
+      it only as an id "that can be retrieved in a separate
+      `messages.attachments.get` request", with no stability guarantee across
+      calls, and it is known to differ between two `messages.get` responses
+      for the same message. Keying dedupe on it would turn a redelivery into
+      a duplicate publish -- trading a silent drop for a silent double.
+
+    `partId` is the one identifier Gmail documents as stable: "The immutable
+    ID of the message part" (`MessagePart.partId`, Gmail v1 discovery
+    document, google-api-python-client 2.199.0). It is unique within a
+    message and identical on every fetch of it.
+
+    The walk position (`"0"`, `"1"`, `"1.0"`, ...) is used as a fallback if a
+    response ever omits `partId`, so this never depends on a field being
+    present -- the fallback reproduces the same numbering Gmail itself uses.
     """
     out: list[dict] = []
 
     def _is_pdf(filename: str, mime_type: str) -> bool:
         return filename.lower().endswith(".pdf") or mime_type == "application/pdf"
 
-    def walk(parts: list[dict]) -> None:
-        for part in parts or []:
+    def walk(parts: list[dict], prefix: str = "") -> None:
+        for index, part in enumerate(parts or []):
+            part_id = part.get("partId") or f"{prefix}{index}"
             filename = part.get("filename") or ""
             body = part.get("body", {})
             mime_type = part.get("mimeType", "")
@@ -105,14 +223,16 @@ def extract_pdf_attachments(message: dict) -> list[dict]:
                         "filename": filename,
                         "attachment_id": body["attachmentId"],
                         "mime_type": mime_type or "application/pdf",
+                        "part_id": part_id,
                     }
                 )
             if part.get("parts"):
-                walk(part["parts"])
+                walk(part["parts"], prefix=f"{part_id}.")
 
     payload = message.get("payload", {})
     walk(payload.get("parts", []))
-    # Single-part messages carry the attachment directly on the payload.
+    # Single-part messages carry the attachment directly on the payload, whose
+    # own `partId` is `""` -- the fallback numbering gives it `"0"`.
     if (
         not payload.get("parts")
         and payload.get("filename")

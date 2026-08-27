@@ -257,7 +257,7 @@ with `fixtures/requirements.txt`, which PROOF had flagged twice.
 
 | Gap | State | To finish |
 |---|---|---|
-| **Gmail intake** | Code path complete, Cloud Scheduler renewal wired, auto-create fixed. **No OAuth token minted** | A human at a Google consent screen. Runbook in `infra/OAUTH.md` |
+| **Gmail intake** | Cloud Scheduler renewal wired and the push subscription is correctly PUSH — but the code path is **not** complete, and this row previously claimed "auto-create fixed", which was false. Nothing in `agent-core` creates a case from a `case.document.added` event (`grep -rn create_case services/` finds it only in `services/api`), so an emailed bill reaches GCS, returns 200 at every hop, and produces no case. The Gmail push topic also lacks the `gmail-api-push@system.gserviceaccount.com` publisher binding `users.watch` requires. **No OAuth token minted** | Three fixes in flight (2026-08-26), then a human at a Google consent screen. Runbook in `infra/OAUTH.md` — note its step-6 verification only checks that the PDF reached GCS, which passes even when the feature is dead |
 | **Calendar + Drive** | Built and tested in `packages/delivery`, never called by the pipeline | RELAY left exact call sites in PR #35's handoff |
 | **Real fax / mail** | Interface live; vendors are recording stubs | Phaxio and Lob offer free test keys; signup needs a human |
 | **`case.analysis.complete`, `filing.completed`** | PULL subscriptions, no handlers | Informational — Firestore state is written synchronously before publish |

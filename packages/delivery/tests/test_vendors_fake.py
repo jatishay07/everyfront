@@ -55,18 +55,21 @@ def test_fake_mail_send_records_and_returns_tracking():
     assert result["simulated"] is True  # regression, see the fax test above
 
 
-def test_send_filing_marks_a_non_fake_vendor_as_not_simulated():
-    """`simulated` must track whichever vendor actually ran, not always be
-    True -- a real Phaxio/Lob send (vendor name != "fake") must report
-    `simulated: False` so the audit trail can tell the two apart."""
+def test_send_filing_reports_a_genuine_production_send_as_not_simulated():
+    """`simulated` must track what the vendor client actually did, not the
+    vendor's NAME. A hypothetical production-mode client -- none exists in
+    this package, `credentials.py` refuses production keys -- says so itself
+    and `send_filing` passes it through verbatim."""
 
-    class _StubRealVendor:
+    class _StubProductionVendor:
         channel = "fax"
 
         def send(self, filing_id, pdf, destination):
             from delivery.vendors.base import VendorResult
 
-            return VendorResult(vendor="phaxio", vendor_id="real-123", status="sent")
+            return VendorResult(
+                vendor="phaxio", vendor_id="real-123", status="sent", simulated=False
+            )
 
     result = send_filing(
         filing_id="fil_5",
@@ -75,10 +78,99 @@ def test_send_filing_marks_a_non_fake_vendor_as_not_simulated():
         channel="fax",
         pdf=b"%PDF fake",
         destination=FAX_OK,
-        fax_client=_StubRealVendor(),
+        fax_client=_StubProductionVendor(),
     )
     assert result["vendor"] == "phaxio"
     assert result["simulated"] is False
+
+
+def test_send_filing_reports_a_test_mode_vendor_send_as_simulated():
+    """The subtler half of defect #6. `simulated` used to be derived as
+    `vendor == "fake"`, which calls a Phaxio/Lob call made with TEST
+    credentials a LIVE send -- it has a real vendor id and a vendor name that
+    isn't "fake", and it still puts nothing on a phone line or in a mailbag.
+    Only the client knows its mode, so only the client may say."""
+
+    class _StubTestModeVendor:
+        channel = "fax"
+
+        def send(self, filing_id, pdf, destination):
+            from delivery.vendors.base import VendorResult
+
+            return VendorResult(
+                vendor="phaxio", vendor_id="fax-4711", status="sent", simulated=True
+            )
+
+    result = send_filing(
+        filing_id="fil_5b",
+        case_id="case_1",
+        front="ppdr",
+        channel="fax",
+        pdf=b"%PDF fake",
+        destination=FAX_OK,
+        fax_client=_StubTestModeVendor(),
+    )
+    assert result["vendor"] == "phaxio"
+    assert result["simulated"] is True
+
+
+def test_send_filing_fails_closed_when_a_client_omits_simulated():
+    """A vendor client that does not answer the question must never be read
+    as "this was live". The safe error is under-claiming a real send."""
+
+    class _SilentVendor:
+        channel = "fax"
+
+        def send(self, filing_id, pdf, destination):
+            class _Result:
+                vendor = "somevendor"
+                vendor_id = "x-1"
+                status = "sent"
+                proof: dict = {}
+
+                class _TS:
+                    @staticmethod
+                    def isoformat():
+                        return "1970-01-01T00:00:00+00:00"
+
+                sent_at = _TS()
+
+            return _Result()
+
+    result = send_filing(
+        filing_id="fil_5c",
+        case_id="case_1",
+        front="ppdr",
+        channel="fax",
+        pdf=b"%PDF fake",
+        destination=FAX_OK,
+        fax_client=_SilentVendor(),
+    )
+    assert result["simulated"] is True
+
+
+def test_send_filing_overrides_a_fake_vendor_that_claims_to_be_live():
+    """Rule 2 of the contract, re-asserted rather than trusted: `vendor ==
+    "fake"` is simulated, whatever the client returned."""
+
+    class _LyingFakeVendor:
+        channel = "fax"
+
+        def send(self, filing_id, pdf, destination):
+            from delivery.vendors.base import VendorResult
+
+            return VendorResult(vendor="fake", vendor_id="fake-1", status="sent", simulated=False)
+
+    result = send_filing(
+        filing_id="fil_5d",
+        case_id="case_1",
+        front="ppdr",
+        channel="fax",
+        pdf=b"%PDF fake",
+        destination=FAX_OK,
+        fax_client=_LyingFakeVendor(),
+    )
+    assert result["simulated"] is True
 
 
 def test_send_filing_refuses_unsafe_fax_destination():

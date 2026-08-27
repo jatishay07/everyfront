@@ -25,7 +25,15 @@ def test_finds_pdf_in_flat_multipart_message():
     }
     found = extract_pdf_attachments(message)
     assert found == [
-        {"filename": "bill.pdf", "attachment_id": "att_1", "mime_type": "application/pdf"}
+        {
+            "filename": "bill.pdf",
+            "attachment_id": "att_1",
+            "mime_type": "application/pdf",
+            # The MIME part's position. `partId` is absent from this fixture,
+            # so the walk-position fallback supplies it -- see
+            # `extract_pdf_attachments` for why the id is load-bearing.
+            "part_id": "1",
+        }
     ]
 
 
@@ -55,6 +63,7 @@ def test_finds_pdf_nested_inside_multipart_alternative():
             "filename": "itemized_bill.pdf",
             "attachment_id": "att_2",
             "mime_type": "application/octet-stream",
+            "part_id": "1",
         }
     ]
 
@@ -84,7 +93,14 @@ def test_single_part_message_with_attachment_directly_on_payload():
     }
     found = extract_pdf_attachments(message)
     assert found == [
-        {"filename": "bill.pdf", "attachment_id": "att_4", "mime_type": "application/pdf"}
+        {
+            "filename": "bill.pdf",
+            "attachment_id": "att_4",
+            "mime_type": "application/pdf",
+            # A single-part payload's own `partId` is `""`; the fallback
+            # numbers it `"0"` so the claim key and object path stay stable.
+            "part_id": "0",
+        }
     ]
 
 

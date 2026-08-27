@@ -20,11 +20,28 @@ export function formatCompactUSD(cents: number): string {
 
 export function formatDate(iso: string | null): string {
   if (!iso) return "—";
-  const d = new Date(iso);
+  // A date-only "YYYY-MM-DD" is a CALENDAR date, not an instant. `new Date()`
+  // parses it as UTC midnight, and `toLocaleDateString` then renders it in the
+  // viewer's zone -- so a statutory deadline of 2026-10-03 displayed as
+  // "Oct 2, 2026" to anyone west of UTC. Observed live on case-1a0412ccfef90917,
+  // where the ladder read "Oct 2, 2026" and the chip beside it read "37d left"
+  // -- 37 days being correct for Oct 3. The two disagreed on screen because
+  // `daysUntil` below already handles this and this function did not, eleven
+  // lines under a comment explaining the exact trap.
+  //
+  // A deadline rendered a day early is the safer direction to be wrong in, and
+  // still wrong: this product's entire claim is that it computes statutory
+  // dates correctly and shows its work.
+  const isDateOnly = /^\d{4}-\d{2}-\d{2}$/.test(iso);
+  const d = isDateOnly ? new Date(dateOnlyToUTCms(iso)) : new Date(iso);
   return d.toLocaleDateString("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
+    // Pin the zone for calendar dates so every viewer sees the same day.
+    // Timestamps (events, filings) keep local rendering -- an instant SHOULD
+    // localise.
+    ...(isDateOnly ? { timeZone: "UTC" } : {}),
   });
 }
 

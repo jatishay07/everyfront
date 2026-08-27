@@ -22,7 +22,11 @@ test/ops escape hatch.
 
 Idempotency (contract §2.3): both push endpoints dedupe on the Pub/Sub
 message id via `CaseStore.has_processed_message` / `mark_message_processed`
-before doing any work.
+before doing any work. The document-added routes -- push AND synchronous --
+additionally CLAIM `doc:{case_id}:{doc_id}` before starting, because the work
+is a 60-130s LLM cascade running against a 60s ack deadline and a check that
+only becomes true at the end guards nothing while the work is in flight. See
+`store.claim_message`.
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ from datetime import date, timedelta
 
 from agent_core import pipeline
 from agent_core.store import store
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from google.adk.agents import Agent
 from google.adk.runners import InMemoryRunner
 from google.genai import types
@@ -204,12 +208,41 @@ class ApproveFiling(BaseModel):
     front: str
 
 
+def _doc_key(case_id: str, doc_id: str) -> str:
+    """The one dedupe key every route into the analysis shares.
+
+    Not the Pub/Sub message id: `/demo/inject_bill` reaches agent-core twice
+    for the same document -- once by publishing `case.document.added` and once
+    by calling `/internal/process_documents` synchronously -- and those two
+    arrivals have different message ids (one of them has none at all). The
+    DOCUMENT is what may only be analysed once, so the document is the key.
+    """
+    return f"doc:{case_id}:{doc_id}"
+
+
 @app.post("/internal/process_document")
 async def process_document(req: ProcessDocument) -> dict:
     """Synchronous entry point for `case.document.added` -- see module
     docstring for why this exists alongside the push-subscriber route below.
+
+    Claims the same `doc:` key the push route claims, so the two routes see
+    each other; see `/internal/process_documents` below.
     """
-    return await pipeline.on_document_added(req.case_id, req.doc_id)
+    key = _doc_key(req.case_id, req.doc_id)
+    if store.has_processed_message(key):
+        return {"status": "document already processed", "doc_id": req.doc_id}
+    if not store.claim_message(key):
+        return {"status": "document already being processed", "doc_id": req.doc_id}
+    try:
+        result = await pipeline.on_document_added(req.case_id, req.doc_id)
+    except Exception:
+        store.release_message_claim(key)
+        raise
+    if result.get("error"):
+        store.release_message_claim(key)
+    else:
+        store.mark_message_processed(key)
+    return result
 
 
 @app.post("/internal/process_documents")
@@ -220,8 +253,39 @@ async def process_documents(req: ProcessDocuments) -> dict:
     case up front (`services/api`'s `/demo/inject_bill`), instead of N calls
     to `/internal/process_document` each re-running the whole cascade. See
     `agent_core.pipeline.process_case_documents`'s docstring.
+
+    DEFECT (found by a previous SWARM agent, left as a strict=False xfail
+    named `test_inject_bill_two_routes_should_run_one_cascade`; fixed here):
+    `dce54e6` deduped the PUSH route on `doc:{case_id}:{doc_id}`, but this
+    route -- the other half of the same duplication -- never touched that key,
+    so the two routes still could not see each other and a 3-document case
+    still ran 4 cascades. Both routes now CLAIM the key before doing the work
+    (`store.claim_message`) and release it if the work fails, which is what
+    that test's own docstring said a real fix would need. Marking after the
+    fact is not enough: this call takes minutes and push delivery is
+    sub-second.
+
+    Documents that are already done, or already claimed by another route, drop
+    out of the batch rather than being read a second time; if that empties the
+    batch there is no cascade to run either.
     """
-    return await pipeline.process_case_documents(req.case_id, req.doc_ids)
+    keys = {doc_id: _doc_key(req.case_id, doc_id) for doc_id in req.doc_ids}
+    mine = [doc_id for doc_id in req.doc_ids if store.claim_message(keys[doc_id])]
+    if not mine:
+        return {"status": "every document already processed or in progress"}
+    try:
+        result = await pipeline.process_case_documents(req.case_id, mine)
+    except Exception:
+        for doc_id in mine:
+            store.release_message_claim(keys[doc_id])
+        raise
+    failed = result.get("error")
+    for doc_id in mine:
+        if failed:
+            store.release_message_claim(keys[doc_id])
+        else:
+            store.mark_message_processed(keys[doc_id])
+    return result
 
 
 @app.post("/internal/approve_filing")
@@ -273,11 +337,84 @@ async def pubsub_document_added(body: dict) -> dict:
     # Deduping here rather than dropping the publish keeps the topic genuinely
     # exercised, which §1.3 asks us to demonstrate and a judge can see in the
     # Cloud Console.
-    doc_key = f"doc:{case_id}:{doc_id}"
+    #
+    # CLAIMED, not checked-then-marked (see `store.claim_message`): this
+    # handler's work takes 60-130 seconds against a 60-second ack deadline, so
+    # Pub/Sub redelivers WHILE it is still running. Every redelivery used to
+    # find the key unwritten and start another concurrent cascade, up to
+    # `--max-delivery-attempts=5` of them -- which is how ef-2026-0007's
+    # flagship finding reached the feed 14 times.
+    doc_key = _doc_key(case_id, doc_id)
     if store.has_processed_message(doc_key):
         return {"status": "document already processed", "doc_id": doc_id}
+    if not store.claim_message(doc_key):
+        # Someone else is mid-cascade on this exact document. NOT acked: the
+        # holder releases its claim if it fails, and acking here would ack the
+        # only delivery of a document that then never got analysed -- this
+        # repo's signature defect ("reported success while doing nothing").
+        # Pub/Sub retries; the retry is one Firestore read until the holder
+        # settles, at which point it either short-circuits above or does the
+        # work.
+        raise HTTPException(
+            status_code=409, detail=f"{doc_key} is already being processed by another delivery"
+        )
 
-    result = await pipeline.on_document_added(case_id, doc_id)
+    # Everything from here to the mark runs inside the claim. Anything else
+    # this handler grows -- `swarm/gmail-case-autocreate-2` adds a
+    # create-the-case-and-document step for the Gmail path -- belongs INSIDE
+    # this try, or a failure there leaks the claim for a full lease.
+    try:
+        # Auto-create the case + document a Gmail-sourced event names.
+        # INSIDE the claim, per the note above: `services/intake` cannot write
+        # Firestore (no `datastore.user` on `ef-intake`) and derives the case id
+        # from the Gmail thread, so for a real emailed bill NOTHING has created
+        # `cases/{case_id}` or its document -- `on_document_added` returned
+        # `{"error": "no such case"}` and that used to be discarded. See
+        # `pipeline.ensure_case_and_document_from_event` for what may and may
+        # not be written (nothing is inferred; `patient`/`bill` stay empty).
+        #
+        # Gated on the event actually CARRYING the document: an event that is
+        # only a pair of ids cannot reconstruct anything, and creating a case
+        # from one would resurrect deleted cases -- `fixtures/demo_reset.py`
+        # renames each case and deletes the original while its own
+        # `case.document.added` messages are still in flight, which is exactly
+        # what `store.update_case`'s "never resurrect a purged case" guard
+        # exists to prevent.
+        if store.get_case(case_id) is None or store.get_document(case_id, doc_id) is None:
+            if not pipeline.event_carries_document(payload):
+                logger.warning(
+                    "case.document.added names case=%s doc=%s, neither of which exists, and "
+                    "carries no document to create them from; acking (a retry cannot "
+                    "reconstruct it)",
+                    case_id,
+                    doc_id,
+                )
+                store.release_message_claim(doc_key)
+                return {"status": "unknown case/document and nothing to create it from, acked"}
+            pipeline.ensure_case_and_document_from_event(payload)
+
+        result = await pipeline.on_document_added(case_id, doc_id)
+    except Exception:
+        store.release_message_claim(doc_key)
+        raise
+
+    # `on_document_added` reports failure by RETURNING `{"error": ...}`, not by
+    # raising. Marking regardless is what permanently poisoned a document: the
+    # handler answered 200 `{"status":"ok","result_keys":["error"]}`, Pub/Sub
+    # acked, and the `doc:` key then suppressed every redelivery of a document
+    # that had never been read. Hand the claim back and answer non-2xx so
+    # Pub/Sub's own backoff retries -- same shape as /pubsub/filing-requested,
+    # which re-raises for exactly this reason.
+    #
+    # NOTE for the merge with `swarm/gmail-case-autocreate-2`: that branch adds
+    # this same mark-only-on-success behaviour to this handler independently.
+    # Keep BOTH halves -- its 500, and the `release_message_claim` above it,
+    # which is what a claim taken BEFORE the work additionally needs.
+    if result.get("error"):
+        store.release_message_claim(doc_key)
+        logger.error("case.document.added processing failed for %s: %s", doc_key, result["error"])
+        raise HTTPException(status_code=500, detail=result["error"])
+
     store.mark_message_processed(doc_key)
     store.mark_message_processed(message_id)
     return {"status": "ok", "result_keys": list(result.keys())}
