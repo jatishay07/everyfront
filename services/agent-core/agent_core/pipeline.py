@@ -33,12 +33,10 @@ import hashlib
 import json
 import uuid
 
-from . import config, delivery_bridge, pubsub_client, rules_bridge
+from . import config, delivery_bridge, factmerge, pubsub_client, rules_bridge
 from .agents import auditor, clock, filer, lookup, reader, strategist, verifier
 from .casedata import parse_bill_dates
 from .store import store
-
-BILL_BEARING_LABELS = {"bill", "itemized_bill", "gfe", "collection_notice"}
 
 #: The two §3.1 document types this system PRODUCES rather than receives.
 #: `agent_core/document_storage.py`'s `doc_type_for_front` writes exactly
@@ -46,17 +44,6 @@ BILL_BEARING_LABELS = {"bill", "itemized_bill", "gfe", "collection_notice"}
 #: INCOMING document into one of `bill`/`itemized_bill`/`denial_letter`/
 #: `collection_notice`/`gfe`/`income_proof`, never into either of these.
 AGENT_GENERATED_TYPES = {"generated_application", "generated_letter"}
-_STR_FIELDS = (
-    "provider_name",
-    "hospital_ein",
-    "hospital_ccn",
-    "service_date",
-    "first_statement_date",
-    "collector_name",
-    "validation_notice_date",
-)
-_INT_FIELDS = ("amount_cents", "gfe_amount_cents")
-_BOOL_FIELDS = ("in_collections",)
 
 
 def _fact_event_id(case_id: str, agent: str, action: str, fact: object) -> str:
@@ -147,52 +134,104 @@ def _is_plain_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _merge_bill_fields(case_id: str, case: dict, reader_fact: dict) -> dict:
-    """Fold one document's extraction into the case's `bill`. Returns the
-    (possibly unchanged) case -- callers that process several documents
-    should re-fetch or thread this return value rather than the stale `case`
-    they started with.
+def _render_unknown(unknown: list[dict]) -> str:
+    """The "what is still missing" half of the merge event.
 
-    TWO RULES, both learned the hard way on the first live run:
-
-    1. Only BILL-SHAPED documents contribute bill fields. An income proof or
-       a cat photo has nothing to say about the amount owed, and letting it
-       speak means the last document processed decides the case.
-    2. The extractor returns 0 and "" for fields it did not find, NOT None.
-       Filtering on `is not None` therefore let those sentinels through, and
-       they overwrote real values: a $2,625 bill with a $1,925 estimate became
-       amount=0, gfe=0, first_statement_date="". Every downstream number went
-       to zero -- PPDR eligibility, the deadlines, the savings banner -- while
-       each individual document's extraction remained perfectly correct. The
-       per-document facts and the case disagreed, which is the worst shape a
-       bug can take here: nothing errored, the numbers were just wrong.
+    Spelled out per fact, with the full reason for anything NO document type
+    can ever establish (`factmerge.UNSOURCEABLE_PATIENT_FACTS`) and a bare
+    name for the rest. A case that cannot be screened must say which single
+    fact is blocking it, not hand a human a list of three things to go and
+    check when exactly one of them is actually absent.
     """
-    extraction = reader_fact["extraction"] or {}
-    if not (
-        isinstance(extraction, dict)
-        and "_extraction_error" not in extraction
-        and reader_fact["label"] in BILL_BEARING_LABELS
-    ):
-        return case
+    spelled = [
+        f"{u['field']} -- {u['reason']}"
+        for u in unknown
+        if u["field"].split(".", 1)[-1] in factmerge.UNSOURCEABLE_PATIENT_FACTS
+    ]
+    bare = [
+        u["field"]
+        for u in unknown
+        if u["field"].split(".", 1)[-1] not in factmerge.UNSOURCEABLE_PATIENT_FACTS
+    ]
+    parts = list(spelled)
+    if bare:
+        parts.append("also not stated by any document on file: " + ", ".join(bare))
+    return " | ".join(parts)
 
-    bill_fields: dict = {}
-    for k in _STR_FIELDS:
-        v = extraction.get(k)
-        if isinstance(v, str) and v.strip():
-            bill_fields[k] = v.strip()
-    for k in _INT_FIELDS:
-        v = extraction.get(k)
-        if _is_plain_int(v) and v > 0:
-            bill_fields[k] = v
-    for k in _BOOL_FIELDS:
-        v = extraction.get(k)
-        if isinstance(v, bool):
-            bill_fields[k] = v
-    if reader_fact["label"] == "itemized_bill":
-        bill_fields["has_itemized_bill"] = True
-    if not bill_fields:
-        return case
-    return store.update_case(case_id, {"bill": {**(case.get("bill") or {}), **bill_fields}})
+
+def _merge_document_facts(case_id: str, case: dict) -> dict:
+    """THE MERGE STEP: every document's extraction -> canonical
+    `patient`/`bill`. Returns the (possibly unchanged) case.
+
+    A real step in the pipeline, run once per analysis pass between Reader and
+    the Lookup->Clock/Auditor->Strategist cascade, over EVERY document on file
+    rather than folding in whichever one just arrived. The precedence rules,
+    and the reasoning behind each, live in `agent_core/factmerge.py`; this
+    function is the part that touches Firestore and the audit trail.
+
+    WHY IT HAS TO EXIST AT ALL. `select_fronts`, `compute_deadlines` and
+    `screen_eligibility` all read `case["patient"]` and `case["bill"]`.
+    Reader writes `documents[].extracted`. The old `_merge_bill_fields`
+    carried seven bill scalars across that gap and nothing else -- no
+    `line_items`, nothing about the patient -- so a real emailed bill
+    (`case-1a0412ccfef90917`) whose three PDFs all classified and extracted
+    perfectly still reached `select_fronts` as an empty patient and a
+    line-item-less bill, and every front came back inapplicable. The Auditor,
+    which reads the documents directly, had already booked $210.00 of
+    duplicate 80053 on the same case: one case, two contradictory answers.
+
+    BOTH OUTCOMES ARE LOGGED, and that is the point. What the documents
+    established, with the document type each fact came from; what a document
+    claims that the case already knows differently (recorded, never silently
+    applied -- see factmerge rule 3); and what is still unknown, named one
+    fact at a time. `fact=` on each event keeps re-analysis from re-logging a
+    merge that established the same things (§2.3).
+    """
+    documents = store.list_documents(case_id)
+    patch, report = factmerge.merge_document_facts(case, documents)
+    if patch:
+        # `or case`: as everywhere else in this pipeline, a case purged
+        # mid-run (demo reset, manual delete) writes nothing and returns None
+        # rather than being resurrected -- finish against the local copy.
+        case = store.update_case(case_id, patch) or case
+
+    if report["established"]:
+        _log(
+            case_id,
+            "reader",
+            "merge_document_facts",
+            "merged "
+            + ", ".join(
+                f"{e['field']}={e['value']!r} (from the {e['source_type']} document)"
+                for e in report["established"]
+            )
+            + " into the case. Nothing was inferred: every value above is stated by a "
+            "document on file.",
+            fact=report["established"],
+        )
+    if report["deferred"]:
+        _log(
+            case_id,
+            "verifier",
+            "document_disagrees_with_case",
+            "; ".join(
+                f"the {d['source_type']} document states {d['field']}={d['document_value']!r} "
+                f"but the case already records {d['case_value']!r}; the case value was KEPT "
+                "(a document mentions a person, it is not a record of one -- a value entered "
+                "by a human is not overwritten by an extraction)"
+                for d in report["deferred"]
+            ),
+            fact=report["deferred"],
+        )
+    if report["unknown"]:
+        _log(
+            case_id,
+            "reader",
+            "facts_not_established",
+            _render_unknown(report["unknown"]),
+            fact=[u["field"] for u in report["unknown"]],
+        )
+    return case
 
 
 async def _run_reader(case_id: str, doc_id: str) -> dict:
@@ -459,6 +498,31 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
         bill_now = case.get("bill") or {}
         if resolved_ein and not (bill_now.get("hospital_ein") or "").strip():
             patch["bill"] = {**bill_now, "hospital_ein": resolved_ein}
+        # Same shape of backfill for `patient.state`, and it matters more:
+        # state selects the entire deadline regime (California has NO
+        # charity-care deadline, Illinois has a 90-day one -- §3.5's
+        # `compute_deadlines(bill, state)`), so a case with no state gets the
+        # federal floors and nothing else. `factmerge` reads it off the
+        # facility letterhead, which is the document a patient actually holds;
+        # the resolved `hospitals/{ein}` record carries the same fact from
+        # LEDGER's IRS Schedule H / CMS pipeline and is available only here,
+        # after Lookup. Fill-a-gap only, like every other patient fact -- it
+        # can confirm what the letterhead said but never rewrite it, and never
+        # a state a human entered.
+        patient_now = case.get("patient") or {}
+        hospital_state = factmerge.state_from_hospital(hospital)
+        if hospital_state and not str(patient_now.get("state") or "").strip():
+            patch["patient"] = {**patient_now, "state": hospital_state}
+            _log(
+                case_id,
+                "lookup",
+                "state_from_hospital_record",
+                f"no document on file stated a state; taking {hospital_state} from the "
+                f"resolved hospital record for {hospital.get('name', resolved_ein)}, which "
+                "is where the facility is -- the state-law overrides in the deadline engine "
+                "are hospital-conduct statutes, so the facility's state is the governing one.",
+                fact=["state-from-hospital", hospital_state],
+            )
         # `or case`: if this case was purged mid-run (a demo reset, a manual
         # delete), update_case now writes nothing and returns None rather than
         # resurrecting it. Finish the cascade against the local copy -- every
@@ -806,8 +870,7 @@ async def on_document_added(case_id: str, doc_id: str) -> dict:
         }
 
     reader_turn = await _run_reader(case_id, doc_id)
-    case = _merge_bill_fields(case_id, case, reader_turn["fact"])
-    case = store.get_case(case_id)
+    case = _merge_document_facts(case_id, case)
 
     result = await _run_cascade(case_id, case)
     return {"reader": reader_turn, **result}
@@ -841,12 +904,13 @@ async def process_case_documents(case_id: str, doc_ids: list[str]) -> dict:
 
     reader_turns = await asyncio.gather(*(_run_reader(case_id, doc_id) for doc_id in doc_ids))
 
-    case = store.get_case(case_id)
-    for reader_turn in reader_turns:
-        if "fact" not in reader_turn:
-            continue  # a missing-document error for this one doc_id; skip it, don't crash the batch
-        case = _merge_bill_fields(case_id, case, reader_turn["fact"])
-    case = store.get_case(case_id)
+    # ONE merge for the whole batch, not one per document: `_merge_document_facts`
+    # reads every document on file and resolves precedence across all of them
+    # (see factmerge rule 2), so folding them in one at a time would only make
+    # "which document wins" depend on the order `gather` happened to return.
+    # A reader turn that errored wrote no extraction, so it contributes
+    # nothing here without needing to be filtered out.
+    case = _merge_document_facts(case_id, store.get_case(case_id) or case)
 
     result = await _run_cascade(case_id, case)
     return {"readers": dict(zip(doc_ids, reader_turns, strict=True)), **result}

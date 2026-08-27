@@ -51,6 +51,49 @@ EXTRACTION_SCHEMA: dict = {
         "provider_name": {"type": "string", "nullable": True},
         "hospital_ein": {"type": "string", "nullable": True},
         "hospital_ccn": {"type": "string", "nullable": True},
+        "patient_name": {
+            "type": "string",
+            "nullable": True,
+            "description": "The PATIENT's name exactly as printed, e.g. a line reading "
+            "'Patient: Jordan Alvarez' -> 'Jordan Alvarez'. Not the provider, not the "
+            "collector, and not an employee named on a pay stub. Null if the document does "
+            "not name a patient.",
+        },
+        # Added after ef-2026-0001's twin arrived by email with no state at
+        # all: `compute_deadlines(bill, state)` (§3.5) switches the ENTIRE
+        # charity-care regime on this -- California has no application
+        # deadline (Cal. Health & Safety Code §127405(e)(3)), Illinois has a
+        # 90-day one -- and with the field absent a case silently gets the
+        # federal floors only. The state is printed on the facility
+        # letterhead of every bill and GFE this system has ever seen
+        # ("Sutter Bay Hospitals / CA -- EIN 94-0562680").
+        "state": {
+            "type": "string",
+            "nullable": True,
+            "description": "The two-letter USPS abbreviation of the US state in the "
+            "provider/facility address printed on this document's letterhead, e.g. a "
+            "letterhead reading 'CA - EIN 94-0562680' -> 'CA'. Two letters only, never the "
+            "full state name. Null if no state appears on the document -- never guess one "
+            "from the hospital's name or from an area code.",
+        },
+        # Deliberately phrased as what the DOCUMENT SAYS, not as `insured`:
+        # asking a model whether a patient is insured invites it to infer from
+        # the absence of a payer line, which is not a fact. 45 CFR 149.610(a)
+        # is why a Good Faith Estimate is issued at all, and this repo's
+        # fixtures print that citation verbatim -- so on a GFE this is a
+        # quotation, not a judgement. `rules.fronts._select_ppdr` refuses on
+        # "coverage status unknown", which is the correct outcome when the
+        # document is silent.
+        "uninsured_self_pay": {
+            "type": "boolean",
+            "nullable": True,
+            "description": "True ONLY if this document EXPLICITLY states the patient is "
+            "uninsured or self-pay (e.g. 'Per 45 CFR 149.610 -- provided to an uninsured / "
+            "self-pay patient'). False ONLY if it explicitly states the patient HAS coverage "
+            "(names an insurer or plan, or shows an insurance payment/adjustment line). Null "
+            "if the document does not say either way -- do NOT infer a coverage status from "
+            "the absence of any mention of insurance.",
+        },
         "amount_cents": {
             "type": "integer",
             "nullable": True,
@@ -117,7 +160,12 @@ EXTRACTION_INSTRUCTION = (
     "you MUST populate line_items with one entry per row, in order, including exact duplicate "
     "rows verbatim -- AND separately extract the aggregate fields (amount_cents, service_date, "
     "first_statement_date, provider_name, hospital_ein) that appear elsewhere on the same "
-    "document; extracting the table does not excuse skipping those. Use JSON null for any field "
+    "document; extracting the table does not excuse skipping those. Read the LETTERHEAD too: the "
+    "facility's two-letter state goes in `state`, and the line naming the patient goes in "
+    "`patient_name`. Set `uninsured_self_pay` only from an explicit statement about coverage on "
+    "the document itself (a Good Faith Estimate issued under 45 CFR 149.610 is such a statement); "
+    "leave it null when the document is silent rather than inferring coverage. Use JSON null for "
+    "any field "
     "you genuinely cannot find -- every field in this schema accepts null. NEVER invent a "
     "plausible-looking placeholder instead: not '00-0000000' or any other made-up EIN/CCN, not "
     "'Unknown'/'N/A' as a name, not 1970-01-01 (Unix epoch) or any other guessed date. If a "
@@ -174,6 +222,10 @@ _STRING_SCRUB_RULES: dict[str, Callable[[str], bool]] = {
     "hospital_ein": _all_same_digit,
     "hospital_ccn": _all_same_digit,
     "provider_name": lambda v: v.strip().lower() in _PLACEHOLDER_NAME_STRINGS,
+    # Same rule for the patient: an "Unknown"/"N/A" patient name is a
+    # fabricated placeholder, and unlike a provider name it would be printed
+    # on a filed FAP application under a real person's claim.
+    "patient_name": lambda v: v.strip().lower() in _PLACEHOLDER_NAME_STRINGS,
     "service_date": _is_epoch_or_implausible_date,
     "first_statement_date": _is_epoch_or_implausible_date,
     "validation_notice_date": _is_epoch_or_implausible_date,
@@ -186,7 +238,7 @@ def _scrub_ungrounded(extraction: dict) -> tuple[dict, list[str]]:
 
     Returns (cleaned_extraction, names_of_scrubbed_fields). A scrubbed field
     is DROPPED from the dict entirely (equivalent to the model never having
-    reported it) -- downstream code (`pipeline._merge_bill_fields`,
+    reported it) -- downstream code (`agent_core.factmerge`,
     `casedata.parse_bill_dates`) already treats an absent field as "unknown",
     never as zero/epoch/empty-string, so dropping is the correct degrade.
     """

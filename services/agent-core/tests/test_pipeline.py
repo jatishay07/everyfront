@@ -11,6 +11,7 @@ in test_rules_bridge.py, test_genai_client.py, etc.) or hitting a real model.
 from __future__ import annotations
 
 import asyncio
+import copy
 
 from _helpers import async_fake_turn, make_memory_store
 from agent_core import pipeline
@@ -1405,3 +1406,244 @@ def test_a_failing_drive_mirror_never_fails_a_completed_filing(monkeypatch):
     failed = next(e for e in s.list_events("c1") if e["action"] == "drive_mirror_failed")
     assert failed["agent"] == "filer"
     assert "TimeoutError" in failed["detail"]
+
+
+# ==========================================================================
+# The merge step: documents[].extracted -> canonical patient/bill
+#
+# THE DEFECT (measured live, case `case-1a0412ccfef90917`, 2026-08-26): the
+# pipeline never carried a document's extraction up into `case["patient"]` /
+# `case["bill"]`, which is where select_fronts/compute_deadlines/
+# screen_eligibility read. A real emailed bill whose three PDFs all classified
+# and extracted perfectly still reached the Strategist as an empty patient and
+# a line-item-less bill. The precedence rules themselves are covered in
+# test_factmerge.py; these tests are about the STEP being wired into both
+# entry points, writing to Firestore, and saying so in the audit trail.
+# ==========================================================================
+
+_MERGE_EXTRACTIONS: dict[str, tuple[str, dict]] = {
+    "d-bill": (
+        "itemized_bill",
+        {
+            "provider_name": "Sutter Bay Hospitals",
+            "amount_cents": 262500,
+            "service_date": "2026-05-01",
+            "first_statement_date": "2026-06-05",
+            "hospital_ein": "94-0562680",
+            "state": "CA",
+            "patient_name": "Jordan Alvarez",
+            "line_items": [
+                {"code": "80053", "description": "CMP", "units": 1, "charge_cents": 21000},
+                {"code": "80053", "description": "CMP", "units": 1, "charge_cents": 21000},
+            ],
+        },
+    ),
+    "d-gfe": (
+        "gfe",
+        {
+            "provider_name": "Sutter Bay Hospitals",
+            "gfe_amount_cents": 192500,
+            "hospital_ein": "94-0562680",
+            "state": "CA",
+            "uninsured_self_pay": True,
+        },
+    ),
+    "d-income": ("income_proof", {"annual_income_cents": 3200000, "is_income_proof": True}),
+}
+
+
+def _patch_reader_with_real_extractions(monkeypatch, extractions):
+    def _run(case_id, doc_id, text, hint=None):
+        label, extraction = extractions[doc_id]
+        return async_fake_turn(
+            {
+                "case_id": case_id,
+                "doc_id": doc_id,
+                "label": label,
+                "gemma_raw": label,
+                "gemma_error": None,
+                "extraction": extraction,
+                "citations": [],
+            },
+            f"classified as {label}",
+        )
+
+    monkeypatch.setattr(reader, "run", _run)
+
+
+def _patch_cascade_agents(monkeypatch, *, hospital=None):
+    monkeypatch.setattr(
+        lookup,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "resolved": hospital is not None,
+                "hospital": hospital,
+                "ein": (hospital or {}).get("ein"),
+                "citations": [],
+                "note": "resolved" if hospital else "not found",
+            },
+            "hospital note",
+        ),
+    )
+    monkeypatch.setattr(
+        clock,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {"case_id": case_id, "deadlines": []}, "no deadlines"
+        ),
+    )
+    monkeypatch.setattr(
+        auditor,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {
+                "case_id": case_id,
+                "findings": [],
+                "total_findings_cents": 0,
+                "line_items_examined": 2,
+                "denial_check": {"ran": False, "reason": "no denial letter"},
+                "source": {},
+            },
+            "no findings",
+        ),
+    )
+    monkeypatch.setattr(
+        strategist,
+        "run",
+        lambda case_id, case: async_fake_turn(
+            {"case_id": case_id, "fronts": [], "source": "test"}, "no fronts"
+        ),
+    )
+
+
+def _seed_merge_case(store_, monkeypatch, *, hospital=None, patient=None, extractions=None):
+    """One case, three unread documents, and every agent but the merge faked."""
+    extractions = copy.deepcopy(_MERGE_EXTRACTIONS) if extractions is None else extractions
+    _patch_store(monkeypatch, store_)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_reader_with_real_extractions(monkeypatch, extractions)
+    _patch_cascade_agents(monkeypatch, hospital=hospital)
+    store_.create_case("c1", {"patient": patient or {}, "bill": {}})
+    for doc_id in extractions:
+        store_.add_document_if_absent("c1", doc_id, {"type": "", "raw_text": "text"})
+
+
+def test_document_facts_reach_the_case_patient_and_bill(monkeypatch):
+    """The live defect, at the pipeline level: three documents in, one
+    populated `patient` and one `bill` with line items out."""
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch)
+
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+
+    case = s.get_case("c1")
+    assert case["bill"]["line_items"] and len(case["bill"]["line_items"]) == 2
+    assert case["bill"]["amount_cents"] == 262500
+    assert case["bill"]["gfe_amount_cents"] == 192500
+    assert case["bill"]["has_itemized_bill"] is True
+    assert case["patient"]["name"] == "Jordan Alvarez"
+    assert case["patient"]["state"] == "CA"
+    assert case["patient"]["insured"] is False
+    assert case["patient"]["annual_income_cents"] == 3200000
+    # ...and the one fact no document states is still absent, not defaulted.
+    assert "household_size" not in case["patient"]
+
+
+def test_the_one_document_path_merges_the_same_way_the_batch_path_does(monkeypatch):
+    """`on_document_added` (Gmail intake -- documents arrive one at a time)
+    and `process_case_documents` (the demo's whole-fixture upload) must land
+    on the same case."""
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch)
+    for doc_id in _MERGE_EXTRACTIONS:
+        asyncio.run(pipeline.on_document_added("c1", doc_id))
+    one_at_a_time = s.get_case("c1")
+
+    s2 = make_memory_store()
+    _seed_merge_case(s2, monkeypatch)
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+    all_at_once = s2.get_case("c1")
+
+    assert one_at_a_time["patient"] == all_at_once["patient"]
+    assert one_at_a_time["bill"] == all_at_once["bill"]
+
+
+def test_the_audit_trail_names_the_fact_that_is_missing(monkeypatch):
+    """A case that cannot be screened must say WHICH single fact is blocking
+    it, so a human -- or a future intake form -- supplies exactly that one."""
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch)
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+
+    merged = next(e for e in s.list_events("c1") if e["action"] == "merge_document_facts")
+    assert "patient.state='CA' (from the itemized_bill document)" in merged["detail"]
+    assert "patient.insured=False (from the gfe document)" in merged["detail"]
+    assert "Nothing was inferred" in merged["detail"]
+
+    missing = next(e for e in s.list_events("c1") if e["action"] == "facts_not_established")
+    assert "household size was not stated in any document on file" in missing["detail"]
+
+
+def test_re_analysis_does_not_oscillate_the_merged_facts(monkeypatch):
+    """§2.3: this handler runs on every Pub/Sub redelivery and must converge."""
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch)
+
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+    first = s.get_case("c1")
+    merge_events = len([e for e in s.list_events("c1") if e["action"] == "merge_document_facts"])
+
+    for _ in range(3):
+        asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+    again = s.get_case("c1")
+
+    assert again["patient"] == first["patient"]
+    assert again["bill"] == first["bill"]
+    # And the feed does not grow a row per redelivery for the same facts.
+    assert (
+        len([e for e in s.list_events("c1") if e["action"] == "merge_document_facts"])
+        == merge_events
+    )
+
+
+def test_a_human_entered_patient_fact_survives_the_merge_and_is_reported(monkeypatch):
+    """`POST /cases` (§3.3) is how the one unsourceable fact gets supplied.
+    The merge must not then rewrite what the human typed -- and a document
+    that disagrees is recorded rather than silently applied."""
+    s = make_memory_store()
+    _seed_merge_case(s, monkeypatch, patient={"household_size": 3, "annual_income_cents": 4000000})
+
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+
+    case = s.get_case("c1")
+    assert case["patient"]["household_size"] == 3
+    assert case["patient"]["annual_income_cents"] == 4000000
+    disagreement = next(
+        e for e in s.list_events("c1") if e["action"] == "document_disagrees_with_case"
+    )
+    assert "3200000" in disagreement["detail"]
+    assert "the case value was KEPT" in disagreement["detail"]
+
+
+def test_the_resolved_hospital_record_backfills_a_state_no_document_stated(monkeypatch):
+    """State selects the whole deadline regime (§3.5). When no letterhead read
+    produced one, the resolved `hospitals/{ein}` record -- LEDGER's IRS
+    Schedule H / CMS data -- is the backstop."""
+    stateless = copy.deepcopy(_MERGE_EXTRACTIONS)
+    for _label, extraction in stateless.values():
+        extraction.pop("state", None)  # no document carries a state at all
+    s = make_memory_store()
+    _seed_merge_case(
+        s,
+        monkeypatch,
+        hospital={"ein": "94-0562680", "name": "Sutter Bay", "state": "CA"},
+        extractions=stateless,
+    )
+
+    asyncio.run(pipeline.process_case_documents("c1", list(_MERGE_EXTRACTIONS)))
+
+    case = s.get_case("c1")
+    assert case["patient"]["state"] == "CA"
+    backfill = next(e for e in s.list_events("c1") if e["action"] == "state_from_hospital_record")
+    assert "no document on file stated a state" in backfill["detail"]
