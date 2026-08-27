@@ -69,10 +69,8 @@ def _hospital_resolved(case: dict) -> bool:
     return isinstance(hospital, dict) and bool(hospital)
 
 
-#: Which patient facts a given front's determination is allowed to rest on
-#: unverified. The answer is none, for every front -- this map exists to name
-#: the fact per front rather than to admit exceptions.
 def _front_entry(case: dict, front: str) -> dict:
+    """This front's stored `fronts[]` entry, or `{}` if the case has none."""
     return next((f for f in (case.get("fronts") or []) if f.get("front") == front), {})
 
 
