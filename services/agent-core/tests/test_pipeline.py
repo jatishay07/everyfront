@@ -994,3 +994,414 @@ def test_a_deadline_recomputed_from_a_corrected_date_is_a_new_row(monkeypatch):
 
     deadlines = [e["detail"] for e in s.list_events("c1") if e["action"] == "compute_deadline"]
     assert deadlines == ["due 2026-08-29", "due 2026-09-30"], deadlines
+
+
+# ==========================================================================
+# SWARM WO8 -- TASK 2: the `simulated` flag must survive LLM narration.
+#
+# `run_filer` used to log `filer_turn["answer"] or (<fallback saying
+# SIMULATED>)`. The fallback is only ever reached when the model fails to
+# narrate at all, so in every healthy run the word "SIMULATED" was never
+# written -- the model's sentence (which is told the channel, vendor id and
+# status, and nothing about simulation) replaced the entire line. Live, every
+# filing in `filings/` is a fake-vendor send and not one `filer.file` event
+# says so.
+# ==========================================================================
+
+
+def _filer_run_returning(*, simulated: bool, answer: str):
+    async def _run(case_id, case, front, filing_id=None):
+        return {
+            "fact": {
+                "case_id": case_id,
+                "front": front,
+                "filing_id": filing_id,
+                "channel": "mail",
+                "vendor_id": "fake-ltr_1f0ae92e7adb44e3946e",
+                "status": "sent",
+                "simulated": simulated,
+                "form_id": "records_request_letter",
+                "doc_id": "d1",
+                "gcs_uri": None,
+                "real_destination": "Test Hospital",
+            },
+            "filing_id": filing_id,
+            "pdf": b"%PDF-fake",
+            "answer": answer,
+            "trace": [],
+            "model": "test-model",
+            "error": None,
+        }
+
+    return _run
+
+
+#: The kind of sentence the Filer's own model actually produces -- fluent,
+#: accurate about channel/vendor/status, and silent about simulation.
+_LLM_NARRATION = (
+    "The audit filing was sent by mail with vendor ID fake-ltr_1f0ae92e7adb44e3946e "
+    "and its status is sent."
+)
+
+
+def _file_event_detail(s, case_id="c1"):
+    return next(
+        e["detail"]
+        for e in s.list_events(case_id)
+        if e["agent"] == "filer" and e["action"] == "file"
+    )
+
+
+def test_the_filing_event_says_simulated_even_when_the_llm_narrates(monkeypatch):
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "filing"})
+    monkeypatch.setattr(filer, "run", _filer_run_returning(simulated=True, answer=_LLM_NARRATION))
+
+    asyncio.run(pipeline.finalize_filing("c1", "audit", "filing-1"))
+
+    detail = _file_event_detail(s)
+    assert "SIMULATED" in detail, detail
+    # The narration is kept -- it is presentation, appended AFTER the fact,
+    # never in place of it.
+    assert _LLM_NARRATION in detail
+
+
+def test_the_filing_event_says_live_only_when_the_send_really_was(monkeypatch):
+    """Do not fabricate the opposite either."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "filing"})
+    monkeypatch.setattr(filer, "run", _filer_run_returning(simulated=False, answer=_LLM_NARRATION))
+
+    asyncio.run(pipeline.finalize_filing("c1", "audit", "filing-1"))
+
+    detail = _file_event_detail(s)
+    assert "[LIVE]" in detail
+    assert "SIMULATED" not in detail
+
+
+def test_a_filer_fact_with_no_simulated_key_is_narrated_as_simulated(monkeypatch):
+    """An unknown provenance is not evidence of a real send -- the same
+    `.get(key, True)` rule the store and the API both apply."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "filing"})
+
+    async def _run(case_id, case, front, filing_id=None):
+        turn = await _filer_run_returning(simulated=True, answer="")(
+            case_id, case, front, filing_id
+        )
+        del turn["fact"]["simulated"]
+        return turn
+
+    monkeypatch.setattr(filer, "run", _run)
+    asyncio.run(pipeline.finalize_filing("c1", "audit", "filing-1"))
+
+    assert "SIMULATED" in _file_event_detail(s)
+
+
+# ==========================================================================
+# SWARM WO8 -- TASK 1: Calendar (WO5) and Drive (WO6) wired into the pipeline.
+#
+# Both modules shipped in packages/delivery in PR #35, both fully unit-tested,
+# and until this change NOTHING in services/agent-core called either of them.
+# ==========================================================================
+
+
+def _no_google_credentials(monkeypatch):
+    for var in (
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+        "GOOGLE_OAUTH_REFRESH_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _with_google_credentials(monkeypatch):
+    """Pretend the demo account's token is minted, without minting one."""
+    monkeypatch.setattr(pipeline.delivery_bridge, "google_sync_configured", lambda: True)
+
+
+def _cascade_case(s, monkeypatch, case_id="c1"):
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    _patch_agents_for_document_added(monkeypatch, hospital={"name": "Advocate", "nonprofit": True})
+    s.create_case(case_id, {"patient": {"name": "Maria G.", "state": "CA", "insured": False}})
+    return s.add_document(case_id, {"raw_text": "a bill", "type": None})
+
+
+def test_every_computed_deadline_is_written_to_google_calendar(monkeypatch):
+    """§4 persona 4 WO5, the wiring half. The Clock's deadlines reach
+    `delivery.calendar_sync.sync_deadlines` with the case, a patient label and
+    the serialized deadline dicts -- exactly the shape that module documents
+    itself as accepting."""
+    s = make_memory_store()
+    doc_id = _cascade_case(s, monkeypatch)
+    _with_google_credentials(monkeypatch)
+    calls = []
+
+    def _sync(case_id, patient_label, deadlines, **kw):
+        calls.append((case_id, patient_label, deadlines))
+        return [
+            {
+                "front": d["front"],
+                "name": d["name"],
+                "event_id": f"evt-{d['front']}",
+                "due": d["due"],
+            }
+            for d in deadlines
+            if d.get("due")
+        ]
+
+    monkeypatch.setattr(pipeline.delivery_bridge, "sync_deadlines", _sync)
+
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    assert len(calls) == 1, "sync_deadlines was never called by the pipeline"
+    case_id, patient_label, deadlines = calls[0]
+    assert case_id == "c1"
+    assert patient_label == "Maria G."
+    assert [d["front"] for d in deadlines] == ["charity_care"]
+    assert deadlines[0]["citation"] == "26 CFR 1.501(r)-4(b)(1)(iv)"
+
+    # §3.1: logged to cases/{id}/events under `clock` -- the agent that owns
+    # deadlines, and a member of §3.1's CLOSED agent enum (an invented name
+    # renders a blank avatar in CANVAS's Record<AgentName, ...> lookup).
+    event = next(e for e in s.list_events("c1") if e["action"] == "calendar_sync")
+    assert event["agent"] == "clock"
+    assert "2026-08-29" in event["detail"]
+    assert event["citations"] == ["26 CFR 1.501(r)-4(b)(1)(iv)"]
+
+
+def test_calendar_sync_does_not_duplicate_its_event_row_on_re_analysis(monkeypatch):
+    """The activity feed was drowning in duplicates until today, and four
+    copies of every deadline on the demo Calendar is the same defect wearing
+    a different hat. The Calendar side of idempotency is `calendar_sync`'s
+    own stable event ids (it UPDATEs, falling back to insert on 404); the feed
+    side is this: an unchanged sync must not add a second identical row."""
+    s = make_memory_store()
+    doc_id = _cascade_case(s, monkeypatch)
+    _with_google_credentials(monkeypatch)
+    synced = [
+        {
+            "front": "charity_care",
+            "name": "Charity care application",
+            "event_id": "evt-1",
+            "due": "2026-08-29",
+        }
+    ]
+    calls = []
+    monkeypatch.setattr(
+        pipeline.delivery_bridge,
+        "sync_deadlines",
+        lambda *a, **kw: calls.append(a) or synced,
+    )
+
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    # Re-synced (so a moved deadline would be corrected upstream)...
+    assert len(calls) == 2
+    # ...but the audit log records the same fact once.
+    rows = [e for e in s.list_events("c1") if e["action"] == "calendar_sync"]
+    assert len(rows) == 1, [r["detail"] for r in rows]
+
+
+def test_calendar_event_ids_are_stable_so_a_re_sync_updates_instead_of_duplicating():
+    """agent-core depends on this property of RELAY's module; assert it from
+    this side too, so a change over there surfaces as a failure over here."""
+    from delivery.calendar_sync import _stable_event_id
+
+    d = {"front": "ppdr", "name": "PPDR window", "due": "2026-09-01"}
+    assert _stable_event_id("c1", d) == _stable_event_id("c1", dict(d))
+    assert _stable_event_id("c1", d) != _stable_event_id("c2", d)
+
+
+def test_calendar_sync_no_ops_cleanly_with_no_oauth_token_and_changes_nothing(monkeypatch):
+    """THE PATH THAT ACTUALLY RUNS TODAY, and until a human mints a token per
+    infra/OAUTH.md. `MissingCredentialsError`'s own docstring: callers must
+    degrade gracefully. So the cascade must complete unchanged, log something
+    TRUE about why nothing was written, and touch nothing else."""
+    s = make_memory_store()
+    doc_id = _cascade_case(s, monkeypatch)
+    _no_google_credentials(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        pipeline.delivery_bridge,
+        "sync_deadlines",
+        lambda *a, **kw: calls.append(a),
+    )
+
+    asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    assert calls == [], "reached the Google client with no credentials configured"
+    # The analysis is completely unaffected.
+    case = s.get_case("c1")
+    assert case["status"] == "strategy_ready"
+    assert [f["front"] for f in case["fronts"]] == ["charity_care"]
+    assert any(e["action"] == "compute_deadline" for e in s.list_events("c1"))
+    # And the record says so, in words that are true.
+    skipped = next(e for e in s.list_events("c1") if e["action"] == "calendar_sync_skipped")
+    assert skipped["agent"] == "clock"
+    assert "OAuth refresh token is not configured" in skipped["detail"]
+    assert not any(e["action"] == "calendar_sync" for e in s.list_events("c1"))
+
+
+def test_a_failing_calendar_never_fails_the_analysis(monkeypatch):
+    """Not just missing credentials -- an expired token, a 500 from Google, or
+    `google-api-python-client` absent from the image."""
+    s = make_memory_store()
+    doc_id = _cascade_case(s, monkeypatch)
+    _with_google_credentials(monkeypatch)
+
+    def _boom(*a, **kw):
+        raise ModuleNotFoundError("No module named 'googleapiclient'")
+
+    monkeypatch.setattr(pipeline.delivery_bridge, "sync_deadlines", _boom)
+
+    result = asyncio.run(pipeline.on_document_added("c1", doc_id))
+
+    assert "error" not in result
+    assert s.get_case("c1")["status"] == "strategy_ready"
+    failed = next(e for e in s.list_events("c1") if e["action"] == "calendar_sync_failed")
+    assert failed["agent"] == "clock"
+    assert "ModuleNotFoundError" in failed["detail"]
+
+
+def test_the_approval_path_never_touches_google(monkeypatch):
+    """Filing went asynchronous because `approve_filing` took 6+ minutes.
+    Neither sync belongs anywhere a human is waiting on an HTTP response."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "open"})
+    monkeypatch.setattr(
+        verifier,
+        "run",
+        lambda case_id, case, front: async_fake_turn({"passed": True, "issues": []}, "ok"),
+    )
+
+    def _never(*a, **kw):
+        raise AssertionError("the approval path reached a Google API")
+
+    monkeypatch.setattr(pipeline.delivery_bridge, "google_sync_configured", _never)
+    monkeypatch.setattr(pipeline.delivery_bridge, "sync_deadlines", _never)
+    monkeypatch.setattr(pipeline.delivery_bridge, "mirror_case_filings", _never)
+
+    result = asyncio.run(pipeline.approve_and_request_filing("c1", "audit"))
+    assert result["ok"] is True
+
+
+def test_each_filing_is_mirrored_to_the_cases_drive_folder(monkeypatch):
+    """§4 persona 4 WO6, the wiring half."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    published = _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "filing"})
+    monkeypatch.setattr(filer, "run", _filer_run_returning(simulated=True, answer="filed"))
+    _with_google_credentials(monkeypatch)
+    calls = []
+
+    def _mirror(case_id, filings, **kw):
+        # Captured AT CALL TIME: the filing must already be durable and
+        # announced before a slow Google API is ever touched.
+        calls.append(
+            {
+                "case_id": case_id,
+                "filings": filings,
+                "front_status": s.get_case(case_id)["fronts"][0]["status"],
+                "published": list(published),
+            }
+        )
+        return {"case_folder_id": "folder-1", "files": [{"file_id": "f1"}]}
+
+    monkeypatch.setattr(pipeline.delivery_bridge, "mirror_case_filings", _mirror)
+
+    asyncio.run(pipeline.finalize_filing("c1", "audit", "filing-1"))
+
+    assert len(calls) == 1, "mirror_case_filings was never called by the pipeline"
+    call = calls[0]
+    assert call["case_id"] == "c1"
+    assert call["filings"] == [
+        {
+            "filename": "audit_records_request_letter.pdf",
+            "pdf_bytes": b"%PDF-fake",
+            "front": "audit",
+        }
+    ]
+    assert call["front_status"] == "filed"
+    assert any(t == pipeline.config.TOPIC_FILING_COMPLETED for t, _ in call["published"])
+
+    event = next(e for e in s.list_events("c1") if e["action"] == "drive_mirror")
+    assert event["agent"] == "filer"
+    assert "audit_records_request_letter.pdf" in event["detail"]
+
+
+def test_the_drive_filename_carries_no_filing_id_so_a_re_file_updates(monkeypatch):
+    """`mirror_case_filings` updates a same-named file inside the case folder
+    instead of creating a second one, so the advocate's folder holds ONE
+    current document per front rather than four copies of the same letter."""
+    assert pipeline.delivery_bridge.drive_filename("ppdr", "cms_ppdr") == "ppdr_cms_ppdr.pdf"
+    assert pipeline.delivery_bridge.drive_filename(
+        "ppdr", "cms_ppdr"
+    ) == pipeline.delivery_bridge.drive_filename("ppdr", "cms_ppdr")
+
+
+def test_drive_mirror_no_ops_cleanly_with_no_oauth_token(monkeypatch):
+    """The path that actually runs today. The filing itself must be entirely
+    unaffected -- recorded, front filed, `filing.completed` published."""
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    published = _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "filing"})
+    monkeypatch.setattr(filer, "run", _filer_run_returning(simulated=True, answer="filed"))
+    _no_google_credentials(monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        pipeline.delivery_bridge,
+        "mirror_case_filings",
+        lambda *a, **kw: calls.append(a),
+    )
+
+    result = asyncio.run(pipeline.finalize_filing("c1", "audit", "filing-1"))
+
+    assert calls == [], "reached the Google client with no credentials configured"
+    assert result["fact"]["status"] == "sent"
+    assert s.get_case("c1")["fronts"][0]["status"] == "filed"
+    assert any(t == pipeline.config.TOPIC_FILING_COMPLETED for t, _ in published)
+    skipped = next(e for e in s.list_events("c1") if e["action"] == "drive_mirror_skipped")
+    assert skipped["agent"] == "filer"
+    assert "OAuth refresh token is not configured" in skipped["detail"]
+
+
+def test_a_failing_drive_mirror_never_fails_a_completed_filing(monkeypatch):
+    s = make_memory_store()
+    _patch_store(monkeypatch, s)
+    _patch_no_op_pubsub(monkeypatch)
+    s.create_case("c1", {"hospital": {"name": "Test Hospital"}})
+    s.upsert_front("c1", {"front": "audit", "applicable": True, "status": "filing"})
+    monkeypatch.setattr(filer, "run", _filer_run_returning(simulated=True, answer="filed"))
+    _with_google_credentials(monkeypatch)
+
+    def _boom(*a, **kw):
+        raise TimeoutError("Drive took too long")
+
+    monkeypatch.setattr(pipeline.delivery_bridge, "mirror_case_filings", _boom)
+
+    result = asyncio.run(pipeline.finalize_filing("c1", "audit", "filing-1"))
+
+    assert result["fact"]["status"] == "sent"
+    assert s.get_case("c1")["fronts"][0]["status"] == "filed"
+    failed = next(e for e in s.list_events("c1") if e["action"] == "drive_mirror_failed")
+    assert failed["agent"] == "filer"
+    assert "TimeoutError" in failed["detail"]

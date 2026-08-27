@@ -27,6 +27,20 @@ pypdf==6.16.2
 reportlab==5.0.1
 google-cloud-storage==3.13.1
 
+# Calendar (WO5) + Drive (WO6), wired into the pipeline this work order.
+# `delivery/calendar_sync.py` and `delivery/drive_sync.py` import
+# `googleapiclient.discovery` LAZILY, inside the same try/except that catches
+# MissingCredentialsError -- so with no OAuth token configured (today) the
+# import is never reached and a missing pin looks completely fine. The moment
+# a human mints the token per infra/OAUTH.md, that import runs and raises
+# ModuleNotFoundError: googleapiclient. Byte-for-byte the pypdf/reportlab
+# defect five lines above, and RELAY named it in the PR #35 HANDOFF before it
+# could happen a second time. Versions match packages/delivery's own
+# requirements.txt exactly.
+google-api-python-client==2.199.0
+google-auth==2.57.0
+google-auth-oauthlib==1.4.1
+
 # --- packages/datapipes' runtime deps (LEDGER WO6) ---
 # deploy.sh's `pkgs_for agent-core` now also bundles packages/datapipes, for
 # mrf_cache's cash-price lookup and ncci_cache's bundled NCCI snapshot. Both

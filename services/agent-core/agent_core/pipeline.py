@@ -33,7 +33,7 @@ import hashlib
 import json
 import uuid
 
-from . import config, pubsub_client, rules_bridge
+from . import config, delivery_bridge, pubsub_client, rules_bridge
 from .agents import auditor, clock, filer, lookup, reader, strategist, verifier
 from .casedata import parse_bill_dates
 from .store import store
@@ -275,6 +275,153 @@ def _charity_care_erasure_cents(case: dict) -> tuple[int, str]:
     return amount_cents, elig.explain()
 
 
+def _patient_label(case: dict) -> str:
+    """What a calendar event is titled with. Synthetic fixture names only
+    (§0 rule 6); no case id, for the same reason `filer.py` keeps case ids out
+    of prompts -- a Calendar event is another place a rename cannot scrub."""
+    return str((case.get("patient") or {}).get("name") or "unnamed patient").strip()
+
+
+async def _sync_deadlines_to_calendar(
+    case_id: str, case: dict, deadlines: list[dict]
+) -> list[dict]:
+    """§4 persona 4 WO5, wired: every computed `Deadline` -> the demo Google
+    Calendar, red inside 7 days, the regulation citation in the description.
+
+    WHY HERE AND NOT IN THE FILER. A deadline exists the moment Clock computes
+    it, which is *before* anyone approves anything -- the whole point of the
+    240-day FAP window landing on a calendar is that a human sees it while
+    there is still time to act. Hanging it off the filing would put the
+    deadline on the calendar only for fronts that got filed, which is exactly
+    the ones that no longer need the reminder.
+
+    WHY IT CANNOT SLOW THE APPROVAL PATH. `_run_cascade` runs off
+    `case.document.added` (Pub/Sub push), never inside
+    `POST /cases/{id}/approve_filing` -- that endpoint's synchronous work was
+    cut to Verifier + a publish for exactly this reason (a measured 6-minute
+    timeout; see `approve_and_request_filing`). It is also the last thing the
+    cascade does, after every Firestore write, and it runs in a worker thread:
+    `sync_deadlines` is blocking `googleapiclient` I/O, and calling it inline
+    would stall the event loop for every other case being processed on the
+    same Cloud Run instance.
+
+    AND IT CANNOT FAIL THE ANALYSIS. `MissingCredentialsError` is already
+    handled inside `sync_deadlines` (returns `[]`), which is the state today
+    and until a human mints the token in `infra/OAUTH.md`. Anything else --
+    an expired refresh token, a 500 from Google, `google-api-python-client`
+    missing from the image -- is caught here and logged as a failed sync.
+    `google_auth.MissingCredentialsError`'s own docstring states the contract:
+    "a missing calendar sync must never take down a filing that already
+    succeeded." The same is true of an analysis that already succeeded.
+    """
+    configured = delivery_bridge.google_sync_configured()
+    dated = [d for d in deadlines if d.get("due")]
+    if not configured:
+        # `fact=` (see `_log`) makes this deterministic: logged ONCE per case,
+        # not once per cascade, so an unconfigured integration states itself
+        # plainly without flooding the activity feed.
+        if dated:
+            _log(
+                case_id,
+                "clock",
+                "calendar_sync_skipped",
+                f"{len(dated)} deadline(s) computed but NOT written to Google Calendar: the "
+                "demo account's OAuth refresh token is not configured in this environment "
+                "(see infra/OAUTH.md). The deadlines themselves are unaffected.",
+                fact="no-google-credentials",
+            )
+        return []
+
+    try:
+        synced = await asyncio.to_thread(
+            delivery_bridge.sync_deadlines, case_id, _patient_label(case), deadlines
+        )
+    except Exception as exc:  # noqa: BLE001 -- a calendar copy is never worth failing analysis for
+        _log(
+            case_id,
+            "clock",
+            "calendar_sync_failed",
+            f"Google Calendar sync failed ({type(exc).__name__}: {exc}); the computed "
+            "deadlines are unaffected and remain on the case.",
+            fact=f"calendar-error:{type(exc).__name__}",
+        )
+        return []
+
+    if synced:
+        _log(
+            case_id,
+            "clock",
+            "calendar_sync",
+            f"{len(synced)} deadline(s) written to Google Calendar: "
+            + "; ".join(f"{s['front']} due {s['due']}" for s in synced)
+            + ". Events carry the regulation citation and turn red inside 7 days.",
+            [d["citation"] for d in dated if d.get("citation")],
+            # The synced events themselves, so re-running an unchanged
+            # analysis re-upserts the same events (calendar_sync's own stable
+            # ids) without adding a second identical row to the feed.
+            fact=synced,
+        )
+    return synced
+
+
+async def _mirror_filing_to_drive(case_id: str, fact: dict, pdf: bytes | None) -> dict | None:
+    """§4 persona 4 WO6, wired: the filing this system just generated ->
+    a per-case Drive folder an advocate can be given access to.
+
+    Called from `run_filer` AFTER `filings/{filing_id}` is written, after the
+    front is marked `filed`, and after `filing.completed` is published -- so
+    by the time Drive is touched the filing is already durable and complete,
+    and a slow or dead Drive API can only ever delay this coroutine, never the
+    filing. Blocking `googleapiclient` I/O goes to a worker thread for the
+    same reason as the calendar sync.
+
+    Returns `None` when credentials are absent (today's state) or when the
+    mirror fails, having logged which -- never raises.
+    """
+    if pdf is None:
+        return None
+    filename = delivery_bridge.drive_filename(fact["front"], fact["form_id"])
+    if not delivery_bridge.google_sync_configured():
+        _log(
+            case_id,
+            "filer",
+            "drive_mirror_skipped",
+            f"{filename} was NOT mirrored to Google Drive: the demo account's OAuth refresh "
+            "token is not configured in this environment (see infra/OAUTH.md). The filing "
+            f"itself is unaffected and its PDF is on the case as document {fact.get('doc_id')}.",
+            fact="no-google-credentials",
+        )
+        return None
+
+    try:
+        result = await asyncio.to_thread(
+            delivery_bridge.mirror_case_filings,
+            case_id,
+            [{"filename": filename, "pdf_bytes": pdf, "front": fact["front"]}],
+        )
+    except Exception as exc:  # noqa: BLE001 -- a Drive copy never fails a completed filing
+        _log(
+            case_id,
+            "filer",
+            "drive_mirror_failed",
+            f"Google Drive mirror of {filename} failed ({type(exc).__name__}: {exc}); the "
+            "filing itself already completed and is unaffected.",
+            fact=f"drive-error:{type(exc).__name__}",
+        )
+        return None
+
+    if result:
+        _log(
+            case_id,
+            "filer",
+            "drive_mirror",
+            f"{filename} mirrored to the case's Google Drive folder "
+            f"(folder {result['case_folder_id']}), shareable with an advocate.",
+            fact=result,
+        )
+    return result
+
+
 async def _run_cascade(case_id: str, case: dict) -> dict:
     """Lookup -> {Clock, Auditor} (parallel) -> Strategist, exactly once, then
     the case-level patch (status, savings, denial_flag). Returns the four
@@ -510,6 +657,13 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             "citation": denial_check["citation"],
         }
     store.update_case(case_id, case_patch)
+
+    # Calendar LAST, and only after every Firestore write above has landed:
+    # the case's analysis is the product, the calendar is a copy of it. See
+    # `_sync_deadlines_to_calendar` -- it cannot raise, so nothing below this
+    # line depends on Google being reachable.
+    await _sync_deadlines_to_calendar(case_id, case, cf["deadlines"])
+
     pubsub_client.publish(config.TOPIC_CASE_ANALYSIS_COMPLETE, {"case_id": case_id})
 
     return {
@@ -821,6 +975,44 @@ async def finalize_filing(case_id: str, front: str, filing_id: str) -> dict:
         raise
 
 
+#: Prefixed onto every `filer.file` event. Code-built, model-free, and FIRST
+#: in the string so it survives truncation in the activity feed as well as
+#: narration.
+_SIMULATED_PREFIX = (
+    "[SIMULATED] no live fax/mail vendor credentials are configured, so this filing was "
+    "recorded by RELAY's fake vendor -- the form was really rendered and really passed the "
+    "destination allowlist, but nothing left the building."
+)
+_LIVE_PREFIX = "[LIVE] transmitted by a real vendor."
+
+
+def _filing_detail(front: str, ff: dict, answer: str | None) -> str:
+    """The `events/` line for one filing. Whether the send was simulated is
+    stated by CODE, before the model gets a word in.
+
+    THE BUG THIS EXISTS FOR. This used to be `filer_turn["answer"] or
+    (<fallback containing 'SIMULATED'>)`. The fallback was only ever reached
+    when the LLM failed to narrate at all -- so in every healthy run the word
+    "SIMULATED" was never written, because the model's one-sentence summary
+    (which is told the channel, vendor id and status, and nothing about
+    simulation) replaced the whole line. Live, right now, every filing in
+    `filings/` is a fake-vendor send and not one `filer.file` event says so.
+    That is HANDOFF.md defect #6 wearing a third hat: the fact was computed
+    correctly and then dropped on the way to the only place a judge reads.
+
+    `simulated` is a fact about the world, so it is not narration's to
+    phrase, shorten, or omit -- the same rule §2.1 applies to deadline math.
+    The model's sentence is appended as presentation, after it.
+    """
+    prefix = _SIMULATED_PREFIX if ff.get("simulated", True) else _LIVE_PREFIX
+    narration = (answer or "").strip() or (
+        f"filed {front!r} via {ff['channel']} (vendor_id={ff['vendor_id']}); real-world "
+        f"destination would be {ff.get('real_destination')!r}; generated PDF saved as "
+        f"document {ff.get('doc_id')} ({ff.get('gcs_uri') or 'no GCS bucket configured'})"
+    )
+    return f"{prefix} {narration}"
+
+
 async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
     case = store.get_case(case_id)
     if case is None:
@@ -828,18 +1020,7 @@ async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
 
     filer_turn = await filer.run(case_id, case, front, filing_id=filing_id)
     ff = filer_turn["fact"]
-    _log(
-        case_id,
-        "filer",
-        "file",
-        filer_turn["answer"]
-        or (
-            f"filed {front!r} via {ff['channel']} (vendor_id={ff['vendor_id']}, "
-            f"{'SIMULATED' if ff['simulated'] else 'live'}); real-world destination would be "
-            f"{ff.get('real_destination')!r}; generated PDF saved as document "
-            f"{ff.get('doc_id')} ({ff.get('gcs_uri') or 'no GCS bucket configured'})"
-        ),
-    )
+    _log(case_id, "filer", "file", _filing_detail(front, ff, filer_turn.get("answer")))
 
     # NOT `update_case(case_id, {"fronts": ...})` from the `case` read at the
     # top of this function: by the time Filer returns, that snapshot is however
@@ -850,4 +1031,8 @@ async def run_filer(case_id: str, front: str, filing_id: str) -> dict:
     pubsub_client.publish(
         config.TOPIC_FILING_COMPLETED, {"filing_id": filing_id, "status": ff["status"]}
     )
+
+    # The filing is durable and announced by this point; Drive is a copy of an
+    # artifact that already exists. See `_mirror_filing_to_drive`.
+    await _mirror_filing_to_drive(case_id, ff, filer_turn.get("pdf"))
     return filer_turn
