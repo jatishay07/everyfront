@@ -119,6 +119,26 @@ def main() -> None:
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     secrets_path = _client_secrets_path(args)
+    # Say WHICH client is being used, out loud, before the browser opens.
+    #
+    # 2026-08-26: a shell glob (`--client-secrets ~/Downloads/client_secret_*.json`)
+    # matched two downloaded files and expanded alphabetically, so a token was
+    # minted against an OAuth client from an entirely different GCP project
+    # while go_live.sh -- using a different glob -- wired up the right one.
+    # Google's answer is `invalid_grant: Bad Request`, four steps downstream,
+    # from inside a Cloud Run traceback. The client id is not a secret; showing
+    # it here makes the mismatch visible at the only moment a human can catch it.
+    with open(secrets_path) as _fh:
+        _cfg = json.load(_fh)
+    _client_id = (_cfg.get("installed") or _cfg.get("web") or {}).get("client_id", "")
+    print(f"client secrets file : {secrets_path}", file=sys.stderr)
+    print(f"client id           : {_client_id}", file=sys.stderr)
+    print(
+        "If that client id is not the one from THIS project's Cloud Console, "
+        "stop now -- the token will be refused with 'invalid_grant'.\n",
+        file=sys.stderr,
+    )
+
     flow = InstalledAppFlow.from_client_secrets_file(secrets_path, scopes=SCOPES)
     print(
         "Opening a browser for consent. Sign in as the DEMO Gmail account "
