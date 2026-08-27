@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from rules.fronts import FRONT_ORDER, FrontDecision, select_fronts
+from rules.fronts import FRONT_ORDER, FrontDecision, describe_patient_data_gap, select_fronts
 
 TODAY = date(2026, 3, 15)
 
@@ -531,3 +531,54 @@ def test_every_front_always_carries_a_citation(front):
     for case in (_case(), _case(hospital={"nonprofit": False}), _case(patient={"insured": True})):
         d = _decision(select_fronts(case, today=TODAY), front)
         assert d.citation.strip()
+
+
+# ---------------------------------------------------------------------------
+# describe_patient_data_gap -- the public §3.5 door added 2026-08-26 so that
+# services/agent-core stops carrying its own copy of "can this be screened?".
+# ---------------------------------------------------------------------------
+
+
+def test_describe_patient_data_gap_is_none_when_the_screen_can_run():
+    """None is the signal that `screen_eligibility` may be called. It must be
+    None only when ALL THREE inputs are established -- a caller treats any
+    string as 'do not screen', so a false None would run an FPL computation on
+    a missing household size."""
+    assert (
+        describe_patient_data_gap(
+            {"annual_income_cents": 3_200_000, "household_size": 3, "state": "CA"}
+        )
+        is None
+    )
+
+
+def test_describe_patient_data_gap_names_the_single_missing_fact():
+    """The case that started this: income and state established, household
+    size stated in no document. The sentence must name household size and say
+    the other two are fine -- that is what tells a patient which one document
+    to send."""
+    reason = describe_patient_data_gap({"annual_income_cents": 3_200_000, "state": "CA"})
+    assert reason is not None
+    assert "household size" in reason
+    assert "only missing input" in reason
+    assert "insufficient patient data" not in reason
+
+
+def test_describe_patient_data_gap_reports_every_gap_when_several_are_missing():
+    reason = describe_patient_data_gap({"state": "CA"})
+    assert reason is not None
+    assert "household size" in reason and "income" in reason
+
+
+def test_describe_patient_data_gap_matches_the_front_it_backs():
+    """The public API and `select_fronts`' own charity-care refusal must give
+    the same account of the same case -- two sentences that can drift are the
+    duplication this function exists to remove."""
+    case = {
+        "patient": {"annual_income_cents": 3_200_000, "state": "CA"},
+        "bill": {"amount_cents": 262_500},
+        "hospital": {"nonprofit": True, "free_care_max_fpl_pct": 400},
+    }
+    cc = next(d for d in select_fronts(case) if d.front == "charity_care")
+    assert cc.applicable is False
+    assert describe_patient_data_gap(case["patient"]) == cc.reason

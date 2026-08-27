@@ -195,6 +195,33 @@ class _PatientFact:
     why: str
 
 
+def describe_patient_data_gap(patient: dict) -> str | None:
+    """Public §3.5 API: why a charity-care screen cannot run, or None if it can.
+
+    ADDED 2026-08-26 (FORGE, cross-cutting). `services/agent-core` carried its
+    own three-way guard over the same three inputs and returned a strictly
+    vaguer sentence -- "insufficient patient data to screen eligibility" --
+    for the same condition this module now names precisely. That is the §2.1
+    violation that has already cost this project once: `rules_bridge` shipped
+    a private reimplementation of `select_fronts`, a bug was fixed upstream in
+    STATUTE's copy, and the fix never reached production because the fallback
+    kept answering (commit 526a8b9, ef-2026-0006).
+
+    Two copies of a rule is one copy plus a latent divergence. Rather than
+    have the consumer reach into `_patient_fact_status`, the deterministic
+    core exposes the question it already answers, and there is exactly one
+    place where "can this be screened, and if not, what is missing?" is
+    decided.
+
+    Returns None when all three inputs (income, household size, state) are
+    established and `screen_eligibility` may be called.
+    """
+    facts = _patient_fact_status(patient)
+    if all(f.gap is None for f in facts):
+        return None
+    return _patient_data_gap_reason(facts)
+
+
 def _patient_fact_status(patient: dict) -> list[_PatientFact]:
     """Classify the three patient facts a charity-care screen needs.
 

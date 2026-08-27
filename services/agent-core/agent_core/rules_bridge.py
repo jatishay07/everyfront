@@ -30,7 +30,10 @@ from rules.audit import audit_line_items, total_savings_cents  # noqa: F401 -- r
 from rules.deadlines import compute_deadlines  # noqa: F401 -- re-exported
 from rules.denial import check_denial_lawfulness  # noqa: F401 -- re-exported
 from rules.eligibility import screen_eligibility  # noqa: F401 -- re-exported
-from rules.fronts import select_fronts  # noqa: F401 -- re-exported
+from rules.fronts import (
+    describe_patient_data_gap,  # noqa: F401 -- re-exported
+    select_fronts,  # noqa: F401 -- re-exported
+)
 
 
 def bridge_sources() -> dict[str, str]:
@@ -55,6 +58,7 @@ __all__ = [
     "check_denial_lawfulness",
     "compute_deadlines",
     "screen_eligibility",
+    "describe_patient_data_gap",
     "select_fronts",
     "total_savings_cents",
 ]

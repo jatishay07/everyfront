@@ -301,8 +301,13 @@ def _charity_care_erasure_cents(case: dict) -> tuple[int, str]:
     household = patient.get("household_size")
     state = str(patient.get("state") or "").strip()
     amount_cents = bill.get("amount_cents")
-    if not _is_plain_int(income) or not _is_plain_int(household) or not state:
-        return 0, "insufficient patient data to screen eligibility"
+    # NOT a local three-way guard with its own sentence. `packages/rules`
+    # decides "can this be screened, and if not, what is missing?" -- this
+    # module asks it. A second copy of that judgement is what let a fixed bug
+    # keep answering from a stale reimplementation once already (526a8b9).
+    gap = rules_bridge.describe_patient_data_gap(patient)
+    if gap is not None:
+        return 0, gap
     if not _is_plain_int(amount_cents) or amount_cents <= 0:
         return 0, "no billed amount on file to erase"
 
