@@ -60,6 +60,15 @@ Front-by-front basis:
     itemized-bill document on file but no usable line items extracted from
     it (a failed/incomplete read -- NOT applicable, and said so); and an
     itemized bill with actual line items (applicable, audit performed).
+
+NAME THE MISSING FACT (ADDED 2026-08-26, STATUTE, wo8). Every "cannot
+determine" reason in this module now names the SPECIFIC input it does not
+have, rather than listing the category of inputs that might be missing, and
+distinguishes "never stated in any document" from "on file but unreadable"
+-- the same distinction `_has_itemized_bill_document` vs
+`_usable_line_item_count` already drew for documents, extended to patient and
+bill facts. See the block comment above `_patient_fact_status` for the live
+case that forced it. No applicability outcome changed; only the reporting.
 """
 
 from __future__ import annotations
@@ -131,6 +140,160 @@ def _first_deadline(bill: dict, state: str, front: str, name: str | None, insure
     return None
 
 
+# --- naming the missing fact (ADDED 2026-08-26, STATUTE, wo8) -------------
+#
+# THE DEFECT THIS SECTION EXISTS TO PREVENT. A real emailed bill produced a
+# case where the documents established provider, state (CA), self-pay status,
+# income ($32,000/yr), bill total and five line items -- and left exactly ONE
+# fact unstated anywhere: household size. `_select_charity_care` correctly
+# declined, but said "insufficient patient data (income, household size, or
+# state) to screen eligibility". That sentence is true and useless: it lists
+# the category of things that might be missing instead of reporting the gap
+# that actually exists. Income WAS established. State WAS established. And
+# household size is decisive -- at household 3, $32,000 is 117% of the 2026
+# FPL ($27,320) and clears California's 400% statutory floor (Cal. Health &
+# Safety Code §127405(a)(1)(A)), erasing the whole bill. A patient told
+# "insufficient patient data" learns nothing; a patient told "household size
+# was not stated in any document on file" knows what to send next.
+#
+# Every "cannot determine" path below therefore names the specific input(s)
+# it does not have, and -- extending the rigour `_has_itemized_bill_document`
+# vs `_usable_line_item_count` already applies to DOCUMENTS -- distinguishes
+# "the fact was never stated" from "we have a value but cannot use it".
+# Applicability outcomes are unchanged; only the reporting is.
+
+_WHY_INCOME = (
+    "26 CFR 1.501(r)-4(b)(2) screens household income against the hospital's published "
+    "percentage-of-poverty thresholds"
+)
+_WHY_HOUSEHOLD = (
+    "the federal poverty level the hospital's thresholds are a percentage of is computed "
+    "per household size (2026 HHS guidelines, 91 FR 1797)"
+)
+_WHY_STATE = (
+    "the patient's state sets any statutory floor beneath the hospital's own thresholds "
+    "(e.g. Cal. Health & Safety Code §127405(a)(1)(A))"
+)
+
+
+def _and_join(labels: list[str]) -> str:
+    """ "a" / "a and b". Never sees more than two items -- see `_patient_fact_status`."""
+    return " and ".join(labels)
+
+
+@dataclass(frozen=True)
+class _PatientFact:
+    """One input a charity-care screen needs, and whether we actually have it.
+
+    `gap` is None when the fact is established. `why` is the legal reason the
+    screen cannot proceed without it -- kept per-fact so the reason names only
+    the law that is actually load-bearing for the gap in front of us.
+    """
+
+    label: str
+    gap: str | None
+    why: str
+
+
+def _patient_fact_status(patient: dict) -> list[_PatientFact]:
+    """Classify the three patient facts a charity-care screen needs.
+
+    The three are income, household size and state -- exactly the inputs
+    `screen_eligibility` (contract §3.5) takes. Each lands in one of three
+    states, never collapsed:
+
+      * established -- a usable value is on file;
+      * never stated -- the field is absent or null, i.e. no document on file
+        ever asserted it (this is the one a patient can FIX, by sending the
+        document that states it);
+      * on file but unreadable -- a value exists and is not usable, which is
+        a failed extraction, not a missing document, and must not be reported
+        as though the patient never provided it.
+
+    At most two of the three can be established while any gap exists, so
+    `_and_join` never needs an Oxford comma.
+    """
+    facts: list[_PatientFact] = []
+
+    for label, value, why in (
+        ("annual household income", _income_cents(patient), _WHY_INCOME),
+        ("household size", patient.get("household_size"), _WHY_HOUSEHOLD),
+    ):
+        if _is_plain_int(value):
+            facts.append(_PatientFact(label, None, why))
+        elif value is None:
+            facts.append(
+                _PatientFact(label, f"{label} was not stated in any document on file", why)
+            )
+        else:
+            facts.append(
+                _PatientFact(
+                    label,
+                    f"{label} is on file but unreadable -- recorded as "
+                    f"{type(value).__name__}, not a whole number",
+                    why,
+                )
+            )
+
+    # `state` has no "unreadable" state: `_select_charity_care` stringifies
+    # whatever is there, so any non-empty value is usable. Kept as two cases
+    # rather than inventing a third that cannot occur.
+    if str(patient.get("state") or "").strip():
+        facts.append(_PatientFact("state of residence", None, _WHY_STATE))
+    else:
+        facts.append(
+            _PatientFact(
+                "state of residence",
+                "state of residence was not stated in any document on file",
+                _WHY_STATE,
+            )
+        )
+
+    return facts
+
+
+def _patient_data_gap_reason(facts: list[_PatientFact]) -> str:
+    """The `FrontDecision.reason` for a charity-care screen that cannot run.
+
+    Names the actual gap(s) and, when some facts ARE established, says so --
+    "it is the only missing input" is the sentence that tells a patient which
+    one document to send. Keeps the law attached: 26 CFR 1.501(r)-4(b)(2) (the
+    screen itself), 91 FR 1797 (the poverty table household size indexes) and
+    the state-floor cite, each surfaced only when the fact it governs is the
+    one missing.
+    """
+    gaps = [f for f in facts if f.gap is not None]
+    established = [f.label for f in facts if f.gap is None]
+
+    body = "cannot screen charity-care eligibility: " + "; ".join(f.gap or "" for f in gaps)
+    if established:
+        names = _and_join(established)
+        verb = "is" if len(established) == 1 else "are"
+        if len(gaps) == 1:
+            body += f". It is the only missing input -- {names} {verb} established"
+        else:
+            body += f" ({names} {verb} established)"
+    else:
+        body += ". No patient fact this screen needs is established"
+
+    needed = "Why it is needed" if len(gaps) == 1 else "Why they are needed"
+    return f"{body}. {needed}: " + "; ".join(f.why for f in gaps) + "."
+
+
+def _unusable_value_phrase(value: object, label: str, unit: str) -> str | None:
+    """None when `value` is a usable whole number; otherwise a phrase naming
+    the gap, distinguishing "never provided" from "on file but unreadable".
+
+    Same three-state discipline as `_patient_fact_status`, for the money
+    fields on the bill (`amount_cents`, `gfe_amount_cents`, §3.1).
+    """
+    if _is_plain_int(value):
+        return None
+    if value is None:
+        return f"no {label} is on file"
+    return f"the {label} on file is unreadable -- recorded as {type(value).__name__}, not {unit}"
+
+
 def _select_charity_care(case: dict, today: date) -> FrontDecision:
     patient = _get(case, "patient")
     bill = _get(case, "bill")
@@ -159,11 +322,16 @@ def _select_charity_care(case: dict, today: date) -> FrontDecision:
 
     income = _income_cents(patient)
     household = patient.get("household_size")
-    if not _is_plain_int(income) or not _is_plain_int(household) or not state:
+    # The guard and the reason are derived from ONE source of truth
+    # (`_patient_fact_status`) so the sentence can never drift from the test
+    # that produced it -- the previous version repeated the predicate here and
+    # described it, vaguely, in a separate literal.
+    facts = _patient_fact_status(patient)
+    if any(f.gap is not None for f in facts):
         return FrontDecision(
             "charity_care",
             False,
-            "insufficient patient data (income, household size, or state) to screen eligibility",
+            _patient_data_gap_reason(facts),
             "26 CFR 1.501(r)-4(b)(2)",
         )
 
@@ -176,10 +344,14 @@ def _select_charity_care(case: dict, today: date) -> FrontDecision:
     fap_citation = fap_deadline.citation if fap_deadline is not None else "26 CFR 1.501(r)-1(b)(3)"
 
     if elig.determination == "unknown":
+        # `explain()` already opens "Eligibility unknown: " and then names the
+        # specific gap (which threshold is missing, which state floor did not
+        # resolve). Prefixing it again produced "eligibility unknown:
+        # Eligibility unknown: ..." on screen and added no information.
         return FrontDecision(
             "charity_care",
             False,
-            f"eligibility unknown: {elig.explain()}",
+            elig.explain(),
             "26 CFR 1.501(r)-4(b)(2)",
             due,
         )
@@ -205,21 +377,50 @@ def _select_ppdr(case: dict, today: date) -> FrontDecision:
     insured = patient.get("insured")
 
     if insured is not False:
-        reason = "coverage status unknown" if insured is None else "patient is insured"
+        # Three distinct causes, previously two. `insured is None` (absent or
+        # null) means no document on file states a coverage status -- fixable
+        # by sending an insurance card or a self-pay statement. A non-bool
+        # value is a failed extraction, NOT a statement that the patient is
+        # insured; the old `else` branch asserted "patient is insured" for
+        # any garbage value, which is the same fabricate-a-fact defect
+        # ef-2026-0006 hit on the hospital record.
+        if insured is True:
+            detail = "the documents on file state this patient is insured"
+        elif insured is None:
+            detail = "insurance status was not stated in any document on file"
+        else:
+            detail = (
+                "insurance status is on file but unreadable -- recorded as "
+                f"{type(insured).__name__}, not a yes/no value, so self-pay status is "
+                "not established"
+            )
         return FrontDecision(
             "ppdr",
             False,
-            f"PPDR requires an uninsured/self-pay patient ({reason})",
+            f"PPDR requires an uninsured (self-pay) patient: {detail}",
             "45 CFR 149.610(a)",
         )
 
     gfe = bill.get("gfe_amount_cents")
     amount = bill.get("amount_cents")
-    if not _is_plain_int(gfe) or not _is_plain_int(amount):
+    # Two inputs, one comparison. The old single sentence blamed the Good
+    # Faith Estimate even when the GFE was on file and the BILL TOTAL was the
+    # missing number (live on fixture case_06, where both are null and only
+    # the GFE was named). 45 CFR 149.620(a)(2)(ii) compares one against the
+    # other; either one absent defeats it, and the patient is told which.
+    money_gaps = [
+        phrase
+        for phrase in (
+            _unusable_value_phrase(gfe, "Good Faith Estimate amount", "a whole-cents amount"),
+            _unusable_value_phrase(amount, "billed amount", "a whole-cents amount"),
+        )
+        if phrase is not None
+    ]
+    if money_gaps:
         return FrontDecision(
             "ppdr",
             False,
-            "no Good Faith Estimate on file to compare against the bill",
+            "cannot compare the bill against the Good Faith Estimate: " + "; ".join(money_gaps),
             "45 CFR 149.620(a)(2)(ii)",
         )
 
@@ -264,20 +465,43 @@ def _select_debt_validation(case: dict, today: date) -> FrontDecision:
     bill = _get(case, "bill")
     state = str(patient.get("state") or "").strip().upper()
 
-    if not bill.get("in_collections"):
+    in_collections = bill.get("in_collections")
+    if not in_collections:
+        # "not reported in collections" covered both a recorded `False` and a
+        # field nobody ever filled in. Only one of those is fixable by the
+        # patient, and it is the one that says what to send.
+        if in_collections is None:
+            detail = (
+                "no collection status is recorded on the bill -- a collection notice or a "
+                "debt-validation notice on file would establish it"
+            )
+        else:
+            detail = "the bill record states this account is not in collections"
         return FrontDecision(
             "debt_validation",
             False,
-            "account is not reported in collections",
+            detail,
             _DEBT_VALIDATION_CITATION,
         )
 
     notice = bill.get("validation_notice_date")
     if not isinstance(notice, date):
+        # 15 USC 1692g(a) runs the 30 days from the validation NOTICE, so the
+        # notice's date is the one fact this front needs and cannot infer.
+        if notice is None:
+            detail = (
+                "the account is in collections but no validation-notice date is on file -- "
+                "the 30-day dispute window runs from that notice"
+            )
+        else:
+            detail = (
+                "the account is in collections and a validation-notice date is on file but "
+                f"unreadable -- recorded as {type(notice).__name__}, not a date"
+            )
         return FrontDecision(
             "debt_validation",
             False,
-            "in collections but no validation-notice date is on file",
+            detail,
             _DEBT_VALIDATION_CITATION,
         )
 

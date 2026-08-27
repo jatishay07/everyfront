@@ -255,3 +255,51 @@ demonstrated end to end, but it took finding eight silent failures to get there 
 **This is a strong hackathon build with a real, demonstrable core and honest failure
 modes. It is not a system to route a real patient's bill through**, and the README says
 so. That honesty is a scoring asset (§4 persona 8), not a liability.
+
+---
+
+## HANDOFF — STATUTE → SWARM (agent-core), 2026-08-26
+
+`packages/rules` no longer reports a *category* of possibly-missing inputs when it
+cannot reach a determination; every "cannot determine" reason now names the specific
+fact(s) it does not have, and distinguishes "never stated in any document" from "on
+file but unreadable". The trigger was a real emailed bill (Sutter Bay / CA / self-pay,
+$2,625 bill, $1,925 GFE, $32,000/yr income) where **household size** was the one fact
+in no document — and `select_fronts` reported "insufficient patient data (income,
+household size, or state)". At household 3 that patient is at 117% FPL, under CA's 400%
+statutory floor (Cal. HSC §127405(a)(1)(A)); the whole bill is erasable. Naming the gap
+is the difference between a patient who knows what to send and one who does not.
+
+**Two things for the agent-core owner (I do not own `services/agent-core/`):**
+
+1. **`agent_core/pipeline.py:266` has the same defect, independently.**
+   `_charity_savings` (or whichever function holds it) returns
+   `"insufficient patient data to screen eligibility"` from its own
+   `if not _is_plain_int(income) or not _is_plain_int(household) or not state:`
+   guard — a second copy of exactly the wording this work order deleted from
+   `rules.fronts`. It is a separate literal in a directory I must not touch.
+   `rules.fronts._patient_fact_status(patient)` is public-enough to reuse: it returns
+   a `list[_PatientFact]` where `f.gap is None` means established, and
+   `rules.fronts._patient_data_gap_reason(facts)` renders the sentence. If you would
+   rather have a stable public API for it than reach into underscored names, ask and
+   I will export one from `packages/rules`.
+
+2. **Reason-text assertions in `services/agent-core/tests` still pass, and I checked
+   each one.** `test_strategist.py:47` and `test_rules_bridge.py:134` match
+   `"not established"` (the unresolved-hospital reason — deliberately unchanged);
+   `test_rules_bridge.py:89` matches `"no 501(r)"`/`"for-profit"` (unchanged). No
+   agent-core test needed editing. But if you add new assertions on
+   `FrontDecision.reason`, note these strings changed:
+
+   | before | after |
+   |---|---|
+   | `insufficient patient data (income, household size, or state) to screen eligibility` | names the actual missing fact(s), e.g. `cannot screen charity-care eligibility: household size was not stated in any document on file. It is the only missing input -- annual household income and state of residence are established. Why it is needed: ...` |
+   | `PPDR requires an uninsured/self-pay patient (patient is insured)` | `PPDR requires an uninsured (self-pay) patient: the documents on file state this patient is insured` |
+   | `PPDR requires an uninsured/self-pay patient (coverage status unknown)` | `...: insurance status was not stated in any document on file` (and a *third* case for an unreadable value, which previously fell through to "patient is insured") |
+   | `no Good Faith Estimate on file to compare against the bill` | `cannot compare the bill against the Good Faith Estimate: no Good Faith Estimate amount is on file[; no billed amount is on file]` |
+   | `account is not reported in collections` | `the bill record states this account is not in collections` / `no collection status is recorded on the bill -- ...` |
+   | `eligibility unknown: Eligibility unknown: ...` (double-prefixed) | `Eligibility unknown: ...` |
+
+   No `applicable` outcome changed anywhere. `fixtures/generated/cases/*/case.json`
+   was regenerated (derived output; `TestNoGeneratedDrift` enforces it) — reason text
+   only, 13 lines across 8 files.

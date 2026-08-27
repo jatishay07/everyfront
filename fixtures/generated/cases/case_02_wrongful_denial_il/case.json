@@ -187,14 +187,14 @@
         "citation": "45 CFR 149.610(a)",
         "deadline": null,
         "front": "ppdr",
-        "reason": "PPDR requires an uninsured/self-pay patient (patient is insured)"
+        "reason": "PPDR requires an uninsured (self-pay) patient: the documents on file state this patient is insured"
       },
       {
         "applicable": false,
         "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
         "deadline": null,
         "front": "debt_validation",
-        "reason": "account is not reported in collections"
+        "reason": "the bill record states this account is not in collections"
       },
       {
         "applicable": true,
