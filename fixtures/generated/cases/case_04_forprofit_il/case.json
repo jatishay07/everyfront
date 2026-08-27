@@ -129,14 +129,14 @@
         "citation": "45 CFR 149.620(a)(2)(ii)",
         "deadline": null,
         "front": "ppdr",
-        "reason": "no Good Faith Estimate on file to compare against the bill"
+        "reason": "cannot compare the bill against the Good Faith Estimate: no Good Faith Estimate amount is on file"
       },
       {
         "applicable": false,
         "citation": "12 CFR 1006.34(b); 15 USC 1692g(a)",
         "deadline": null,
         "front": "debt_validation",
-        "reason": "account is not reported in collections"
+        "reason": "the bill record states this account is not in collections"
       },
       {
         "applicable": true,

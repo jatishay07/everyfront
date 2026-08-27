@@ -185,6 +185,17 @@ _STATE_FLOOR_ELEVATED: dict[str, _ElevatedFloor] = {
     "WA": _ElevatedFloor("large_system", "WA_LARGE_SYSTEM", "large-system hospital tier applied"),
 }
 
+# The real two-letter state codes `STATE_FLOORS` answers for -- the keys like
+# "IL_RURAL"/"WA_LARGE_SYSTEM" are hospital-class TIERS of a state already in
+# this set, never states a caller can pass in. Used only to say, honestly,
+# which states this engine carries a floor for when it carries none for the
+# one asked about.
+_FLOOR_STATES: frozenset[str] = frozenset(
+    key
+    for key in STATE_FLOORS
+    if key not in {e.elevated_state_key for e in _STATE_FLOOR_ELEVATED.values()}
+)
+
 
 @dataclass(frozen=True)
 class EligibilityResult:
@@ -247,6 +258,25 @@ def _resolve_state_floor(state: str, hospital: dict, notes: list[str]) -> StateF
     key = state.strip().upper()
     floor = STATE_FLOORS.get(key)
     if floor is None:
+        # ADDED 2026-08-26 (STATUTE, wo8): this used to return None silently,
+        # so when the hospital also published no usable threshold the only
+        # thing the caller could say was "no usable threshold from the
+        # hospital record or state law" -- a category, not a gap. Name which
+        # of the two is missing and why. NOTE the wording: no state floor is
+        # ON FILE HERE. That is a statement about this engine's coverage
+        # (STATE_FLOORS, and only states this product claims to support), not
+        # a legal assertion that the state imposes none.
+        if not key:
+            notes.append(
+                "the patient's state is not recorded, so no state statutory floor could be "
+                "applied; only the hospital's own published thresholds are in play"
+            )
+        else:
+            notes.append(
+                f"no state statutory floor is on file for {key} (this engine carries floors "
+                f"for {', '.join(sorted(_FLOOR_STATES))}); only the hospital's own published "
+                "thresholds are in play"
+            )
         return None
 
     elevated = _STATE_FLOOR_ELEVATED.get(key)
@@ -318,7 +348,16 @@ def screen_eligibility(
                 notes.append(floor.note)
 
     if free is None and disc is None:
-        notes.append("no usable threshold from the hospital record or state law")
+        # Name the gap rather than the two places it could have come from.
+        # The preceding notes already say WHICH -- "hospital reports no free
+        # care threshold", "hospital does not offer discounted care (Schedule
+        # H reports 0)", "no state statutory floor is on file for TX" -- so
+        # this line reports the consequence and points at them.
+        notes.append(
+            "no eligibility threshold is established: the hospital record supplies neither a "
+            "free-care nor a discounted-care FPL threshold, and no state statutory floor "
+            "raised one (see the preceding notes for which)"
+        )
         return EligibilityResult("unknown", None, None, None, citations, notes)
 
     try:

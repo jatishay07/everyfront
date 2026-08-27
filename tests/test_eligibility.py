@@ -192,6 +192,48 @@ class TestDegradation:
             assert screen_eligibility(FPL4_2026, 4, "CA", h).explain().strip()
 
 
+class TestNamesTheMissingInput:
+    """STATUTE wo8: an "unknown" must say WHICH input is missing.
+
+    `explain()` for an unknown determination is what `select_fronts` now
+    carries verbatim into `FrontDecision.reason` -- it appears on screen in
+    the demo, so it has to be a gap a reader can act on, not a category.
+    """
+
+    def test_unsupported_state_says_no_floor_is_on_file_for_it(self):
+        r = screen_eligibility(FPL4_2026, 4, "TX", {})
+        assert r.determination == "unknown"
+        assert any("no state statutory floor is on file for TX" in n for n in r.notes)
+        # Honest about OUR coverage, not a legal claim about Texas law.
+        assert not any("TX has no" in n for n in r.notes)
+        assert any("CA" in n and "IL" in n and "WA" in n for n in r.notes)
+
+    def test_the_engines_floor_list_excludes_hospital_class_tiers(self):
+        """IL_RURAL / WA_LARGE_SYSTEM are tiers of a state, not states a
+        caller could pass -- listing them would misdescribe our coverage."""
+        r = screen_eligibility(FPL4_2026, 4, "TX", {})
+        note = next(n for n in r.notes if "no state statutory floor is on file" in n)
+        assert "IL_RURAL" not in note and "WA_LARGE_SYSTEM" not in note
+
+    def test_blank_state_says_the_state_is_not_recorded(self):
+        r = screen_eligibility(FPL4_2026, 4, "", {})
+        assert r.determination == "unknown"
+        assert any("the patient's state is not recorded" in n for n in r.notes)
+
+    def test_no_threshold_note_names_the_hospital_record_not_a_category(self):
+        r = screen_eligibility(FPL4_2026, 4, "TX", {})
+        assert any(
+            "the hospital record supplies neither a free-care nor a discounted-care FPL "
+            "threshold" in n
+            for n in r.notes
+        )
+        assert not any("from the hospital record or state law" in n for n in r.notes)
+
+    def test_a_state_with_a_floor_does_not_get_the_missing_floor_note(self):
+        r = screen_eligibility(FPL4_2026, 4, "CA", {})
+        assert not any("no state statutory floor is on file" in n for n in r.notes)
+
+
 class TestExplainability:
     def test_explain_shows_the_arithmetic_and_the_law(self):
         text = screen_eligibility(50_000_00, 4, "IL", ADVOCATE_IL).explain()
