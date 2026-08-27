@@ -1,19 +1,36 @@
 """Phaxio fax client -- §4 persona 4 WO3.
 
-Docs: https://www.phaxio.com/docs/api/v2/faxes/create_and_send_fax
+REQUEST/RESPONSE SHAPE, source: https://www.phaxio.com/docs/api/v2/faxes/create_and_send_fax
+(fetched 2026-08-26 while writing this module).
 
-    curl https://api.phaxio.com/v2/faxes \\
-      -u 'API_KEY:API_SECRET' -F 'to=+1...' -F 'file=@bill.pdf'
+    POST https://api.phaxio.com/v2/faxes
+    Basic auth: API_KEY:API_SECRET
+    multipart form: to (E.164, required), file (binary, required),
+                    callback_url (optional)
 
-Test API keys (the only kind this repo ever configures -- agreement §2.4,
-no secrets in code, and §4 persona 4's "test-mode first, always") simulate
-the whole call: Phaxio never actually dials, and the response shape is
-identical to a live send. NOT exercised against a live Phaxio account in
-this change -- verified against the public API reference above. `send_fax`
-degrades to `FakeFaxVendor` on any request exception so a vendor outage never
-blocks the demo pipeline (§6: "vendor test-mode surprises -- swap to the
-other vendor"; here the swap is to the fake recorder, which is the same
-interface).
+    200 body, verbatim from the reference:
+        {"success":true,"message":"Fax queued for sending","data":{"id":1234}}
+
+    -> `data.id` is the fax id, and the only field this client needs.
+
+TEST MODE IS MANDATORY HERE, not a default. `credentials.py` refuses any
+credential that is not provably a Phaxio TEST credential, and it runs before
+the destination is even normalized -- so there is no ordering in which a
+production key reaches `requests.post`. Phaxio's own description of test
+credentials: "the Phaxio system will simulate faxes being sent or received
+and your balance will not be affected"; nothing dials, nothing prints
+(https://www.phaxio.com/blog/guide/test-credentials).
+
+NOT exercised against a live Phaxio account -- no key exists yet (see this
+package's README for the signup). Everything below is verified against the
+public API reference and a faked HTTP transport only.
+
+`send()` degrades to `FakeFaxVendor` on a *transport* failure so a vendor
+outage never blocks the demo pipeline (§6: "vendor test-mode surprises"),
+and records WHY in the proof object so the degradation is never silent. It
+deliberately does NOT degrade on `ProductionCredentialError` or
+`UnsafeDestinationError`: those are misconfigurations of a safety control
+and must stop, loudly.
 
 `requests` is imported lazily inside `send()` -- see `pdf/engine.py`'s
 docstring for why a hard top-level import of an optional dependency here
@@ -25,7 +42,8 @@ from __future__ import annotations
 import os
 
 from .allowlist import assert_fax_destination_allowed
-from .base import VendorResult
+from .base import VendorResult, degraded
+from .credentials import assert_phaxio_credentials_are_test
 from .fake import FakeFaxVendor
 
 PHAXIO_BASE_URL = "https://api.phaxio.com/v2"
@@ -49,9 +67,17 @@ class PhaxioFaxClient:
         self._fallback = FakeFaxVendor()
 
     def send(self, filing_id: str, pdf: bytes, destination: str) -> VendorResult:
+        # ORDER IS THE GUARDRAIL. Credentials first: a production key is
+        # refused before any destination is considered, so "production key +
+        # real hospital number" has no code path at all -- not even one that
+        # gets as far as evaluating whether the number is allowed.
+        if self.api_key or self.api_secret:
+            assert_phaxio_credentials_are_test(self.api_key, self.api_secret)
         number = assert_fax_destination_allowed(destination)
         if not (self.api_key and self.api_secret):
-            # No credentials configured -- fall back rather than fail the filing.
+            # No credentials configured -- a clearly-labelled simulated send,
+            # which is exactly what this system has always done. Never a
+            # silent failure, never reported as live (`simulated is True`).
             return self._fallback.send(filing_id, pdf, number)
 
         import requests
@@ -76,10 +102,15 @@ class PhaxioFaxClient:
                 vendor="phaxio",
                 vendor_id=fax_id,
                 status="sent",
-                proof={"phaxio_id": fax_id, "destination": number},
+                # A real Phaxio fax id from a TEST credential is still a
+                # simulation -- no phone call was placed. Calling this a live
+                # send because the vendor name isn't "fake" is precisely the
+                # lie the `simulated` contract (base.py) exists to prevent.
+                simulated=True,
+                proof={"phaxio_id": fax_id, "destination": number, "mode": "test"},
             )
-        except Exception:  # noqa: BLE001 -- vendor outage must not block the filing
-            return self._fallback.send(filing_id, pdf, number)
+        except Exception as exc:  # noqa: BLE001 -- vendor outage must not block the filing
+            return degraded(self._fallback.send(filing_id, pdf, number), "phaxio", exc)
 
     def parse_status_callback(self, payload: dict) -> tuple[str, str]:
         """Phaxio webhook body: {"fax": {"id": ..., "status": "success"|"failed"}, ...}."""

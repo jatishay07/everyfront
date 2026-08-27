@@ -23,6 +23,7 @@ from .vendors import (
     FakeMailVendor,
     LobMailClient,
     PhaxioFaxClient,
+    ProductionCredentialError,
     UnsafeDestinationError,
     handle_status_callback,
     send_filing,
@@ -38,6 +39,7 @@ __all__ = [
     "PhaxioFaxClient",
     "LobMailClient",
     "UnsafeDestinationError",
+    "ProductionCredentialError",
     "sync_deadlines",
     "mirror_case_filings",
 ]
