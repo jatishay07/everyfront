@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import config
+from . import evidence as evidence_mod
 
 
 def _try_firestore_client():
@@ -63,6 +64,23 @@ def _merge_front(fronts: list[dict], front: dict) -> list[dict]:
     else:
         fronts.append(dict(front))
     return fronts
+
+
+def _merge_front_from_analysis(
+    fronts: list[dict], front: dict, owned: tuple[str, ...]
+) -> list[dict]:
+    """`_merge_front`, except a status the filing lifecycle owns survives.
+
+    The rule `upsert_front_from_analysis` documents, factored out so the
+    single-front and whole-pass writers cannot drift apart.
+    """
+    for existing in fronts:
+        if existing.get("front") == front.get("front"):
+            merged = dict(front)
+            if existing.get("status") in owned:
+                merged["status"] = existing["status"]
+            return _merge_front(fronts, merged)
+    return _merge_front(fronts, front)
 
 
 class CaseStore:
@@ -241,7 +259,9 @@ class CaseStore:
     #: see `upsert_front_from_analysis`.
     _FILING_OWNED_STATUSES = ("filing", "filed", "won", "lost")
 
-    def upsert_front_from_analysis(self, case_id: str, front: dict) -> dict | None:
+    def upsert_front_from_analysis(
+        self, case_id: str, front: dict, *, evidence: list[str] | None = None
+    ) -> dict | None:
         """Upsert a front that re-analysis just recomputed, WITHOUT reopening
         one the filing lifecycle already owns.
 
@@ -279,18 +299,142 @@ class CaseStore:
 
         Everything else on the entry -- applicable, reason, citation,
         deadline -- IS analysis's to update, and still is.
+
+        ADDED 2026-08-27 (SWARM, `analysis_evidence`): pass `evidence` to also
+        refuse a write from a pass that saw strictly LESS than the pass whose
+        answer is already stored -- a different failure from the one above and
+        equally invisible. See `write_analysis`, which this now delegates to;
+        omitting `evidence` keeps this method's original, unguarded behaviour
+        exactly.
         """
+        return self.write_analysis(case_id, evidence=evidence, fronts=[front])["case"]
 
-        def _apply(fronts: list[dict]) -> list[dict]:
-            for existing in fronts:
-                if existing.get("front") == front.get("front"):
-                    merged = dict(front)
-                    if existing.get("status") in self._FILING_OWNED_STATUSES:
-                        merged["status"] = existing["status"]
-                    return _merge_front(fronts, merged)
-            return _merge_front(fronts, front)
+    #: Where a case records the evidence behind the analysis values it
+    #: currently holds -- `fronts[]`, `savings_found_cents`,
+    #: `audit_findings_cents`, `denial_flag`, and the merged `patient`/`bill`.
+    #: NOT a contract §3.1 field: it is this service's own bookkeeping, the way
+    #: `_processed_messages/` is, and it is additive so CANVAS's
+    #: `web/lib/types.ts` reads straight past it.
+    ANALYSIS_EVIDENCE_FIELD = "analysis_evidence"
 
-        return self._write_fronts(case_id, _apply)
+    def write_analysis(
+        self,
+        case_id: str,
+        *,
+        evidence: list[str] | None = None,
+        patch: dict | None = None,
+        fronts: list[dict] | None = None,
+    ) -> dict:
+        """Apply ONE analysis pass's writes, atomically, and only if that pass
+        was not already superseded by a better-informed one.
+
+        THE RACE THIS CLOSES (live, `case-1a043f4f4ae26dfa`, 2026-08-26; the
+        full trace is in `agent_core/evidence.py`). An email with three PDFs
+        publishes three `case.document.added` events, and Pub/Sub redelivers
+        each of them mid-cascade, so several full Reader -> merge -> Lookup ->
+        {Clock, Auditor} -> Strategist passes run CONCURRENTLY on one case.
+        Each merges whatever documents existed when IT started and then writes
+        the whole `fronts[]` reason/applicable set. Last writer wins -- and
+        "last" is last to FINISH, not best informed, so a pass that had never
+        seen the pay stub overwrote the conclusion of one that had, leaving a
+        case whose charity_care reason said the income was unknown while
+        `patient.annual_income_cents` on the same document said 3,200,000.
+
+        Neither existing protection touches it. `_write_fronts`'s transaction
+        makes the write atomic, which is about interleaving, not staleness --
+        both passes here are perfectly serialized and the wrong one still
+        wins. `upsert_front_from_analysis`'s status rule protects only what
+        the FILING lifecycle owns; reason and applicable are analysis's own,
+        and this is analysis overwriting itself.
+
+        HOW. `evidence` (see `agent_core.evidence`) describes what the calling
+        pass actually consumed. Inside the same transaction that would apply
+        the write, it is compared with the evidence recorded alongside the
+        values already stored: a strict subset is REFUSED -- nothing is
+        written, and the caller is told so it can decline to log a conclusion
+        that is not the case's conclusion. Anything else (a superset, an equal
+        set, or an incomparable one) writes and becomes the new recorded
+        evidence.
+
+        Equal evidence writing is deliberate and is what keeps §2.3
+        idempotency intact: a redelivery that saw exactly the same documents
+        recomputes exactly the same values, so the write is a no-op in
+        content, and `pipeline._log`'s deterministic event ids mean it adds no
+        rows either.
+
+        WHY ONE METHOD FOR ALL OF IT. `fronts[]` was the visible symptom, but
+        the pass writes `savings_found_cents`, `audit_findings_cents`,
+        `denial_flag` and the merged `patient`/`bill` from the same stale
+        snapshot -- one guard over one transaction is the only way those stay
+        consistent with each other AND with the fronts. Splitting them would
+        let a superseded pass land half its answer.
+
+        Args:
+            evidence: what this pass saw. `None` disables the guard entirely
+                (the pre-2026-08-27 behaviour), for callers with nothing to
+                compare.
+            patch: case fields to merge, exactly like `update_case`.
+            fronts: `fronts[]` entries to upsert under the
+                `upsert_front_from_analysis` status rule.
+
+        Returns `{"case", "written", "superseded", "recorded_evidence"}`.
+        `case` is the case as it stands AFTERWARDS -- the stored, better-
+        informed one when the write was refused, so a superseded caller
+        finishes against the truth rather than its own stale copy -- or None
+        if the case is gone (never resurrected; see `update_case`).
+        """
+        outcome: dict = {"written": False, "superseded": False, "recorded_evidence": []}
+
+        def _fields(data: dict) -> dict | None:
+            """The fields to write, or None to refuse this pass."""
+            recorded = data.get(self.ANALYSIS_EVIDENCE_FIELD)
+            outcome["recorded_evidence"] = list(recorded or [])
+            if evidence_mod.is_strictly_weaker(evidence, recorded):
+                outcome["superseded"] = True
+                return None
+            fields = dict(patch or {})
+            if fronts is not None:
+                current = copy.deepcopy(data.get("fronts") or [])
+                for front in fronts:
+                    current = _merge_front_from_analysis(
+                        current, front, self._FILING_OWNED_STATUSES
+                    )
+                fields["fronts"] = current
+            if evidence is not None:
+                fields[self.ANALYSIS_EVIDENCE_FIELD] = list(evidence)
+            fields["updated_at"] = _now_iso()
+            return fields
+
+        if self._client is not None:
+            from google.cloud import firestore
+
+            ref = self._client.collection("cases").document(case_id)
+
+            @firestore.transactional
+            def _txn(transaction) -> None:
+                # Reset first: a contended transaction is RETRIED, and the
+                # verdict of an attempt whose commit lost must not leak into
+                # the outcome of the attempt that actually landed.
+                outcome.update({"written": False, "superseded": False})
+                snap = ref.get(transaction=transaction)
+                if not snap.exists:  # never resurrect a purged case -- see update_case
+                    return
+                fields = _fields(snap.to_dict() or {})
+                if fields is None:
+                    return
+                transaction.set(ref, fields, merge=True)
+                outcome["written"] = True
+
+            _txn(self._client.transaction())
+        else:
+            with self._lock:
+                case = self._cases.get(case_id)
+                if case is not None:
+                    fields = _fields(case)
+                    if fields is not None:
+                        case.update(copy.deepcopy(fields))
+                        outcome["written"] = True
+        return {**outcome, "case": self.get_case(case_id)}
 
     def set_front_status(self, case_id: str, front: str, status: str) -> dict | None:
         """Atomically set one front's `status`, touching nothing else.

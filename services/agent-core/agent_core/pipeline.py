@@ -33,7 +33,7 @@ import hashlib
 import json
 import uuid
 
-from . import config, delivery_bridge, factmerge, pubsub_client, rules_bridge
+from . import config, delivery_bridge, evidence, factmerge, pubsub_client, rules_bridge
 from .agents import auditor, clock, filer, lookup, reader, strategist, verifier
 from .casedata import parse_bill_dates
 from .store import store
@@ -159,9 +159,10 @@ def _render_unknown(unknown: list[dict]) -> str:
     return " | ".join(parts)
 
 
-def _merge_document_facts(case_id: str, case: dict) -> dict:
+def _merge_document_facts(case_id: str, case: dict) -> tuple[dict, list[str]]:
     """THE MERGE STEP: every document's extraction -> canonical
-    `patient`/`bill`. Returns the (possibly unchanged) case.
+    `patient`/`bill`. Returns `(case, evidence)` -- the case as it stands
+    afterwards, and what this pass saw (`agent_core.evidence`).
 
     A real step in the pipeline, run once per analysis pass between Reader and
     the Lookup->Clock/Auditor->Strategist cascade, over EVERY document on file
@@ -186,14 +187,56 @@ def _merge_document_facts(case_id: str, case: dict) -> dict:
     applied -- see factmerge rule 3); and what is still unknown, named one
     fact at a time. `fact=` on each event keeps re-analysis from re-logging a
     merge that established the same things (§2.3).
+
+    THE CASE IS RE-READ HERE, NOT INHERITED FROM THE CALLER. `on_document_added`
+    reads the case before Reader runs, and Reader is a 20-40s pair of model
+    calls, so by the time the merge happens that snapshot can be a minute old
+    and missing everything a CONCURRENT pass has established in the meantime --
+    and if this merge's own patch comes back empty (the steady state under
+    redelivery) nothing else would ever refresh it, so the whole cascade would
+    then run on that stale copy. One read, taken with the document list, so the
+    merge's inputs and the evidence stamp describe the same instant.
+
+    THE EVIDENCE STAMP is taken from exactly the documents this merge folded
+    in, and travels with the pass all the way to its writes
+    (`store.write_analysis`). It is deliberately fixed HERE rather than later:
+    `_run_cascade`'s Auditor and Strategist re-read the document store at their
+    own moments and may therefore see MORE than this, but
+    `case["patient"]`/`case["bill"]` -- the inputs `select_fronts` and
+    `screen_eligibility` actually read, and the ones the live defect turned
+    on -- are fixed by this merge. Stamping later would claim evidence the
+    pass's own conclusions were not built from, which is the one way an
+    evidence guard can make things worse instead of better.
     """
     documents = store.list_documents(case_id)
+    case = store.get_case(case_id) or case
+    pass_evidence = evidence.from_documents(documents)
     patch, report = factmerge.merge_document_facts(case, documents)
     if patch:
+        # Guarded like every other analysis write: a pass that saw only the
+        # bill must not re-derive `bill.amount_cents` from the bill after a
+        # pass that saw the ITEMIZED bill has already taken it from the
+        # higher-precedence document. factmerge rule 2 ("documents win
+        # outright" on `bill` fields) is order-independent WITHIN one pass and
+        # order-dependent ACROSS concurrent ones, which is the same defect the
+        # fronts had.
+        written = store.write_analysis(case_id, evidence=pass_evidence, patch=patch)
         # `or case`: as everywhere else in this pipeline, a case purged
         # mid-run (demo reset, manual delete) writes nothing and returns None
         # rather than being resurrected -- finish against the local copy.
-        case = store.update_case(case_id, patch) or case
+        case = written["case"] or case
+        if written["superseded"]:
+            _log(
+                case_id,
+                "reader",
+                "merge_superseded",
+                "this pass merged a strict subset of the documents another pass had already "
+                "merged, so its facts were NOT written and the case keeps the better-informed "
+                "values. Nothing is lost: every document this pass read is inside that other "
+                "pass's evidence too.",
+                fact=["merge-superseded", pass_evidence],
+            )
+            return case, pass_evidence
 
     if report["established"]:
         _log(
@@ -231,7 +274,7 @@ def _merge_document_facts(case_id: str, case: dict) -> dict:
             _render_unknown(report["unknown"]),
             fact=[u["field"] for u in report["unknown"]],
         )
-    return case
+    return case, pass_evidence
 
 
 async def _run_reader(case_id: str, doc_id: str) -> dict:
@@ -466,11 +509,29 @@ async def _mirror_filing_to_drive(case_id: str, fact: dict, pdf: bytes | None) -
     return result
 
 
-async def _run_cascade(case_id: str, case: dict) -> dict:
+async def _run_cascade(case_id: str, case: dict, pass_evidence: list[str] | None = None) -> dict:
     """Lookup -> {Clock, Auditor} (parallel) -> Strategist, exactly once, then
     the case-level patch (status, savings, denial_flag). Returns the four
     agent turns, same shape `on_document_added` always has.
+
+    `pass_evidence` is what this pass's merge actually saw
+    (`_merge_document_facts` returns it); every write below goes through
+    `store.write_analysis`, which refuses it if a better-informed pass has
+    already answered. Omitted, it is taken from the document store as it
+    stands now -- honest for a caller that ran no merge of its own (the direct
+    callers in `services/agent-core/tests`), since such a pass's only
+    document-derived inputs are the ones Auditor and Strategist read
+    themselves, from the store, at roughly this moment.
+
+    ONE WRITE AT THE END, NOT A WRITE PER FRONT. `fronts[]`,
+    `savings_found_cents`, `audit_findings_cents`, `denial_flag` and `status`
+    are all computed from this pass's single snapshot, so they are applied in
+    one guarded transaction: a superseded pass must not land half its answer
+    next to a better pass's other half, which is a contradiction inside one
+    case of exactly the kind `factmerge` was written to end.
     """
+    if pass_evidence is None:
+        pass_evidence = evidence.from_documents(store.list_documents(case_id))
     lookup_turn = await lookup.run(case_id, case)
     lf = lookup_turn["fact"]
     _log(
@@ -529,10 +590,16 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
                 fact=["state-from-hospital", hospital_state],
             )
         # `or case`: if this case was purged mid-run (a demo reset, a manual
-        # delete), update_case now writes nothing and returns None rather than
+        # delete), the write now does nothing and returns None rather than
         # resurrecting it. Finish the cascade against the local copy -- every
         # later write is a no-op too, so nothing is left behind.
-        case = store.update_case(case_id, patch) or case
+        #
+        # Guarded on the same evidence as everything else this pass writes: a
+        # hospital resolved from a bill nobody has re-read is no better than
+        # the one a better-informed pass already resolved, and on refusal the
+        # returned case is that pass's -- so the Auditor below still gets a
+        # `case["hospital"]` for its denial-lawfulness sub-check.
+        case = store.write_analysis(case_id, evidence=pass_evidence, patch=patch)["case"] or case
 
     # Clock needs only bill/patient; Auditor needs `case["hospital"]` (just
     # set above) solely for its denial-lawfulness sub-check. Neither depends
@@ -628,23 +695,6 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
 
     strategist_turn = await strategist.run(case_id, case)
     sf = strategist_turn["fact"]
-    for front in sf["fronts"]:
-        # NOT `upsert_front`: re-analysis must not reopen a front the filing
-        # lifecycle already owns -- see that method's docstring for the live
-        # ef-2026-0007 trace.
-        store.upsert_front_from_analysis(case_id, front)
-        _log(
-            case_id,
-            "strategist",
-            f"select_front:{front['front']}",
-            front["reason"],
-            [front["citation"]] if front.get("citation") else [],
-            # Everything analysis owns about the front, minus `status`, which
-            # it does NOT own once a filing is under way (see
-            # `store.upsert_front_from_analysis`). Including it would make the
-            # same decision re-log itself the first time a front is filed.
-            fact={k: v for k, v in front.items() if k != "status"},
-        )
 
     # Defect #1: savings_found_cents is built from real, auditable components,
     # never invented. Audit findings (duplicates, NCCI PTP/MUE when a table is
@@ -675,11 +725,6 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
         f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "
         "applies, already subsumes any billing-error dollars on the same bill)."
     )
-    # Built entirely from computed numbers and STATUTE's own explanation --
-    # no narration in it -- so the sentence IS the fact. If any figure moves,
-    # the text moves and the feed gets a new, correct row.
-    _log(case_id, "auditor", "savings_summary", savings_detail, [], fact=savings_detail)
-
     # DEFECT (persona 5 WO6, idempotency): this used to be
     # `(case.get(...) or 0) + combined_cents` -- an ACCUMULATION, not a
     # recomputation. §2.3 requires every handler tolerate Pub/Sub redelivery,
@@ -725,7 +770,54 @@ async def _run_cascade(case_id: str, case: dict) -> dict:
             "reason": denial_check["detail"],
             "citation": denial_check["citation"],
         }
-    store.update_case(case_id, case_patch)
+
+    # THE ONE WRITE. Everything this pass concluded -- the fronts, the two
+    # money figures, the denial flag, the status -- lands in a single
+    # evidence-guarded transaction, or none of it does. `fronts=` still goes
+    # through the filing-lifecycle status rule (`upsert_front_from_analysis`'s
+    # protection, unchanged: `write_analysis` applies it per entry).
+    written = store.write_analysis(
+        case_id, evidence=pass_evidence, patch=case_patch, fronts=sf["fronts"]
+    )
+    if written["superseded"]:
+        # NOTHING from this pass is logged as a conclusion. The stale reason
+        # reaching the activity feed is half the live symptom: on
+        # case-1a043f4f4ae26dfa the feed carried "annual household income was
+        # not stated in any document on file" AFTER the pass that had read the
+        # $32,000 pay stub, next to a `patient.annual_income_cents` of
+        # 3,200,000. One row saying what actually happened is the honest
+        # record; four rows of a superseded answer is not.
+        _log(
+            case_id,
+            "strategist",
+            "analysis_superseded",
+            f"this pass reached the Strategist having seen {len(pass_evidence)} classified "
+            f"document(s), a strict subset of the {len(written['recorded_evidence'])} another "
+            "pass had already analysed, so its fronts, savings and denial flag were NOT "
+            "written. Concurrent passes are normal here -- one Pub/Sub redelivery or one more "
+            "attachment starts another -- and the case keeps the best-informed one.",
+            fact=["analysis-superseded", pass_evidence, written["recorded_evidence"]],
+        )
+    else:
+        for front in sf["fronts"]:
+            _log(
+                case_id,
+                "strategist",
+                f"select_front:{front['front']}",
+                front["reason"],
+                [front["citation"]] if front.get("citation") else [],
+                # Everything analysis owns about the front, minus `status`,
+                # which it does NOT own once a filing is under way (see
+                # `store.upsert_front_from_analysis`). Including it would make
+                # the same decision re-log itself the first time a front is
+                # filed.
+                fact={k: v for k, v in front.items() if k != "status"},
+            )
+        # Built entirely from computed numbers and STATUTE's own explanation --
+        # no narration in it -- so the sentence IS the fact. If any figure
+        # moves, the text moves and the feed gets a new, correct row.
+        _log(case_id, "auditor", "savings_summary", savings_detail, [], fact=savings_detail)
+
     pubsub_client.publish(config.TOPIC_CASE_ANALYSIS_COMPLETE, {"case_id": case_id})
 
     # Calendar LAST: after every Firestore write AND after the analysis is
@@ -875,9 +967,9 @@ async def on_document_added(case_id: str, doc_id: str) -> dict:
         }
 
     reader_turn = await _run_reader(case_id, doc_id)
-    case = _merge_document_facts(case_id, case)
+    case, pass_evidence = _merge_document_facts(case_id, case)
 
-    result = await _run_cascade(case_id, case)
+    result = await _run_cascade(case_id, case, pass_evidence)
     return {"reader": reader_turn, **result}
 
 
@@ -915,9 +1007,9 @@ async def process_case_documents(case_id: str, doc_ids: list[str]) -> dict:
     # "which document wins" depend on the order `gather` happened to return.
     # A reader turn that errored wrote no extraction, so it contributes
     # nothing here without needing to be filtered out.
-    case = _merge_document_facts(case_id, store.get_case(case_id) or case)
+    case, pass_evidence = _merge_document_facts(case_id, case)
 
-    result = await _run_cascade(case_id, case)
+    result = await _run_cascade(case_id, case, pass_evidence)
     return {"readers": dict(zip(doc_ids, reader_turns, strict=True)), **result}
 
 
