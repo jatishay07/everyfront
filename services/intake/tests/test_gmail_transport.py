@@ -610,6 +610,20 @@ def one_bill_arrives(monkeypatch, credentials):
 # --------------------------------------------------------------------------
 # The end-to-end walk
 # --------------------------------------------------------------------------
+def attachment_events(published) -> list[dict]:
+    """Just the ATTACHMENT events. Every fixture message here carries a real
+    text/plain body (`build_gmail_message` uses `EmailMessage.set_content`),
+    which now also publishes as a `patient_statement` document -- so a test
+    about how attachments are enumerated, deduplicated or named has to say
+    which events it means rather than counting everything on the topic.
+    """
+    return [e for _, e in published if e.get("doc_type") != pipeline.PATIENT_STATEMENT_TYPE]
+
+
+def body_events(published) -> list[dict]:
+    return [e for _, e in published if e.get("doc_type") == pipeline.PATIENT_STATEMENT_TYPE]
+
+
 def test_push_notification_produces_a_case_document_added_event(
     one_bill_arrives, gcs, published, monkeypatch
 ):
@@ -623,8 +637,13 @@ def test_push_notification_produces_a_case_document_added_event(
     message_id, data = pubsub.decode_push_envelope(body)
     result = pipeline.process_gmail_push(message_id, data)
 
-    assert result["status"] == "ok"
-    assert result["documents_published"] == 1
+    # TWO documents, not one: the PDF, and the body of the email it was
+    # attached to. `build_gmail_message` gives every fixture message a real
+    # text/plain part ("Attaching the bill I got from the hospital."), which
+    # is what a patient actually sends -- and what a patient writes there is
+    # the only place a fact like household size can ever come from (see
+    # `pipeline.PATIENT_STATEMENT_TYPE`).
+    assert result["documents_published"] == 2
     assert not transport.unrouted, f"unrouted Gmail calls: {transport.unrouted}"
 
     # -- the calls that were actually made, in order, as URLs ---------------
@@ -647,7 +666,7 @@ def test_push_notification_produces_a_case_document_added_event(
     assert content_type == "application/pdf"
 
     # -- the event ---------------------------------------------------------
-    assert len(published) == 1
+    assert len(published) == 2
     topic, event = published[0]
     assert topic == "case.document.added"
     assert event["case_id"] == "case-18f0a1b2c3d4e5f6"
@@ -659,6 +678,25 @@ def test_push_notification_produces_a_case_document_added_event(
         "raw_text must carry the PDF's real text -- agent-core's Reader reads "
         "documents/{doc_id}.raw_text and nothing else ever populates it for a "
         f"Gmail-sourced bill; got {event['raw_text'][:120]!r}"
+    )
+
+    # -- and the body the patient typed, as its own document ---------------
+    body_path = "intake/18f0a1b2c3d4e5f6/body/message-body.txt"
+    assert body_path in gcs, f"the email body was not stored; bucket holds {sorted(gcs)}"
+    _, body_event = published[1]
+    assert body_event["doc_type"] == pipeline.PATIENT_STATEMENT_TYPE, (
+        "the body must be published as a patient_statement -- agent-core's factmerge "
+        "excludes that type from INCOMING_DOC_TYPES precisely so nothing a patient SAYS "
+        "can be merged into the case as if a document had PROVEN it"
+    )
+    assert body_event["case_id"] == event["case_id"], "the body belongs to the same case"
+    assert body_event["doc_id"] != event["doc_id"]
+    assert body_event["gcs_uri"] == f"gs://{BUCKET}/{body_path}"
+    assert "Attaching the bill I got from the hospital" in body_event["raw_text"]
+    assert "Sutter Bay Hospitals" not in body_event["raw_text"], (
+        "the body event must carry the BODY, not the attachment's text -- publishing the "
+        "PDF's own words as something the patient wrote would let a document's contents "
+        "re-enter the pipeline as an unverified patient claim"
     )
 
     # -- the cursor advanced to the notification's historyId ---------------
@@ -749,11 +787,20 @@ def test_nested_multipart_alternative_with_an_image_sibling(
     body = gmail_push_envelope(pubsub_message_id="pubsub-nested", history_id=2000042)
     result = pipeline.process_gmail_push(*pubsub.decode_push_envelope(body))
 
-    assert result["documents_published"] == 1
+    # The PDF plus the body. The body here comes from the multipart/alternative
+    # container this fixture nests -- proof that `extract_body_text` walks the
+    # same tree `extract_pdf_attachments` does and finds the text/plain part
+    # rather than the HTML sibling.
+    assert result["documents_published"] == 2
     assert not transport.unrouted
-    assert [event["filename"] for _, event in published] == ["bill.pdf"]
+    assert [event["filename"] for event in attachment_events(published)] == ["bill.pdf"]
+    assert len(body_events(published)) == 1
+    assert body_events(published)[0]["raw_text"].startswith("Attaching the bill"), (
+        "the HTML alternative was preferred over the text/plain body the patient typed"
+    )
     assert sorted(k for k in gcs if k.startswith("intake/")) == [
-        "intake/18f0deadbeef0001/2/bill.pdf"
+        "intake/18f0deadbeef0001/2/bill.pdf",
+        "intake/18f0deadbeef0001/body/message-body.txt",
     ], "the PNG sibling was stored as if it were a bill"
     # The PNG was never fetched: only one attachments.get went out.
     assert len(transport.requests_to(r".*/attachments/.*")) == 1
@@ -801,9 +848,12 @@ def test_two_pdfs_in_one_message_each_become_their_own_event(
     )
 
     assert not transport.unrouted
-    assert [event["filename"] for _, event in published] == ["bill.pdf", "itemized_bill.pdf"]
+    assert [event["filename"] for event in attachment_events(published)] == [
+        "bill.pdf",
+        "itemized_bill.pdf",
+    ]
     assert len({event["case_id"] for _, event in published}) == 1
-    assert len({event["doc_id"] for _, event in published}) == 2
+    assert len({event["doc_id"] for _, event in published}) == 3
     assert len(transport.requests_to(r".*/attachments/.*")) == 2
 
 
@@ -897,7 +947,12 @@ def test_pagination_walks_every_history_page_and_filters_all_of_them(
         "ChgKFjA5MjM0NTY3ODkwMTIzNDU2Nzg5MA",
     ]
     assert all(c.query.get("labelId") == ["INBOX"] for c in calls)
-    assert [event["filename"] for _, event in published] == ["bill.pdf", "second_bill.pdf"]
+    assert [event["filename"] for event in attachment_events(published)] == [
+        "bill.pdf",
+        "second_bill.pdf",
+    ]
+    # One body per MESSAGE, and these are two messages on two threads.
+    assert len(body_events(published)) == 2
 
 
 # --------------------------------------------------------------------------
@@ -953,9 +1008,10 @@ def test_expired_cursor_404_rebootstraps_and_still_delivers_this_message(
     )
 
     assert result["status"] == "history_expired_rebootstrapped"
-    assert result["documents_published"] == 1, (
+    assert result["documents_published"] == 2, (
         "the message that triggered this push was dropped by the recovery -- "
-        "its own historyId is minutes old and still inside the window"
+        "its own historyId is minutes old and still inside the window "
+        "(two documents: the PDF and the email body)"
     )
     assert result["new_history_id"] == "5000100"
     assert not transport.unrouted
@@ -1036,7 +1092,7 @@ def test_redelivering_the_same_push_publishes_nothing_twice(one_bill_arrives, gc
 
     assert first["status"] == "ok"
     assert second == {"status": "duplicate", "message_id": "pubsub-dup"}
-    assert len(published) == 1, "the redelivery published a second event"
+    assert len(published) == 2, "the redelivery published a second event"
     assert len(transport.requests) == calls_after_first, "the redelivery hit Gmail again"
 
 
@@ -1064,7 +1120,13 @@ def test_a_second_notification_for_an_already_stored_attachment_is_a_no_op(
 
     assert result["status"] == "ok"
     assert result["documents_published"] == 0
-    assert len(published) == 1
+    # The BODY is claimed the same way an attachment is, so the second
+    # notification re-publishes neither. A body that slipped through the claim
+    # would re-run Reader's extraction over the same prose and re-assert the
+    # patient's statements as if they had written twice -- which
+    # `statedfacts.collect` would then report as two statements that agree.
+    assert len(published) == 2
+    assert len(body_events(published)) == 1
     assert len(transport.requests_to(r".*/attachments/.*")) == 1
 
 
@@ -1105,27 +1167,40 @@ def test_a_failed_publish_releases_the_claim_so_the_retry_really_retries(
             gmail_push_envelope(pubsub_message_id="pubsub-flaky", history_id=1000042)
         )
     )
-    assert result["documents_published"] == 1
-    assert len(captured) == 1
+    assert result["documents_published"] == 2
+    assert len(captured) == 2
     assert not transport.unrouted
 
 
 # --------------------------------------------------------------------------
 # The consumer contract -- defect #7's exact shape
 # --------------------------------------------------------------------------
-def _payload_keys_read_by(source: Path, function_name: str) -> set[str]:
-    """Every literal key read off a dict named `payload` inside one function.
+def _payload_keys_read_by(source: Path, function_name: str) -> tuple[set[str], set[str]]:
+    """Every literal key read off a dict named `payload` inside one function,
+    split into `(required, optional)`.
 
     Reads the CONSUMER's source rather than importing it: `services/agent-core`
     is a separate Cloud Run service with its own dependency set (Firestore,
     ADK, Gemini), and importing it from this suite would couple two services'
     test environments together for no gain. AST is exact where a `grep` would
     not be.
+
+    THE SPLIT IS THE CONSUMER'S OWN DECLARATION, not a list this suite wrote
+    down. `payload["case_id"]` raises if the key is absent, so agent-core is
+    saying that key must be on every message; `payload.get("doc_type")` has a
+    default, so agent-core is saying it may or may not be there. That
+    distinction became load-bearing the moment intake started publishing two
+    KINDS of document event: an attachment carries no `doc_type` (its type is
+    Gemma's to decide) and the email body carries exactly one. Asserting every
+    consumed key on every event would have forced intake to stamp a type on
+    documents whose type is a real, unanswered question -- the test demanding
+    the bug.
     """
     tree = ast.parse(source.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == function_name:
-            keys: set[str] = set()
+            required: set[str] = set()
+            optional: set[str] = set()
             for inner in ast.walk(node):
                 if (
                     isinstance(inner, ast.Call)
@@ -1137,7 +1212,7 @@ def _payload_keys_read_by(source: Path, function_name: str) -> set[str]:
                     and isinstance(inner.args[0], ast.Constant)
                     and isinstance(inner.args[0].value, str)
                 ):
-                    keys.add(inner.args[0].value)
+                    optional.add(inner.args[0].value)
                 if (
                     isinstance(inner, ast.Subscript)
                     and isinstance(inner.value, ast.Name)
@@ -1145,8 +1220,8 @@ def _payload_keys_read_by(source: Path, function_name: str) -> set[str]:
                     and isinstance(inner.slice, ast.Constant)
                     and isinstance(inner.slice.value, str)
                 ):
-                    keys.add(inner.slice.value)
-            return keys
+                    required.add(inner.slice.value)
+            return required, optional - required
     raise AssertionError(f"{function_name} not found in {source}")
 
 
@@ -1173,7 +1248,7 @@ def test_the_event_carries_every_field_the_consumer_actually_reads(
         )
     )
     assert published, "nothing was published, so there is no payload to check"
-    _, event = published[0]
+    events = [event for _, event in published]
 
     agent_core = REPO_ROOT / "services/agent-core"
     assert agent_core.is_dir(), (
@@ -1181,15 +1256,34 @@ def test_the_event_carries_every_field_the_consumer_actually_reads(
         "payload against the consumer's real source and cannot be skipped away"
     )
 
-    consumed = _payload_keys_read_by(
+    pipeline_required, pipeline_optional = _payload_keys_read_by(
         agent_core / "agent_core/pipeline.py", "ensure_case_and_document_from_event"
-    ) | _payload_keys_read_by(agent_core / "main.py", "pubsub_document_added")
+    )
+    main_required, main_optional = _payload_keys_read_by(
+        agent_core / "main.py", "pubsub_document_added"
+    )
+    required = pipeline_required | main_required
+    optional = (pipeline_optional | main_optional) - required
 
-    missing = consumed - set(event)
-    assert not missing, (
-        "services/agent-core reads keys off `case.document.added` that "
-        f"services/intake never publishes: {sorted(missing)}. Published keys: "
-        f"{sorted(event)}. This is defect #7's exact shape."
+    # Required keys: on EVERY event, no exceptions. These are the ones
+    # agent-core subscripts, so an absent one is a KeyError mid-cascade.
+    for event in events:
+        missing = required - set(event)
+        assert not missing, (
+            "services/agent-core reads keys off `case.document.added` that "
+            f"services/intake never publishes: {sorted(missing)}. Published keys: "
+            f"{sorted(event)}. This is defect #7's exact shape."
+        )
+
+    # Optional keys: agent-core has a default for each, but a key NO event
+    # ever carries is still a seam where one side was renamed and the other
+    # silently degraded to its default -- defect #7 with a softer landing.
+    never_sent = optional - set().union(*(set(e) for e in events))
+    assert not never_sent, (
+        "services/agent-core reads optional keys off `case.document.added` that no "
+        f"intake event carries at all: {sorted(never_sent)}. Either intake stopped "
+        "publishing them or one side was renamed; agent-core is quietly falling back to "
+        "its defaults."
     )
 
     # And the gate agent-core puts in front of auto-creation: an event that
@@ -1318,11 +1412,14 @@ def test_two_attachments_sharing_a_filename_are_both_delivered(
             gmail_push_envelope(pubsub_message_id="probe-1", history_id=7000042)
         )
     )
-    assert [event["filename"] for _, event in published] == ["bill.pdf", "bill.pdf"], (
+    assert [event["filename"] for event in attachment_events(published)] == [
+        "bill.pdf",
+        "bill.pdf",
+    ], (
         "an attachment was dropped: two PDFs sharing a filename must both be "
         "delivered, not silently deduplicated against each other"
     )
-    assert result["documents_published"] == 2
+    assert result["documents_published"] == 3  # two PDFs + the email body
     assert len(transport.requests_to(r".*/attachments/.*")) == 2
 
     # Two distinct GCS objects, and neither overwrote the other. The path
@@ -1331,9 +1428,10 @@ def test_two_attachments_sharing_a_filename_are_both_delivered(
     assert stored == [
         "intake/18f0probe0001/1/bill.pdf",
         "intake/18f0probe0001/2/bill.pdf",
+        "intake/18f0probe0001/body/message-body.txt",
     ], stored
-    assert len({event["doc_id"] for _, event in published}) == 2
-    assert len({event["gcs_uri"] for _, event in published}) == 2
+    assert len({event["doc_id"] for _, event in published}) == 3
+    assert len({event["gcs_uri"] for _, event in published}) == 3
 
     # ...and a redelivery still deduplicates BOTH of them, i.e. the fix did not
     # buy uniqueness by breaking idempotency (§2.3).
@@ -1344,7 +1442,7 @@ def test_two_attachments_sharing_a_filename_are_both_delivered(
         )
     )
     assert again["documents_published"] == 0
-    assert len(published) == 2
+    assert len(published) == 3
 
 
 def test_the_fixture_bill_is_the_repos_own_synthetic_pdf():

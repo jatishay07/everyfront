@@ -18,6 +18,29 @@ logger = logging.getLogger("intake.pipeline")
 
 TOPIC_CASE_DOCUMENT_ADDED = os.environ.get("TOPIC_CASE_DOCUMENT_ADDED", "case.document.added")
 
+#: The §3.1 `documents[].type` the email BODY travels as -- proposed as a
+#: contract amendment in this PR's HANDOFF to FORGE.
+#:
+#: WHY A DOCUMENT AND NOT A CASE FIELD. The body needs, exactly, what every
+#: other intake artifact needs: a stable id, a dedupe claim, a GCS object a
+#: human can open, a place in `GET /cases/{id}`'s document list, and a Reader
+#: pass that turns text into structured fields. A new case-level field would
+#: have re-implemented all five, and `case.document.added` already carries
+#: `raw_text` -- so this is one more publish on an existing topic with an
+#: existing shape, not a second transport.
+#:
+#: The type is what makes it SAFE: `agent_core.factmerge` deliberately leaves
+#: `patient_statement` out of `INCOMING_DOC_TYPES`, so nothing extracted from
+#: it can ever reach `cases/{id}.patient` or `.bill` through the merge. What a
+#: patient SAYS travels on a different rail from what a document PROVES, all
+#: the way down.
+PATIENT_STATEMENT_TYPE = "patient_statement"
+
+#: The GCS object name and MIME part slot the body occupies. `body` cannot
+#: collide with a real `partId` (Gmail numbers them "0", "1", "1.0", ...).
+BODY_PART_ID = "body"
+BODY_FILENAME = "message-body.txt"
+
 
 def _case_id_for_thread(thread_id: str) -> str:
     """A Gmail thread becomes one case: replies/forwards about the same bill
@@ -35,11 +58,82 @@ def _case_id_for_thread(thread_id: str) -> str:
     return f"case-{thread_id}"
 
 
-def process_new_message(message_id: str) -> list[dict]:
-    """Fetch one Gmail message, store its PDF attachments to GCS, and
-    publish `case.document.added` per attachment.
+def _publish_email_body(message_id: str, thread_id: str, case_id: str, body: str) -> dict | None:
+    """Store the email body and publish it as a `patient_statement` document.
 
-    Idempotent per `(message_id, filename)` via `dedupe.claim` -- safe to
+    Same claim/store/publish/release contract as an attachment (see
+    `process_new_message`), keyed on `{message_id}:body` so a redelivery is a
+    no-op and a failure anywhere before the publish releases the claim and
+    genuinely retries.
+
+    Returns the published event, or None if this body was already handled.
+    """
+    claim_key = f"{message_id}:{BODY_PART_ID}"
+    if not dedupe.claim("gmail_attachment", claim_key):
+        return None
+    try:
+        gcs_uri = storage.upload_attachment(
+            message_id,
+            BODY_PART_ID,
+            BODY_FILENAME,
+            body.encode("utf-8"),
+            "text/plain; charset=utf-8",
+        )
+        doc_id = hashlib.sha1(claim_key.encode()).hexdigest()[:16]  # noqa: S324 -- id derivation
+        event = {
+            "case_id": case_id,
+            "doc_id": doc_id,
+            "gcs_uri": gcs_uri,
+            "filename": BODY_FILENAME,
+            "raw_text": body,
+            # The ONE case where intake tells agent-core what a document is.
+            # For a PDF attachment it must not: `type` stays `""` so Gemma's
+            # first-pass classification decides (see
+            # `agent_core.pipeline.ensure_case_and_document_from_event`).
+            # For the body there is nothing to classify -- this service put
+            # the bytes there itself and knows, as a fact about transport
+            # rather than a judgement about content, that they are the prose
+            # a human typed into an email. agent-core accepts this field only
+            # for this one value, precisely so it can never be used to skip
+            # the classifier on a document whose type is a real question.
+            "doc_type": PATIENT_STATEMENT_TYPE,
+            "gmail_message_id": message_id,
+            "gmail_thread_id": thread_id,
+        }
+        pubsub.publish(TOPIC_CASE_DOCUMENT_ADDED, event)
+    except Exception:
+        logger.exception(
+            "failed handling the email body of Gmail message %s -- releasing its dedupe "
+            "claim so Pub/Sub's redelivery can retry it",
+            message_id,
+        )
+        dedupe.release("gmail_attachment", claim_key)
+        raise
+    return event
+
+
+def process_new_message(message_id: str) -> list[dict]:
+    """Fetch one Gmail message, store its PDF attachments AND its typed body
+    to GCS, and publish `case.document.added` for each.
+
+    THE BODY IS PUBLISHED ONLY WHEN THE MESSAGE ALSO CARRIES A PDF, and that
+    gate is load-bearing rather than tidy. `list_new_message_ids` is scoped to
+    INBOX, which still admits every message anyone sends the demo account; a
+    PDF attachment is what currently makes a message look like a bill arriving
+    (`extract_pdf_attachments`'s "keep the intake surface matching what the
+    rest of the pipeline expects"). Publishing a body unconditionally would
+    open a `cases/{thread}` for every newsletter and every reply-all on a live
+    demo account, on camera. The gate is on what the message CARRIES, not on
+    what this run happened to publish, so an attachment already claimed by an
+    earlier delivery still counts.
+
+    KNOWN LIMITATION, deliberately not papered over: a follow-up reply that
+    carries prose and no attachment ("forgot to say -- household of three") is
+    dropped. Admitting it needs a signal that the thread is already a case,
+    and this service has no Firestore grant to ask (see `dedupe.py`). Written
+    up in the PR HANDOFF rather than guessed at here.
+
+    Idempotent per `(message_id, part)` via `dedupe.claim` -- safe to
     call twice for the same message (e.g. if it shows up in two overlapping
     `history.list` pages).
 
@@ -60,7 +154,8 @@ def process_new_message(message_id: str) -> list[dict]:
     case_id = _case_id_for_thread(thread_id)
 
     published: list[dict] = []
-    for att in gmail_client.extract_pdf_attachments(message):
+    attachments = gmail_client.extract_pdf_attachments(message)
+    for att in attachments:
         # Keyed on the MIME part's immutable id, NOT on the filename. Two
         # attachments in one email may share a name (`scan.pdf` twice is
         # ordinary), and a filename-keyed claim dropped the second one with no
@@ -108,6 +203,18 @@ def process_new_message(message_id: str) -> list[dict]:
             dedupe.release("gmail_attachment", claim_key)
             raise
         published.append(event)
+
+    # The body LAST, after every attachment. Order does not change the
+    # outcome -- agent-core's merge is a pure function of the whole document
+    # corpus, re-run on every arrival -- but it does change what a judge sees
+    # first in the activity feed: the bill, then what the patient said about
+    # it. It also means the case is opened by an attachment, never by prose.
+    if attachments:
+        body = gmail_client.extract_body_text(message)
+        if body.strip():
+            body_event = _publish_email_body(message_id, thread_id, case_id, body)
+            if body_event is not None:
+                published.append(body_event)
     return published
 
 

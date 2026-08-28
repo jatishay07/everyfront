@@ -33,7 +33,15 @@ import hashlib
 import json
 import uuid
 
-from . import config, delivery_bridge, evidence, factmerge, pubsub_client, rules_bridge
+from . import (
+    config,
+    delivery_bridge,
+    evidence,
+    factmerge,
+    pubsub_client,
+    rules_bridge,
+    statedfacts,
+)
 from .agents import auditor, clock, filer, lookup, reader, strategist, verifier
 from .casedata import parse_bill_dates
 from .store import store
@@ -212,6 +220,20 @@ def _merge_document_facts(case_id: str, case: dict) -> tuple[dict, list[str]]:
     case = store.get_case(case_id) or case
     pass_evidence = evidence.from_documents(documents)
     patch, report = factmerge.merge_document_facts(case, documents)
+
+    # WHAT THE PATIENT SAID, kept beside -- never inside -- what the documents
+    # established. `patient_stated` is its own §3.1 field precisely so that no
+    # consumer can read a claim as a fact by accident: `patient` still means
+    # "established", and anything sourced from the email body is one key over,
+    # carrying the verbatim words it came from. See `agent_core.statedfacts`.
+    #
+    # Written in the SAME guarded transaction as the merged patient/bill, so a
+    # superseded pass cannot land its statements next to a better pass's
+    # documents.
+    stated = statedfacts.collect(documents)
+    if stated != (case.get("patient_stated") or {}):
+        patch["patient_stated"] = stated
+
     if patch:
         # Guarded like every other analysis write: a pass that saw only the
         # bill must not re-derive `bill.amount_cents` from the bill after a
@@ -274,7 +296,100 @@ def _merge_document_facts(case_id: str, case: dict) -> tuple[dict, list[str]]:
             _render_unknown(report["unknown"]),
             fact=[u["field"] for u in report["unknown"]],
         )
+    _log_patient_statements(case_id, case, stated)
     return case, pass_evidence
+
+
+def _log_patient_statements(case_id: str, case: dict, stated: dict) -> None:
+    """The audit trail for everything the patient claimed in their own words.
+
+    Four separate events, because they are four different things and
+    collapsing them is how a claim starts reading like a fact:
+
+      * what was stated and is filling a gap no document could fill -- with
+        the verbatim quote, and with the fact that NOTHING has verified it;
+      * what was stated and AGREES with a document (corroboration -- no value
+        changes, and saying so is the point: the GFE already established this
+        case's `insured`, so "I'm uninsured" is a second voice on a settled
+        fact, not a new one);
+      * what was stated and DISAGREES with a document -- logged, not resolved.
+        The document wins because it is the stronger source, and a human is
+        told rather than the disagreement being smoothed away in silence
+        (`factmerge` rule 3, one tier further down);
+      * two statements that disagree with EACH OTHER.
+
+    Logged as `verifier` for the two disagreement cases -- §3.1's agent enum
+    is closed and CANVAS indexes its avatars by it; a document-vs-case
+    disagreement already logs as `verifier` for the same reason, and this is
+    the same kind of finding.
+    """
+    facts = statedfacts.facts(stated)
+    if not facts:
+        return
+    patient = case.get("patient") or {}
+    reconciliation = statedfacts.reconcile(patient, stated)
+    # `overlay`'s own `filled` IS the set of gaps a statement is speaking
+    # into -- taken from there rather than re-deriving "what counts as empty"
+    # a second time, which is how two copies of one rule start to drift.
+    _, filled = statedfacts.overlay(patient, stated)
+    gaps = {field: facts[field] for field in filled}
+
+    if gaps:
+        _log(
+            case_id,
+            "reader",
+            "patient_stated_facts",
+            "the patient stated, in their own words: "
+            + "; ".join(
+                f"{statedfacts.label_for(field)}={record['value']!r}"
+                + (f' ("{record["quote"]}")' if record.get("quote") else "")
+                for field, record in sorted(gaps.items())
+            )
+            + ". Recorded as a CLAIM on patient_stated, not as a fact: no document on file "
+            "states any of it, nothing has verified it, and it is deliberately NOT merged "
+            "into the case's patient record. Every value above is backed by the quoted "
+            "words, which were checked to appear verbatim in the message.",
+            fact=["patient-stated", sorted(gaps.items())],
+        )
+    for entry in reconciliation["corroborated"]:
+        _log(
+            case_id,
+            "verifier",
+            "patient_statement_corroborates_document",
+            f"the patient's message states {entry['label']}={entry['stated_value']!r}"
+            + (f' ("{entry["quote"]}")' if entry.get("quote") else "")
+            + f", which AGREES with the value already established from documents on file "
+            f"({entry['field']}={entry['established_value']!r}). Corroboration, not a new "
+            "fact: nothing was written, and the document remains the source.",
+            fact=["statement-corroborates", entry["field"], entry["stated_value"]],
+        )
+    for entry in reconciliation["contradicted"]:
+        _log(
+            case_id,
+            "verifier",
+            "patient_statement_contradicts_document",
+            f"the patient's message states {entry['label']}={entry['stated_value']!r}"
+            + (f' ("{entry["quote"]}")' if entry.get("quote") else "")
+            + f", but the documents on file establish {entry['field']}="
+            f"{entry['established_value']!r}. The document value was KEPT -- a document is "
+            "evidence and a statement is a claim -- and this disagreement is recorded rather "
+            "than resolved. A human should establish which is right.",
+            fact=["statement-contradicts", entry["field"], entry["stated_value"]],
+        )
+    for conflict in statedfacts.conflicts(stated):
+        _log(
+            case_id,
+            "verifier",
+            "patient_statements_disagree",
+            f"two of the patient's own messages state different values for "
+            f"{statedfacts.label_for(conflict['field'])}: "
+            f"{conflict['kept']['value']!r} (kept, from document "
+            f"{conflict['kept']['source_doc_id']}) and {conflict['also_stated']['value']!r} "
+            f"(from document {conflict['also_stated']['source_doc_id']}). Neither is a "
+            "document, neither has been verified, and this system will not pick between "
+            "them by recency -- a human must.",
+            fact=["statements-disagree", conflict],
+        )
 
 
 async def _run_reader(case_id: str, doc_id: str) -> dict:
@@ -313,6 +428,24 @@ async def _run_reader(case_id: str, doc_id: str) -> dict:
             f"reporting them as facts: {', '.join(rf['scrubbed_fields'])}. This document could not "
             "be fully read; those fields are treated as unknown, not zero/epoch/placeholder.",
             fact=[doc_id, sorted(rf["scrubbed_fields"])],
+        )
+    # The same posture, one rail over: a fact pulled out of the patient's
+    # prose must come with the words it was read from, and those words must
+    # actually be in the message (`agents.reader._ground_statement`). A model
+    # that cannot point at them has composed the fact, and this is the case's
+    # own record that it did -- silence here would leave the field looking
+    # like something the patient simply never mentioned.
+    if rf.get("ungrounded_fields"):
+        _log(
+            case_id,
+            "reader",
+            "statement_not_grounded",
+            f"discarded {len(rf['ungrounded_fields'])} value(s) the model reported from the "
+            f"patient's message without being able to quote the words that state them: "
+            f"{', '.join(rf['ungrounded_fields'])}. A claim this system cannot point to in "
+            "the patient's own text is not a claim the patient made; those fields are "
+            "treated as never stated.",
+            fact=[doc_id, sorted(rf["ungrounded_fields"])],
         )
     return reader_turn
 
@@ -360,6 +493,40 @@ def _charity_care_erasure_cents(case: dict) -> tuple[int, str]:
             f"eligibility determination is {elig.determination!r}, not 'free' -- {elig.explain()}"
         )
     return amount_cents, elig.explain()
+
+
+def _provisional_charity_erasure(case: dict) -> tuple[int, str]:
+    """What a charity-care determination WOULD erase if the patient's own
+    statements turned out to be true. Reported; never counted.
+
+    `savings_found_cents` and the §3.4 banner are claims this system makes
+    about money it has found. A number that exists only because someone typed
+    "household of three" into an email is not found money -- it is a
+    conditional, and rolling it into the same integer as $210.00 of verified
+    duplicate billing is precisely the "a judge doing arithmetic must not
+    catch a discrepancy" trap, one indirection further back than the usual
+    one. So the established figure stays the reported figure, and this runs
+    the same STATUTE screen over the overlaid patient purely so the audit
+    trail can say, out loud and with the condition attached, what confirming
+    one fact would be worth.
+
+    Returns `(0, "")` when the statements change nothing.
+    """
+    stated = statedfacts.facts(case.get("patient_stated") or {})
+    if not stated:
+        return 0, ""
+    view, filled = statedfacts.overlay(case.get("patient") or {}, case.get("patient_stated") or {})
+    if not filled:
+        return 0, ""
+    cents, explain = _charity_care_erasure_cents({**case, "patient": view})
+    if cents <= 0:
+        return 0, ""
+    names = " and ".join(statedfacts.label_for(f) for f in filled)
+    return cents, (
+        f"if the patient's own stated {names} is confirmed by a human, a free-care "
+        f"determination would erase ${cents / 100:,.2f} -- NOT counted in the reported "
+        f"savings above, because nothing has verified it. {explain}"
+    )
 
 
 def _patient_label(case: dict) -> str:
@@ -725,6 +892,11 @@ async def _run_cascade(case_id: str, case: dict, pass_evidence: list[str] | None
         f"${combined_cents / 100:,.2f} (max of the two -- charity-care erasure, when it "
         "applies, already subsumes any billing-error dollars on the same bill)."
     )
+    # The conditional, stated as a condition and kept OUT of the integer. See
+    # `_provisional_charity_erasure`.
+    provisional_cents, provisional_note = _provisional_charity_erasure(case)
+    if provisional_cents:
+        savings_detail += f" Provisional, unverified: {provisional_note}"
     # DEFECT (persona 5 WO6, idempotency): this used to be
     # `(case.get(...) or 0) + combined_cents` -- an ACCUMULATION, not a
     # recomputation. §2.3 requires every handler tolerate Pub/Sub redelivery,
@@ -842,6 +1014,24 @@ async def _run_cascade(case_id: str, case: dict, pass_evidence: list[str] | None
 #: it cannot reconstruct; see `ensure_case_and_document_from_event`.
 EVENT_DOCUMENT_FIELDS = ("raw_text", "gcs_uri", "filename")
 
+#: The ONLY `documents[].type` a `case.document.added` publisher may assert.
+#:
+#: Everything else in `INCOMING_DOC_TYPES` is a CLASSIFICATION -- a question
+#: about the content of a PDF that Gemma exists to answer (§1.3's bonus model,
+#: §4 persona 5 WO1) -- so an event that named one would override the
+#: classifier with an upstream assumption and silently mislabel, say, a denial
+#: letter as a bill. `ensure_case_and_document_from_event` therefore writes
+#: `""` for those and lets Gemma decide.
+#:
+#: `patient_statement` is not a classification. `services/intake` decoded the
+#: `text/plain` MIME part of the email itself, so "this is prose a human
+#: typed" is a fact about where the bytes came from, not a judgement about
+#: what they say -- and there is no Gemma label for it (its six labels are all
+#: document types). Allowing exactly this one value, from a closed set,
+#: keeps the publisher honest: it can say where something came from, and it
+#: can never say what a document is.
+EVENT_ASSIGNABLE_DOC_TYPES = frozenset({factmerge.PATIENT_STATEMENT_TYPE})
+
 
 def event_carries_document(payload: dict) -> bool:
     """True if this `case.document.added` payload contains the document, not
@@ -876,7 +1066,10 @@ def ensure_case_and_document_from_event(payload: dict) -> dict:
       defect #5 is this project's worst bug, an unreadable bill that produced
       an invented EIN and epoch dates which the Clock then turned into real
       regulatory deadlines. Absent stays absent.
-    * `type` is `""`, not a guess. Reader takes the stored type as a
+    * `type` is `""`, not a guess -- UNLESS the event names one of
+      `EVENT_ASSIGNABLE_DOC_TYPES` (today: `patient_statement` alone; see
+      that constant for why exactly one value is admissible and what would
+      be wrong with admitting the rest). Reader takes the stored type as a
       classification HINT (`agents/reader.py`: `label = doc_type_hint or
       classification["label"]`), so writing "bill" here would override Gemma's
       first-pass classification with an assumption -- silently mislabelling a
@@ -890,12 +1083,14 @@ def ensure_case_and_document_from_event(payload: dict) -> dict:
     Returns `{"case_created": bool, "document_created": bool}`.
     """
     case_id, doc_id = payload["case_id"], payload["doc_id"]
+    declared = payload.get("doc_type") or ""
+    doc_type = declared if declared in EVENT_ASSIGNABLE_DOC_TYPES else ""
     _, case_created = store.create_case_if_absent(case_id, {"patient": {}, "bill": {}})
     _, doc_created = store.add_document_if_absent(
         case_id,
         doc_id,
         {
-            "type": "",
+            "type": doc_type,
             "gcs_uri": payload.get("gcs_uri"),
             "filename": payload.get("filename"),
             "raw_text": payload.get("raw_text") or "",
@@ -915,13 +1110,20 @@ def ensure_case_and_document_from_event(payload: dict) -> dict:
             if case_created
             else f"Attached document {name} from {origin} to existing case {case_id}"
         )
+        kind = (
+            " This document is the BODY of the email -- the patient's own words, not a "
+            "document about the bill. Nothing it says can become a fact on this case; it is "
+            "read separately and recorded as a claim (see agent_core.statedfacts)."
+            if doc_type == factmerge.PATIENT_STATEMENT_TYPE
+            else ""
+        )
         _log(
             case_id,
             "reader",
             "case_opened_from_intake" if case_created else "document_attached_from_intake",
             f"{opened} ({chars} characters of extracted text). No patient or bill facts are "
             "known yet -- both are left empty rather than assumed, and stay that way until "
-            "Reader has actually read the document.",
+            f"Reader has actually read the document.{kind}",
         )
     return {"case_created": case_created, "document_created": doc_created}
 
@@ -1083,12 +1285,32 @@ async def approve_and_request_filing(case_id: str, front: str) -> dict:
 
     verifier_turn = await verifier.run(case_id, case, front)
     vf = verifier_turn["fact"]
+    # The VERDICT is code's, not narration's -- same rule as
+    # `_filing_detail`'s simulated/live prefix. A model asked to summarise a
+    # refusal in one or two sentences is being asked to compress the only
+    # thing on this line that matters, and this is the row a judge reads when
+    # a filing does not go out.
+    verdict = "PASSED" if vf["passed"] else "BLOCKED: " + "; ".join(vf["issues"])
+    narration = (verifier_turn["answer"] or "").strip()
     _log(
         case_id,
         "verifier",
         "pre_filing_check",
-        verifier_turn["answer"] or ("passed" if vf["passed"] else "; ".join(vf["issues"])),
+        f"{verdict}{' ' + narration if narration else ''}",
     )
+    for corroboration in vf.get("corroborations") or []:
+        _log(
+            case_id,
+            "verifier",
+            "income_cross_check",
+            f"the patient's stated annual income ({corroboration['stated_income_cents']} cents) "
+            f"and income document {corroboration['doc_id']} "
+            f"({corroboration['document_income_cents']} cents) agree within the "
+            f"{config.VERIFIER_INCOME_TOLERANCE_PCT:.0f}% tolerance. Two independent readings "
+            "of the same fact, from a document and from the patient, that do not contradict "
+            "each other.",
+            fact=["income-cross-check", corroboration],
+        )
     if not vf["passed"]:
         matched["status"] = "open"
         store.set_front_status(case_id, front, "open")

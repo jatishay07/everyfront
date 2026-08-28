@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from google.adk.tools.agent_tool import AgentTool
 
-from .. import config, rules_bridge
+from .. import config, rules_bridge, statedfacts
 from . import auditor, clock, common, filer, lookup, reader, verifier
 
 NAME = "strategist"
@@ -85,18 +85,52 @@ def _facts(case_id: str, case: dict) -> dict:
     # a second copy of that same check here would be exactly the kind of
     # duplicated, driftable logic §2.1 forbids ("all front-selection logic
     # lives in packages/rules"). Deleted rather than left dormant.
-    decisions = _sequence(rules_bridge.select_fronts(case))
+    # WHAT THE PATIENT SAID IS APPLIED HERE AND NOWHERE ELSE (persona 5, this
+    # work order). `case["patient"]` is what documents and humans established;
+    # `case["patient_stated"]` is what the patient claimed in the email their
+    # bill was attached to. `statedfacts.decide_fronts` runs STATUTE's real,
+    # unmodified `select_fronts` over a DERIVED patient view -- established
+    # facts, plus a stated fact wherever the record is silent -- and reports
+    # which stated facts each front's outcome actually turns on.
+    #
+    # The overlay lives for the length of this call and is never stored. That
+    # is what keeps a claim and a fact distinguishable everywhere afterwards:
+    # the case still records only what was established, and the fronts carry
+    # `rests_on` naming exactly what they borrowed. `provisional` then gates
+    # the filing (agents/verifier.py), the savings figure (pipeline), and the
+    # §3.4 `charity_eligible` count (services/api).
+    stated = case.get("patient_stated") or {}
+    raw_decisions, rests_on = statedfacts.decide_fronts(rules_bridge.select_fronts, case, stated)
+    decisions = _sequence(raw_decisions)
 
     fronts = []
     for d in decisions:
+        borrowed = rests_on.get(d.front, ())
         fronts.append(
             {
                 "front": d.front,
                 "applicable": d.applicable,
-                "reason": d.reason,
+                # The provenance prefix is prepended by CODE, ahead of
+                # STATUTE's own sentence -- never phrased by a model and never
+                # after the part that could be truncated. Same rule, same
+                # reason, as `pipeline._SIMULATED_PREFIX`: whether a
+                # determination rests on a document or on a sentence someone
+                # typed is a fact about the world, not presentation.
+                "reason": (
+                    statedfacts.provisional_reason(d.reason, borrowed, stated)
+                    if borrowed
+                    else d.reason
+                ),
                 "citation": d.citation or "",
                 "deadline": d.deadline.isoformat() if d.deadline is not None else None,
                 "status": "open" if d.applicable else "na",
+                # §3.1 additions (HANDOFF -> FORGE in this PR). Always present
+                # and always the right type, so a consumer never has to tell
+                # "not provisional" from "written before this existed" --
+                # absent would be ambiguous exactly where ambiguity is
+                # expensive.
+                "provisional": bool(borrowed),
+                "rests_on": list(borrowed),
             }
         )
 

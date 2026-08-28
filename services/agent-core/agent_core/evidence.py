@@ -70,7 +70,21 @@ from __future__ import annotations
 import hashlib
 import json
 
-from .factmerge import INCOMING_DOC_TYPES
+from .factmerge import INCOMING_DOC_TYPES, PATIENT_STATEMENT_TYPE
+
+#: Everything an analysis pass can READ. Deliberately WIDER than
+#: `factmerge.INCOMING_DOC_TYPES`, because the two sets answer different
+#: questions: that one asks "may this document establish a canonical fact?"
+#: (a patient's typed sentence may not -- see `factmerge.
+#: PATIENT_STATEMENT_TYPE`), this one asks "did this pass see it?".
+#:
+#: Leaving `patient_statement` out here would reopen exactly the race this
+#: module exists to close, one field over. A pass that read the bill and the
+#: statement would carry the SAME evidence descriptor as one that read only
+#: the bill, so the two would be interchangeable, equal evidence writes, and
+#: last-to-finish would win again -- a cascade that never saw the email
+#: overwriting the provisional charity-care determination of one that did.
+ANALYSED_DOC_TYPES = INCOMING_DOC_TYPES | {PATIENT_STATEMENT_TYPE}
 
 #: A pass that recorded no evidence at all. Distinct from "we did not look":
 #: an empty list IS a strict subset of every non-empty one, so a cascade that
@@ -106,7 +120,7 @@ def from_documents(documents: list[dict]) -> list[str]:
     return sorted(
         f"{doc.get('doc_id')}#{_fingerprint(doc)}"
         for doc in documents
-        if (doc.get("type") or "") in INCOMING_DOC_TYPES
+        if (doc.get("type") or "") in ANALYSED_DOC_TYPES
     )
 
 

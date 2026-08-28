@@ -30,7 +30,9 @@ running pytest without it.
 
 from __future__ import annotations
 
+import html as html_module
 import io
+import re
 
 # A generous ceiling, not a real limit any real bill approaches: Pub/Sub caps
 # a message at 10MB total, and this is one field of one JSON payload among
@@ -59,3 +61,41 @@ def extract_pdf_text(content: bytes) -> str:
     except Exception:  # noqa: BLE001 -- a bad PDF must not take down intake
         return ""
     return text[:MAX_CHARS]
+
+
+# `<script>`/`<style>` bodies are markup machinery, not prose -- dropped whole
+# rather than de-tagged, or a Gmail HTML part's CSS block would arrive as a
+# wall of selectors that an extraction model then has to read past.
+_HTML_DROP_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
+_HTML_BREAK_RE = re.compile(r"(?i)<(br\s*/?|/p|/div|/tr|/li|/h[1-6])\s*>")
+_HTML_TAG_RE = re.compile(r"(?s)<[^>]*>")
+_BLANKS_RE = re.compile(r"[ \t\r\f\v]+")
+_NEWLINES_RE = re.compile(r"\n{3,}")
+
+
+def html_to_text(markup: str) -> str:
+    """A Gmail `text/html` body part -> readable plain text.
+
+    Deliberately a small regex de-tagger and NOT an HTML parser dependency:
+    the only consumer is `gmail_client.extract_body_text`, which reaches for
+    this ONLY when a message carries no `text/plain` alternative at all --
+    every mainstream client (Gmail's own composer included) sends multipart/
+    alternative with both. Getting a rare fallback approximately right is
+    worth strictly less than one more package in a Cloud Run image.
+
+    What it must get right, because a downstream model reads the result:
+    block-level tags become line breaks (so "Household of three" does not run
+    into the next sentence and become unquotable), entities are unescaped (so
+    `&amp;` and `&nbsp;` do not survive into a verbatim quote), and script/
+    style bodies are dropped entirely.
+    """
+    if not markup:
+        return ""
+    text = _HTML_DROP_RE.sub(" ", markup)
+    text = _HTML_BREAK_RE.sub("\n", text)
+    text = _HTML_TAG_RE.sub(" ", text)
+    text = html_module.unescape(text)
+    text = text.replace("\xa0", " ")
+    text = _BLANKS_RE.sub(" ", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    return _NEWLINES_RE.sub("\n\n", text).strip()[:MAX_CHARS]

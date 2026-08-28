@@ -91,6 +91,26 @@ INCOMING_DOC_TYPES = frozenset(
     {"bill", "itemized_bill", "denial_letter", "collection_notice", "gfe", "income_proof"}
 )
 
+#: The §3.1 `documents[].type` the patient's own words arrive as -- the body
+#: of the email they attached their bill to (`services/intake`), proposed as a
+#: contract amendment in this PR's HANDOFF to FORGE.
+#:
+#: **IT IS DELIBERATELY NOT IN `INCOMING_DOC_TYPES` ABOVE, AND THAT ABSENCE IS
+#: THE WHOLE DESIGN.** `_usable_extraction` gates on that set, so nothing
+#: extracted from a patient statement can reach `cases/{id}.patient` or
+#: `.bill` through this module, ever, by construction rather than by every
+#: `_SPECS` entry remembering to leave it out. A pay stub PROVES an income; a
+#: sentence someone typed CLAIMS one, and the two must not become
+#: indistinguishable the moment they are both stored on the same case.
+#:
+#: What happens to it instead lives in `agent_core.statedfacts`: a strictly
+#: third tier, below a human-entered value and below a document, applied as a
+#: derived overlay when the front selector is called and never written into
+#: `patient`. Rule 3 above says a merge never overwrites a better-established
+#: fact with a weaker one; this is that rule taken one step further, to a
+#: source so weak it does not get to occupy the field at all.
+PATIENT_STATEMENT_TYPE = "patient_statement"
+
 #: The canonical patient facts NO §3.1 document type can establish, with the
 #: reason -- reported to the case's own audit trail so the gap is named
 #: precisely rather than left as a generic "insufficient patient data".
