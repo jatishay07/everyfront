@@ -109,15 +109,30 @@ class TestMakefileWiring:
             assert f"{target}:" in text
 
     def test_demo_cycle_runs_reset_run_reset_run(self):
-        """WO4 acceptance: the happy path twice in a row."""
-        text = (REPO_ROOT / "fixtures" / "Makefile").read_text()
-        cycle_line = next(ln for ln in text.splitlines() if ln.startswith("demo-cycle:"))
-        assert cycle_line.split(":", 1)[1].split() == [
-            "demo-reset",
-            "demo-run",
-            "demo-reset",
-            "demo-run",
+        """WO4 acceptance: the happy path twice in a row.
+
+        This asserts what make DOES, not what the Makefile SAYS. The previous
+        version of this test matched the literal prerequisite list
+        `demo-cycle: demo-reset demo-run demo-reset demo-run` -- which passed
+        happily while make, which deduplicates a target's prerequisites, ran
+        each phony target exactly ONCE and exited 0. Half the acceptance test,
+        green the whole time. Expanding the recipe with `make -n` is the only
+        form of this check that can fail when the behaviour regresses.
+        """
+        result = subprocess.run(
+            ["make", "-n", "-f", "fixtures/Makefile", "demo-cycle"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        phases = [
+            "reset" if "demo_reset.py" in ln else "run"
+            for ln in result.stdout.splitlines()
+            if "demo_reset.py" in ln or "demo_run.py" in ln
         ]
+        assert phases == ["reset", "run", "reset", "run"], result.stdout
 
     def test_demo_reset_target_passes_reseed(self):
         """WO6 task 1: `make demo-reset` must genuinely purge AND reseed, not
