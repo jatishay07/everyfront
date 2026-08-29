@@ -44,4 +44,23 @@ demo-run-dry:
 	$(PYTHON) fixtures/demo_run.py --dry-run
 
 # The WO4 acceptance test, verbatim: reset, run, reset, run.
-demo-cycle: demo-reset demo-run demo-reset demo-run
+#
+# This CANNOT be expressed as `demo-cycle: demo-reset demo-run demo-reset
+# demo-run`. Make deduplicates a target's prerequisites, so that form silently
+# runs each phony target ONCE -- half the acceptance test -- and still exits 0.
+# Verified: a rule `c: a b a b` prints RAN-a, RAN-b, not RAN-a RAN-b RAN-a
+# RAN-b. The bug pattern this repo keeps hitting (see HANDOFF.md): it reported
+# success while doing less than it claimed, and nothing crashed.
+#
+# The Aug-26 "passing twice consecutively" numbers (120.3s, 129.4s) are still
+# sound -- those came from two separate `make demo-reset && make demo-run`
+# invocations by hand, which does run both phases each time.
+#
+# Recipe lines run in order, and recursive $(MAKE) re-enters this same file
+# via MAKEFILE_LIST so it works whether invoked as `make -f fixtures/Makefile`
+# from the repo root or included from a root Makefile.
+demo-cycle:
+	$(MAKE) -f $(firstword $(MAKEFILE_LIST)) demo-reset
+	$(MAKE) -f $(firstword $(MAKEFILE_LIST)) demo-run
+	$(MAKE) -f $(firstword $(MAKEFILE_LIST)) demo-reset
+	$(MAKE) -f $(firstword $(MAKEFILE_LIST)) demo-run
