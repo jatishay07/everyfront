@@ -48,6 +48,36 @@ Cloud Firestore · Google Cloud Storage · Gmail API · Next.js 14 · Tailwind
 CSS · Python 3.12 · FastAPI · pypdf · reportlab · Phaxio (test mode) · Lob
 (test mode)
 
+## Other data sources used
+
+Devpost asks for this as its own field. None of it is scraped, invented, or
+synthesised — every source below is a public government dataset, and the
+hospital records are real:
+
+- **IRS Form 990 Schedule H** (bulk XML) — the nonprofit hospital filings that
+  carry each hospital's own financial-assistance policy and its FPL
+  thresholds. **204 real hospitals** seeded to Firestore, **201 of them
+  (98.5%) with a live FAP URL**. This is what lets the system apply a
+  hospital's *own* published policy rather than a generic rule.
+- **CMS hospital price transparency files** (machine-readable MRFs) — each
+  hospital's attested cash price per billing code. This is the evidence behind
+  the billing-audit findings: on `ef-2026-0007`, CPT 86787 billed at $140.00
+  against the hospital's own attested cash price of $70.00.
+- **NCCI PTP and MUE tables** (CMS) — bundled offline as a snapshot in
+  `packages/datapipes`, so the unbundling and unit checks need no network call
+  at runtime.
+- **HHS federal poverty guidelines** — the FPL table behind every
+  charity-care eligibility screen, with the household-size math shown in each
+  result's `.explain()`.
+- **Primary legal sources**, cited in code rather than paraphrased: 26 CFR
+  1.501(r)-4 and -6, 45 CFR 149.620, 12 CFR 1006.34, 15 USC 1692g, 42 USC
+  1395b-7(b), 45 CFR Part 180, and state statute where it is stricter than
+  federal — e.g. Cal. Health & Safety Code §127405(a)(1)(A).
+
+The only synthetic data in the project is the **patient** side: every bill,
+denial letter and income document in `fixtures/` is fabricated. Real hospital
+policy, real prices, real law; invented patients.
+
 ## Inspiration
 
 76% of patients who qualify for free hospital charity care never apply for
@@ -111,10 +141,10 @@ Clock and Auditor share one thin LLM wrapper) run in a single agent
 hierarchy on Cloud Run. The legal logic — deadline math, FPL eligibility
 screening, front selection, NCCI billing-audit checks, denial triage — lives
 entirely in `packages/rules`, a dependency-free Python package we
-re-measured ourselves at **100% statement and branch coverage** (489
-statements, 180 branches, zero misses) with zero LLM calls anywhere in it;
-every function cites its regulation in its docstring. It's exercised by 364
-of the **665 tests passing** across the whole repo today. `packages/datapipes`
+re-measured ourselves at **100% statement and branch coverage** (575
+statements, 222 branches, zero misses) with zero LLM calls anywhere in it;
+every function cites its regulation in its docstring. It's exercised by 408
+of the **1,008 tests passing** across the whole repo today. `packages/datapipes`
 parses IRS Schedule H bulk XML and CMS price-transparency files directly,
 seeding **204 real hospitals** to Firestore — we queried the live database
 directly while writing this and counted them ourselves — with **201/204
