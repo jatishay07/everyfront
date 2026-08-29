@@ -71,7 +71,11 @@ in §3: **FORGE** (CTO), **ATLAS** (platform), **LEDGER** (data), **STATUTE** (r
 
 # PART 2 — What it is now
 
-**30 PRs merged · 46 commits · 513 tests passing · 4 services live on Google Cloud.**
+**41 PRs merged · 49 commits · 1,008 tests passing · 4 services live on Google Cloud.**
+
+> Re-verified against the live deployment on 2026-08-29. Three things this report
+> originally listed as missing have since gone live: Gmail intake (PR #39), Calendar
+> and Drive sync, and the billing-audit dollar figure reproducing end to end.
 
 ```
 Dashboard    https://ef-web-756591166292.us-central1.run.app
@@ -84,7 +88,7 @@ GCP project  everyfront-hack-2026 (us-central1) · budget $150, alerts at 33/66/
 ## What actually works, with the evidence
 
 ### The legal engine — the strongest part
-`packages/rules` — **100% branch coverage, 512 statements, 194 branches, zero LLM calls.**
+`packages/rules` — **100% branch coverage, 575 statements, 222 branches, zero LLM calls.**
 Five public functions per contract §3.5: `compute_deadlines`, `screen_eligibility`,
 `select_fronts`, `audit_line_items`, `check_denial_lawfulness`. Every rule cites its
 regulation; every result carries `.explain()` showing the arithmetic.

@@ -46,7 +46,7 @@ Budget guard: **$150** with alerts at 33 / 66 / 90 / 100%.
 
 ---
 
-## State: 30 PRs merged, 44 commits, ~665 tests green
+## State: 41 PRs merged, 49 commits, 1,008 tests green
 
 ### Works, verified against the deployed system
 
@@ -62,15 +62,13 @@ Budget guard: **$150** with alerts at 33 / 66 / 90 / 100%.
 | Verifier | Correctly REFUSES to file: rejects a cat photo submitted as income proof, and a case with no income document |
 | Event backbone | Pub/Sub push wired with OIDC. `filing.requested` → agent-core |
 | Dashboard | Live on real data. Lighthouse 100 / 95 / 96 / 100 |
-| Legal engine | **100% branch coverage** — 512 statements, 194 branches, zero LLM calls |
+| Legal engine | **100% branch coverage** — 575 statements, 222 branches, zero LLM calls |
 
 ### Not working / not wired
 
-- **Gmail intake** — code path complete, Cloud Scheduler renewal wired, but **no OAuth
-  token has been minted**. Needs a human at a Google consent screen. See `infra/OAUTH.md`.
-  The demo runs through `POST /demo/inject_bill`, which §6 sanctions as the primary path.
-- **Calendar + Drive** — built and tested in `packages/delivery`, never called by the
-  pipeline. RELAY left a precise HANDOFF with the exact call sites (PR #35).
+- **Real fax/mail** remains the only true gap in this list — see below. Gmail intake and
+  Calendar/Drive have both gone live since this section was written; they now appear
+  under "Closed since first writing".
 - **Real fax/mail** — RELAY's interface is live; vendors are recording stubs. Phaxio and
   Lob offer free test keys but signup needs a human.
 - **No authentication on any endpoint** — anyone with the URL reads every case and can
@@ -80,6 +78,18 @@ Budget guard: **$150** with alerts at 33 / 66 / 90 / 100%.
   handlers. Informational — Firestore state is written synchronously before publish.
 
 ### Closed since first writing (verified live)
+
+- **Gmail intake is live** (PR #39). The OAuth token has been minted;
+  `google-oauth-client-id` / `-secret` / `-refresh-token` sit in Secret Manager and are
+  mounted into `ef-agent-core` via `secretKeyRef`. A real email with three PDF
+  attachments has been classified, extracted and turned into a case end to end.
+- **Calendar and Drive are live**, on that same token. A 200-event sample of
+  `GET /events` carries 7 `calendar_sync` and 10 `drive_mirror` events with real Drive
+  folder ids — filings now land in a per-case folder an advocate can be given.
+- **The billing-audit dollar figure reproduces live.** `ef-2026-0007` returns
+  `audit_findings_cents: 121750` with 6 `audit_finding` events (one duplicate, five
+  `cash_price_delta`), including CPT 86787 at $140.00 against a $70.00 attested cash
+  price. The earlier "do not put $1,217.50 on camera" warning no longer applies.
 
 - **The fabrication bug is fixed.** `ef-2026-0006` now returns `hospital_ein: None`,
   absent dates, all four fronts `applicable: false` with plain reasons, and **files
