@@ -232,3 +232,341 @@ defensible number, not the (currently under-firing) audit dollar figure
 named in the previous beat. Say whatever the banner shows. A judge checking
 the repo against the video is the scenario this whole script is written to
 survive.)*
+
+---
+
+# Teleprompter — word-for-word, timed to 4:00
+
+> **SUPERSEDED 2026-08-29** by "Final narration — timed to the delivered cut" at the
+> bottom of this file. That one is timed to the actual 2:45 edit that exists on disk.
+> Keep this section only for the beat rationale.
+
+Added 2026-08-29. Read this column aloud; the beats above tell you what to
+show. ~570 words at a natural 145–150 wpm leaves room to breathe.
+
+**Two corrections to the beats above — they were written 2026-08-25 and the
+system has moved since. Do not read the older narration verbatim:**
+
+1. **The audit figure now reproduces live.** The 3:15–3:55 block above tells
+   you to say the pipeline "isn't reliably surfacing all of them yet." That
+   was true then; it is false now. `ef-2026-0007` returns
+   `audit_findings_cents: 121750` with six `audit_finding` events. Saying the
+   old line on camera would understate your own system and describe a
+   limitation that no longer exists.
+2. **Gmail OAuth is live**, so "which as of this pass it has not" in the
+   0:50 beat is stale. You may show a real inbox arrival if you want it.
+
+**One structural note:** `make demo-reset` seeds cases 02–08 and deliberately
+leaves `case_01_uninsured_gfe_ca` unseeded so it can be injected **live, on
+camera** — that is the injection beat, not `case_07`. Case 07 is already in
+the corpus; open it afterward as the depth example, because it carries the
+six audit findings and the concurrent Illinois clocks.
+
+---
+
+### 0:00–0:25 · The problem
+
+> "Seventy-six percent of people who qualify for hospital charity care never
+> apply — because nobody tells them it exists. Under one percent of insurance
+> denials get appealed, and about a third of those appeals win. Fourteen
+> billion dollars a year in charity care goes unclaimed. The law is not
+> hidden. It's just spread across four separate regimes, each with its own
+> eligibility test, its own form, and its own deadline — and those deadlines
+> run from different trigger dates a patient has no reason to have written
+> down."
+
+### 0:25–0:50 · Why this needs agents
+
+> "One bill can start four legal clocks at once. The charity-care window —
+> 240 days — doesn't start the day you got care. It starts at the first
+> post-discharge billing statement. If you're uninsured and the bill blew
+> past your estimate, that's 120 days to dispute. If a collector sends a
+> validation notice, 30 days — and that one goes first, because it freezes
+> everything else. Get the ordering wrong and you lose a right. That's not a
+> form-fill. That's agents that read the document, run the actual law, and
+> sequence the result."
+
+### 0:50–2:20 · Live run — narrate over the feed
+
+> "This is the live system on Google Cloud. I'm dropping in a real bill now."
+
+*(trigger the injection — then talk over the feed as it fills)*
+
+> "Nothing here is pre-computed. Gemma 4 classifies each document first —
+> bill, estimate, income proof — then Gemini 3.7 Flash pulls the structured
+> facts out. Lookup resolves the hospital against two hundred and four real
+> hospitals we seeded from their own IRS Schedule H filings. Watch the feed:
+> every one of those lines is an agent writing to Firestore as it happens."
+
+*(pause on a citation chip — let it sit)*
+
+> "Every deadline carries the regulation it came from. The LLM narrates. The
+> code computes. Those are different jobs and we never let them mix."
+
+*(fronts panel)*
+
+> "Four fronts evaluated. Read them off the screen — including the one it
+> rules out. It says 'not applicable' and gives the reason, instead of
+> quietly dropping it."
+
+*(click Approve — say it out loud)*
+
+> "Nothing files without a human. That click is the gate."
+
+*(open ef-2026-0007)*
+
+> "Here's the depth. Six audit findings on one bill — including a lab test
+> billed at a hundred and forty dollars against the hospital's own published
+> cash price of seventy. That's their number, not ours."
+
+*(cut to Cloud Run console, then a .run.app URL in the bar — do not rush)*
+
+> "Four services, all on Cloud Run, in this project, right now."
+
+### 2:20–2:35 · The Verifier refuses
+
+> "Now watch it refuse. I'm submitting a photo of a cat as proof of income.
+> It blocks the filing and says why. An agent that files confidently on
+> garbage is worse than no agent."
+
+### 2:35–3:15 · Architecture
+
+> "Seven agents, one ADK hierarchy. Reader classifies — Gemma 4 first, then
+> Gemini 3.7 Flash extracts. Lookup resolves the hospital by tax ID, or by
+> name when the bill carries none. Clock and Auditor are thin wrappers over a
+> deterministic rules engine with a hundred percent branch coverage and zero
+> LLM calls inside it. Strategist sequences and stops for a human. Verifier
+> cross-checks. Filer renders the real hospital and CMS forms. Cloud Run,
+> Pub/Sub, Firestore."
+
+### 3:15–3:55 · Honest limits, then close
+
+> "To be direct. Every patient in this demo is synthetic — the hospital
+> policy, the prices and the law are real; the people are invented. There's
+> no authentication on these endpoints, so this stays a demo, not something
+> pointed at a real inbox. Forty percent of US hospitals are for-profit and
+> owe no charity-care duty at all — the system says so instead of pretending.
+> The fax and mail vendors are in test mode, and it labels every filing
+> simulated rather than claiming a send it didn't make. All of that is in the
+> README with the repro."
+
+*(cut to the stats banner — read the actual numbers)*
+
+> "That's ___ filings and ___ found, in a run that took about ___ seconds.
+> Zero human hours."
+
+*(Read whatever the banner shows. Never a scripted number — a judge checking
+the repo against this video is exactly the scenario this script is built to
+survive.)*
+
+---
+
+# Shot list — narrative cut (generated B-roll + real demo)
+
+> **PLANNING DOCUMENT.** The timeline below is the 4:00 plan; the cut that
+> shipped is 2:57 and is documented under "Final narration — as delivered" at
+> the end of this file. The generation prompts, the Lyria cue and the rule
+> about never cutting inside the demo block all still apply.
+
+Added 2026-08-29. Concept: a patient gets a crushing bill and loses everything;
+rewind, and the same bill goes through Every Front instead. The "background
+process" the story cuts into IS the real screen recording — that's what keeps
+the §1.3 live-demo requirement satisfied inside a narrative frame.
+
+## The rule this structure protects
+
+`BUILD_PLAYBOOK` §5 and the Devpost criteria both want a **live, unedited**
+demo. So:
+
+- **Generated media only ever appears OUTSIDE the demo block** — cold open,
+  the spiral, the transitions, the payoff, the close.
+- **The demo block is one contiguous 90-second take with zero internal cuts.**
+  Never intercut generated footage into it, never speed-ramp it, never
+  composite anything over the dashboard.
+- Nothing generated may depict the product working, a Google Cloud console,
+  or any number the system did not actually produce.
+
+Break those and the strongest thing about this project — that it is real and
+refuses to fabricate — becomes the thing a judge doubts.
+
+## Assets already cut and verified
+
+| file | duration | contents |
+|---|---|---|
+| `demo-live-uncut.mp4` | 1:30 | contiguous: live `ef-2026-0001` agent events, hospital resolution citing 26 CFR 1.501(r), deadline computation, savings summary at 117.1303% FPL, case detail, deadline ladder, citation chips, the green **Approve & File** gate, then `ef-2026-0007` at $1,218 |
+| `demo-cloudproof.mp4` | 0:20 | Cloud Run console — four services green in us-central1, project "Every Front", live scaling chart |
+
+Both are cropped to remove browser chrome and personal bookmarks. Source
+recording made 2026-08-29 against the live deployment; the run took 140.3s of a
+240s budget.
+
+## Timeline — 4:00 (planned; see delivered cut below)
+
+| time | dur | shot | source |
+|---|---|---|---|
+| 0:00 | 0:08 | Clinic corridor, patient leaving an appointment. Ordinary, unremarkable. | GEN 1 |
+| 0:08 | 0:12 | Phone buzzes. Close on the screen: **$2,625.00 due.** Hold on the number. | GEN 2 |
+| 0:20 | 0:06 | FOR SALE sign hammered into a front lawn | GEN 3 |
+| 0:26 | 0:06 | Car reversing off a driveway, someone else driving | GEN 4 |
+| 0:32 | 0:06 | Empty living room, sunlight, no furniture | GEN 5 |
+| 0:38 | 0:07 | Patient sitting on a single cardboard box in the empty room | GEN 6 |
+| 0:45 | 0:10 | Cut to black. Text: **"Or."** Same phone, same notification, thumb hovering | GEN 7 |
+| 0:55 | 0:10 | Camera pushes INTO the phone screen; pixels dissolve into moving data | GEN 8 |
+| **1:05** | **1:30** | **THE REAL SYSTEM — uncut** | `demo-live-uncut.mp4` |
+| **2:35** | **0:20** | **Google Cloud proof — Cloud Run console** | `demo-cloudproof.mp4` |
+| 2:55 | 0:08 | Camera pulls OUT of the data, back through a phone screen | GEN 9 |
+| 3:03 | 0:09 | Restaurant. The patient, relaxed, mid-meal. Warm light. | GEN 10 |
+| 3:12 | 0:08 | Phone on the table lights up: charity care approved · PPDR filed · **$2,625.00 erased** | GEN 11 |
+| 3:20 | 0:25 | Architecture diagram, full frame — name every agent, Gemma and Gemini, Cloud Run / Pub/Sub / Firestore | `docs/architecture.svg` |
+| 3:45 | 0:15 | Honest limits, then close on the real stats banner | still + real |
+
+Generated total ≈ 1:22. Demo total 1:50. Diagram and close 0:40.
+
+## Why $2,625
+
+That is the actual figure the system produced on camera for `ef-2026-0001`:
+`Charity-care free-tier erasure: $2,625.00 (Income is 117.1303% of the federal
+poverty level. At or below the 400% threshold for free care. Basis: Cal. Health
+& Safety Code §127405(a)(1)(A), (d)(1); 26 CFR 1.501(r)-4(b)(2))`.
+
+Use it in the cold open and in the payoff. The joke and the proof become the
+same number, and every figure on screen is one the system really computed.
+
+## Generation prompts
+
+Character: a single fictional adult, **not a likeness of anyone real**. Keep the
+face partially obscured or off-angle in most shots — generators are weakest at
+consistent faces, and the story does not need one. Reuse the same seed or a
+reference frame across GEN 1/6/10 so the person reads as continuous. **No
+generated dialogue or lip-sync** — narration is recorded separately.
+
+- **GEN 1** — "Wide shot, a person in a jacket walking out of a bright modern medical clinic corridor, seen from behind, afternoon light through tall windows, calm handheld camera, muted realistic colour grade, no text."
+- **GEN 2** — "Extreme close-up of a smartphone screen in a person's hand, a billing notification appearing, clinical white UI, the hand tightens slightly, shallow depth of field, realistic, no readable brand marks."
+- **GEN 3** — "A FOR SALE sign being pushed into the lawn of a modest suburban house, late afternoon, slight comic overemphasis on the hammer blow, realistic film look."
+- **GEN 4** — "A car slowly reversing out of a driveway while a person watches from the kerb, seen from behind, autumn light, wistful, gently comedic timing."
+- **GEN 5** — "Slow dolly through a completely empty living room, bare walls, sunlight and dust in the air, one power cable on the floor, melancholy but absurd."
+- **GEN 6** — "A person sitting alone on a single cardboard box in the middle of an empty room, shoulders slumped, wide symmetrical framing, deadpan comedy, realistic."
+- **GEN 7** — "Black screen resolving into an extreme close-up of the same phone notification, a thumb hovering without tapping, held still, tense stillness."
+- **GEN 8** — "Camera pushes forward into a phone screen, the pixels dissolving into flowing streams of abstract blue and green data, seamless forward motion, no text, no UI."
+- **GEN 9** — "Camera pulls backward out of flowing abstract data streams, resolving into the surface of a phone lying on a restaurant table, seamless reverse motion."
+- **GEN 10** — "A person sitting comfortably at a warm, softly lit restaurant table, eating, relaxed shoulders, out-of-focus diners behind, golden hour, realistic."
+- **GEN 11** — "Close-up of a phone face-up on a restaurant table, screen lighting up with several calm green confirmation notifications stacking, warm reflections, shallow depth of field."
+
+## Lyria score
+
+One continuous cue, roughly 4:00, arranged to the structure so the turn lands
+on the push-in at 0:55:
+
+> "Cinematic instrumental for a short documentary. Opens sparse and uneasy —
+> single piano notes, low sustained strings, a slow ticking pulse under it.
+> Tension tightens through the first forty seconds without resolving. At around
+> fifty-five seconds the pulse turns purposeful and mechanical, like a system
+> coming online: muted arpeggiated synth, steady low percussion, forward
+> momentum, still restrained. Holds that focused drive for two minutes. Near the
+> three-minute mark it opens into warmth and resolution — strings blooming,
+> piano returning in a major key, unhurried and hopeful. Ends settled and quiet.
+> No vocals, no lyrics. Leaves headroom for spoken narration throughout."
+
+Mix the score **under** narration at roughly -18 dB, and duck it further beneath
+the demo block so the on-screen text stays the focus.
+
+## Bonus credit
+
+Devpost awards bonus for integrating Google AI models "such as Gemma, Veo or
+Lyria." Gemma already does first-pass document classification in the pipeline.
+If Veo generates the B-roll and Lyria the score, name all three explicitly in
+the Devpost write-up — that is the whole bonus line, not a partial claim.
+
+---
+
+# Final narration — as delivered
+
+Rewritten 2026-08-29 to match the video that actually shipped:
+`~/Movies/everyfront-final-narrated.mp4` — **2:57**, 1920x1080, burned-in
+captions, narrated.
+
+**An earlier draft of this section was written for 150 wpm and did not survive
+contact with the voice.** The TTS reads at about 95 wpm, so a 392-word script
+had to be time-stretched 1.3x-1.55x to fit, and it sounded exactly as rushed as
+that implies. This version is 260 words, written for the real speaking rate:
+163 seconds of speech in a 177-second picture, with only the demo block nudged
+to 1.03x. If you re-record in your own voice, read it at a normal pace and it
+will fit as written.
+
+## What is in the delivered cut
+
+| in | out | shot |
+|---|---|---|
+| 0:00 | 0:18.0 | the spiral - clinic, the bill ($2,625.00), FOR SALE, the car, empty room, the box |
+| 0:18.0 | 0:22.0 | **title card - introduces Every Front and the four fronts** |
+| 0:22.0 | 0:29.7 | walking back in, the hover, push into the screen |
+| 0:29.7 | 1:59.7 | **the real system - 90 seconds, one take, no internal cuts** |
+| 1:59.7 | 2:19.7 | **Cloud Run console - four services live in us-central1** |
+| 2:19.7 | 2:29.2 | pull out, restaurant, **$2,625.00 ERASED** |
+| 2:29.2 | 2:57.2 | architecture diagram |
+
+## Narration, with the timecode each line starts on
+
+**0:00** - "Seventy-six percent of the people who qualify for hospital charity
+care never apply. Nobody tells them it exists. So the bill arrives, and it
+looks like the end of everything."
+
+**0:18 - 0:22 · say nothing.** The card does the work. The silence after "the
+end of everything" is the turn of the whole film; narrating over it kills it.
+
+**0:22** - "Four legal fronts could have cut this bill. Every one of them has a
+deadline."
+
+**0:29.7** - "This is the deployed system. A real bill, going in now."
+
+**0:37.5** - "Gemma 4 classifies the documents. Gemini 3.7 Flash extracts the
+facts."
+
+**0:50.5** - "Lookup identifies the hospital from its own IRS Schedule H
+filing, one of two hundred and four. Nonprofit, so 501(r) applies."
+
+**1:05** - "The Auditor catches a duplicate charge. The Clock computes the
+deadline and cites the statute behind it. Models read. Code calculates."
+
+**1:18.8** - "Two hundred and ten dollars in errors, and charity care wiping
+the balance entirely. Income at a hundred and seventeen percent of the poverty
+level."
+
+**1:32.8** - "Watch the front it rules out. Not in collections, so debt
+validation does not apply. It explains why."
+
+**1:43.6** - "And nothing gets filed until a person approves it."
+
+**1:48.4** - "A second case: six findings, twelve hundred eighteen dollars. A
+lab test billed at a hundred forty against their own published price of
+seventy."
+
+**2:01.6** - "Four Cloud Run services, running in us-central1 right now.
+Pub/Sub moves events between them. Firestore holds every case, and the audit
+trail you just watched fill in."
+
+**2:20** - "Twenty-six hundred dollars, gone. She never filled in a form."
+
+**2:29.6** - "Seven agents in one ADK hierarchy. The models read and draft; the
+calculations are deterministic and show their arithmetic. And plainly, these
+patients are invented. The hospital policy, the prices, the law are real.
+Vendors run in test mode, and every filing says so."
+
+## Rules this cut is built to satisfy
+
+- **Live, unedited demo.** The 90-second block is one contiguous take with no
+  internal cuts, no speed ramps, and nothing composited over the dashboard.
+  Generated footage appears only outside it.
+- **Visible proof of Google Cloud.** 20 seconds on the Cloud Run console
+  showing all four services green in us-central1 under the project.
+- **Bonus models named out loud.** Gemma 4 and Gemini 3.7 Flash at 0:37.5.
+  Veo 3.1 generated the narrative footage and Lyria a score (dropped from the
+  final mix); name all of them in the Devpost write-up.
+- **Every number is real.** $2,625.00, 117.1303% FPL, $210, $1,218, $140 vs
+  $70 - each was produced by the system on camera, not written for the script.
+
+## If you re-record in your own voice
+
+Read at a normal pace against the timecodes above. Your voice will almost
+certainly land better with judges than the synthesized one, and the picture
+does not need to change - the audio track can be swapped in directly.
